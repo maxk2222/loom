@@ -43,7 +43,7 @@ export default function MonitoringPage() {
               <CartesianGrid stroke="#1f2a36" strokeDasharray="3 3" />
               <XAxis dataKey="project" stroke="#8b9bad" fontSize={12} />
               <YAxis stroke="#8b9bad" fontSize={12} />
-              <Tooltip contentStyle={TOOLTIP_STYLE} />
+              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={TOOLTIP_STYLE} />
               <Bar dataKey="requests" fill="#5b8def" radius={[3, 3, 0, 0]} />
               <Bar dataKey="tokens" fill="#3fb96c" radius={[3, 3, 0, 0]} />
             </BarChart>
