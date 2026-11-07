@@ -19,6 +19,7 @@ use axum::{
 use loom_core::ids::{opaque_token, sha256_hex};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::Digest;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,12 +33,18 @@ pub struct AdminState {
     pub scheduler: Scheduler,
     pub settings: Settings,
     pub events: EventBus,
+    pub sessions: Arc<crate::session::SessionManager>,
+    /// Release-manifest cache (key → fetched-at + payload), avoids hammering
+    /// the GitHub API once per client poll.
+    pub release_cache:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Value)>>>,
 }
 
 pub fn router(s: AdminState) -> Router {
     let public = Router::new()
         .route("/api/branding", get(branding))
         .route("/api/update-check", get(update_check))
+        .route("/api/releases/manifest", get(release_manifest))
         .route("/api/branding/logo.{ext}", get(brand_logo))
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup/admin", post(setup_admin))
@@ -70,6 +77,8 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/clients", get(list_clients))
         .route("/api/clients/{id}", get(client_detail))
         .route("/api/clients/{id}/status", post(client_status))
+        .route("/api/clients/{id}/update", post(push_client_update))
+        .route("/api/server/update", post(server_update))
         .route("/api/enroll-tokens", post(issue_enroll_token))
         // deployments
         .route("/api/deployments", get(list_deployments))
@@ -1140,6 +1149,286 @@ async fn update_check() -> Json<Value> {
         "latest": latest.as_ref().and_then(|v| v["tag_name"].as_str().map(String::from)),
         "url": latest.as_ref().and_then(|v| v["html_url"].as_str().map(String::from)),
     }))
+}
+
+// ---------------- releases / updater ----------------
+
+/// Resolve the GitHub release repo from settings (default: upstream LOOM).
+async fn release_repo(s: &AdminState) -> String {
+    s.settings
+        .get("release_repo")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_str().map(String::from))
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "maxk2222/loom".into())
+}
+
+/// Public manifest endpoint polled by clients (and the server self-update):
+/// resolves the latest GitHub release for kind/channel/arch into the manifest
+/// contract `loom_client::updater` expects. Asset naming:
+/// `loom-{kind}-{version}-{arch}` + `.sha256` + `.minisig` sidecars.
+/// 404 when no matching signed artifact exists.
+async fn release_manifest(
+    State(s): State<AdminState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let kind = q.get("kind").cloned().unwrap_or_else(|| "client".into());
+    let channel = q.get("channel").cloned().unwrap_or_else(|| "stable".into());
+    let arch = q.get("arch").cloned().unwrap_or_default();
+    if !matches!(kind.as_str(), "client" | "server") || arch.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let cache_key = format!("{kind}|{channel}|{arch}");
+    if let Some((at, v)) = s.release_cache.lock().unwrap().get(&cache_key) {
+        if at.elapsed() < std::time::Duration::from_secs(600) {
+            return Ok(Json(v.clone()));
+        }
+    }
+    let repo = release_repo(&s).await;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("loom-server")
+        .build()
+        .unwrap_or_default();
+    let release = fetch_release(&http, &repo, &channel)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let version = release["tag_name"]
+        .as_str()
+        .unwrap_or_default()
+        .trim_start_matches('v')
+        .to_string();
+    let base_name = format!("loom-{kind}-{version}-{arch}");
+    let assets = release["assets"].as_array().cloned().unwrap_or_default();
+    let find = |suffix: &str| {
+        assets.iter().find_map(|a| {
+            let name = a["name"].as_str()?;
+            if name == format!("{base_name}{suffix}") {
+                a["browser_download_url"].as_str().map(String::from)
+            } else {
+                None
+            }
+        })
+    };
+    let (Some(bin), Some(sum), Some(sig)) = (find(""), find(".sha256"), find(".minisig")) else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let sha = fetch_text(&http, &sum).await.unwrap_or_default();
+    let signature = fetch_text(&http, &sig).await.unwrap_or_default();
+    if sha.is_empty() || signature.is_empty() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let out = json!({
+        "version": version,
+        "channel": channel,
+        "url": bin,
+        "sha256": sha.split_whitespace().next().unwrap_or(""),
+        "signature": signature,
+        "min_version_protocol": loom_protocol::limits::PROTOCOL_VERSION_MIN,
+    });
+    s.release_cache
+        .lock()
+        .unwrap()
+        .insert(cache_key, (std::time::Instant::now(), out.clone()));
+    Ok(Json(out))
+}
+
+async fn fetch_release(http: &reqwest::Client, repo: &str, channel: &str) -> Option<Value> {
+    if channel == "stable" {
+        return http
+            .get(format!(
+                "https://api.github.com/repos/{repo}/releases/latest"
+            ))
+            .send()
+            .await
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()
+            .filter(|v| v["tag_name"].is_string());
+    }
+    let list = http
+        .get(format!("https://api.github.com/repos/{repo}/releases"))
+        .send()
+        .await
+        .ok()?
+        .json::<Vec<Value>>()
+        .await
+        .ok()?;
+    list.into_iter().find(|r| {
+        let tag = r["tag_name"].as_str().unwrap_or_default();
+        tag.contains(&format!("-{channel}")) || tag.starts_with(&format!("{channel}-"))
+    })
+}
+
+async fn fetch_text(http: &reqwest::Client, url: &str) -> Option<String> {
+    http.get(url)
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+/// Roll out a client update: bump config_version, merge an `update_now`
+/// directive into desired_config and push it live over the control stream
+/// (clients also pick it up via GetConfig on their next session).
+async fn push_client_update(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    // jsonb_set only creates the *last* missing path element — ensure the
+    // intermediate `client` object exists first, then merge `updater` into it
+    // (keeps other desired client fields intact).
+    let row: Option<(i64, Value)> = sqlx::query_as(
+        "UPDATE clients SET desired_config = jsonb_set(
+             jsonb_set(COALESCE(desired_config,'{}'::jsonb), '{client}', COALESCE(desired_config->'client','{}'::jsonb), true),
+             '{client,updater}', '{\"update_now\":true}'::jsonb, true),
+             config_version = config_version + 1
+         WHERE id = $1::uuid RETURNING config_version, desired_config",
+    )
+    .bind(&id)
+    .fetch_optional(&s.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let Some((version, desired)) = row else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let payload = serde_json::to_vec(&desired).unwrap_or_else(|_| b"{}".to_vec());
+    let live = s
+        .sessions
+        .send(
+            &id,
+            loom_protocol::server_msgs::config_push(version.max(0) as u64, payload, false),
+        )
+        .await
+        .is_ok();
+    let _ = sqlx::query(
+        "INSERT INTO config_versions (entity, entity_id, change, actor) VALUES ($1,$2,$3,'admin')",
+    )
+    .bind("client")
+    .bind(&id)
+    .bind(json!({"update_now": true}))
+    .execute(&s.db)
+    .await;
+    Ok(Json(json!({ "ok": true, "live": live })))
+}
+
+/// Server self-update: download + verify + stage the `loom-server` release for
+/// this platform, then exit — the supervisor (systemd/launchd/docker restart
+/// policy) brings the new binary up. Cannot update while running on Windows.
+async fn server_update(State(s): State<AdminState>) -> Json<Value> {
+    #[cfg(windows)]
+    return Json(json!({ "ok": false, "error": "self-update unsupported on windows" }));
+    #[cfg(not(windows))]
+    {
+        let base = public_base(&s).await;
+        let channel = "stable";
+        let arch = server_arch();
+        let url = format!("{base}/api/releases/manifest?kind=server&channel={channel}&arch={arch}");
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .user_agent("loom-server")
+            .build()
+            .unwrap_or_default();
+        let mf: Value = match http.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+            _ => return Json(json!({ "ok": false, "error": "no release for this platform" })),
+        };
+        let Some(bin_url) = mf["url"].as_str().map(String::from) else {
+            return Json(json!({ "ok": false, "error": "manifest missing url" }));
+        };
+        let key = std::env::var("LOOM_UPDATE_PUBKEY").unwrap_or_default();
+        if key.is_empty() {
+            return Json(
+                json!({ "ok": false, "error": "set LOOM_UPDATE_PUBKEY to the release signing key" }),
+            );
+        }
+        let bytes = match http
+            .get(&bin_url)
+            .timeout(std::time::Duration::from_secs(300))
+            .send()
+            .await
+        {
+            Ok(r) => r.bytes().await.unwrap_or_default(),
+            Err(_) => return Json(json!({ "ok": false, "error": "download failed" })),
+        };
+        if bytes.is_empty() {
+            return Json(json!({ "ok": false, "error": "download failed" }));
+        }
+        let want = mf["sha256"].as_str().unwrap_or_default();
+        let got = hex::encode(sha2::Sha256::digest(&bytes));
+        if !got.eq_ignore_ascii_case(want) {
+            return Json(json!({ "ok": false, "error": "sha256 mismatch" }));
+        }
+        let sig_str = mf["signature"].as_str().unwrap_or_default();
+        let ok_sig = (|| -> anyhow::Result<()> {
+            let pubkey = minisign_verify::PublicKey::from_base64(&key)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let sig =
+                minisign_verify::Signature::decode(sig_str).map_err(|e| anyhow::anyhow!("{e}"))?;
+            pubkey
+                .verify(&bytes, &sig, false)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        })();
+        if let Err(e) = ok_sig {
+            return Json(json!({ "ok": false, "error": format!("signature: {e}") }));
+        }
+        // Swap: current_exe → .prev, staged → current_exe, then exit(0).
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => return Json(json!({ "ok": false, "error": e.to_string() })),
+        };
+        let staged = exe.with_extension("new");
+        let prev = exe.with_extension("prev");
+        if let Err(e) = std::fs::write(&staged, &bytes) {
+            return Json(json!({ "ok": false, "error": e.to_string() }));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
+        }
+        if let Err(e) = std::fs::rename(&exe, &prev) {
+            return Json(json!({ "ok": false, "error": e.to_string() }));
+        }
+        if let Err(e) = std::fs::rename(&staged, &exe) {
+            let _ = std::fs::rename(&prev, &exe);
+            return Json(json!({ "ok": false, "error": e.to_string() }));
+        }
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            std::process::exit(0);
+        });
+        Json(json!({ "ok": true, "restarting": true }))
+    }
+}
+
+fn server_arch() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
+        ("macos", "aarch64") => "macos-aarch64",
+        ("macos", "x86_64") => "macos-x86_64",
+        _ => "unknown",
+    }
+}
+
+/// Own HTTP base for self-requests (settings `public_base` or bind-derived).
+async fn public_base(s: &AdminState) -> String {
+    s.settings
+        .get("public_base")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_str().map(String::from))
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8080".into())
 }
 
 #[cfg(test)]

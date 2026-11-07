@@ -1,0 +1,85 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  arch: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, arch: linux-aarch64 }
+          - { os: macos-latest,     target: aarch64-apple-darwin,      arch: macos-aarch64 }
+          - { os: macos-13,         target: x86_64-apple-darwin,       arch: macos-x86_64 }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,    arch: windows-x86_64 }
+          - { os: windows-11-arm,   target: aarch64-pc-windows-msvc,   arch: windows-aarch64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend (embedded assets)
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+          npm run build:client
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build binaries
+        run: cargo build --release -p loom-server -p loom-client --target ${{ matrix.target }}
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          out="out"; mkdir -p "$out"
+          bin="target/${{ matrix.target }}/release"
+          ext=""; case "${{ matrix.arch }}" in windows-*) ext=".exe";; esac
+          for kind in server client; do
+            name="loom-${kind}-${ver}-${{ matrix.arch }}"
+            cp "${bin}/loom-${kind}${ext}" "${out}/${name}"
+            chmod +x "${out}/${name}" 2>/dev/null || true
+            (cd "$out" && sha256sum "${name}" | awk '{print $1}' > "${name}.sha256")
+          done
+          ls -la "$out"
+
+      - uses: taiki-e/install-action@minisign
+
+      - name: Sign artifacts (minisign)
+        shell: bash
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::warning::MINISIGN_SECRET_KEY not set — artifacts unsigned, updater will refuse them"
+            exit 0
+          fi
+          printf '%s' "${MINISIGN_SECRET_KEY}" > /tmp/loom-release.key
+          chmod 600 /tmp/loom-release.key
+          for f in out/loom-*; do
+            case "$f" in *.sha256|*.minisig) continue;; esac
+            minisign -Sm "$f" -s /tmp/loom-release.key -x "${f}.minisig" -W
+          done
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*

@@ -31,6 +31,7 @@ semver.workspace = true
 bytes.workspace = true
 argon2.workspace = true
 sha2.workspace = true
+minisign-verify.workspace = true
 subtle.workspace = true
 hex.workspace = true
 rand.workspace = true

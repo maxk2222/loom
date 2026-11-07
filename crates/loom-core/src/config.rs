@@ -179,6 +179,14 @@ pub struct UpdaterConfig {
     /// Automatically apply updates when found (default: manual).
     #[serde(default)]
     pub auto_apply: bool,
+    /// minisign public key (base64) used to verify release artifacts.
+    /// Empty = built-in LOOM release key; set to pin your own signing key.
+    #[serde(default)]
+    pub public_key: String,
+    /// HTTP base of the server's dashboard/API used to fetch the release
+    /// manifest. Empty = derived from `server_url` (grpc port → http port).
+    #[serde(default)]
+    pub server_base: String,
 }
 
 fn default_channel() -> String {
@@ -191,6 +199,8 @@ impl Default for UpdaterConfig {
             enabled: false,
             channel: default_channel(),
             auto_apply: false,
+            public_key: String::new(),
+            server_base: String::new(),
         }
     }
 }
@@ -312,6 +322,20 @@ pub struct DesiredClientFields {
     pub sharing_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
+    /// Updater directives pushed by the admin (roll-out a release).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updater: Option<DesiredUpdater>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DesiredUpdater {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_apply: Option<bool>,
+    /// Trigger an update check + apply right now (one-shot, not persisted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_now: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------

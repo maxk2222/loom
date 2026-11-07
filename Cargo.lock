@@ -2100,6 +2100,7 @@ dependencies = [
  "loom-testkit",
  "metrics",
  "metrics-exporter-prometheus",
+ "minisign-verify",
  "pin-project-lite",
  "rand 0.8.8",
  "rcgen",

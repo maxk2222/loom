@@ -106,6 +106,43 @@ async fn async_main() -> anyhow::Result<()> {
         sessions: Default::default(),
     };
 
+    // Auto-updater: periodic manifest check when enabled. Manual/admin
+    // triggers go through the same run_once path (local API / ConfigPush).
+    {
+        let cfg_store = cfg_store.clone();
+        let stage_dir = config_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        tokio::spawn(async move {
+            let mut first = true;
+            loop {
+                let cfg = cfg_store.get().await;
+                if cfg.updater.enabled {
+                    match loom_client::updater::run_once(
+                        &cfg.updater,
+                        &cfg.server_url,
+                        env!("CARGO_PKG_VERSION"),
+                        &stage_dir,
+                        false,
+                    )
+                    .await
+                    {
+                        Ok(st) if st.update_available => {
+                            info!(version = ?st.latest_version, "update available (auto_apply off)")
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::debug!(error = %e, "update check failed"),
+                    }
+                }
+                // first tick after a short delay, then every 30 min
+                let delay = if first { 60 } else { 30 * 60 };
+                first = false;
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+            }
+        });
+    }
+
     // Metrics listener (optional).
     if let Some(bind) = args
         .metrics_bind

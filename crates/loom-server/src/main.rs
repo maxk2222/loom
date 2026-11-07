@@ -161,6 +161,8 @@ async fn main() -> anyhow::Result<()> {
         scheduler: sched.clone(),
         settings: settings.clone(),
         events: events.clone(),
+        sessions: sessions.clone(),
+        release_cache: Default::default(),
     });
     let pool2 = pool.clone();
     let rt2 = rt.clone();

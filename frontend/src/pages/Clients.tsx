@@ -23,6 +23,11 @@ export default function ClientsPage() {
 
   const setStatus = async (id: string, status: string) => {
     await api.post(`/api/clients/${id}/status`, { status });
+    await q.refetch();
+  };
+  const pushUpdate = async (id: string) => {
+    const r = await api.post<{ live?: boolean }>(`/api/clients/${id}/update`).catch(() => null);
+    if (r) alert(r.live ? "Update pushed to the live session." : "Update queued — applies on the client's next check-in.");
     q.refetch();
   };
 
@@ -48,11 +53,19 @@ export default function ClientsPage() {
                   <td className="td text-muted">{c.platform || "—"}</td>
                   <td className="td text-muted">{c.last_seen_at ? new Date(c.last_seen_at).toLocaleString() : "—"}</td>
                   <td className="td text-right">
-                    {c.status === "active" ? (
-                      <button className="btn-outline py-1 text-xs" onClick={() => setStatus(c.id, "suspended")}>Suspend</button>
-                    ) : (
-                      <button className="btn-outline py-1 text-xs" onClick={() => setStatus(c.id, "active")}>Activate</button>
-                    )}
+                    <span className="inline-flex gap-2">
+                      {c.online && (
+                        <button className="btn-outline py-1 text-xs" onClick={() => pushUpdate(c.id)}
+                          title="Push a client update (downloads + verifies the latest release, then restarts)">
+                          Update
+                        </button>
+                      )}
+                      {c.status === "active" ? (
+                        <button className="btn-outline py-1 text-xs" onClick={() => setStatus(c.id, "suspended")}>Suspend</button>
+                      ) : (
+                        <button className="btn-outline py-1 text-xs" onClick={() => setStatus(c.id, "active")}>Activate</button>
+                      )}
+                    </span>
                   </td>
                 </tr>
               ))}

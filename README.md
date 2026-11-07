@@ -269,7 +269,31 @@ deployments re-warm right away and rejoin once resident again.
   logs, or metrics
 - gRPC fencing tokens make stale assignments harmless after reconnects
 
-### 📟 The dashboard
+### � Auto-updates (server-triggered, signature-verified)
+
+Tagged releases (`v*`) build signed binaries for Linux/macOS/Windows on
+x86-64 and ARM64 via `.github/workflows/release.yml`. Artifacts are
+`loom-{client,server}-{version}-{os-arch}` + `.sha256` + `.minisig`
+(minisign/ed25519) — clients refuse unsigned or mismatched payloads.
+
+- **Clients**: `updater.enabled` in `config.toml` polls the server's public
+  `/api/releases/manifest?channel&arch` every 30 min (manifest is a cached
+  GitHub-release proxy; `release_repo` setting overrides the repo).
+  `updater.auto_apply` applies automatically; otherwise use **Update** on
+  the admin Clients page or `POST /local/api/update`. Roll-out is pushed
+  live over the control stream (`ConfigPush` → `update_now`) and also lands
+  via `GetConfig` on the next session.
+- **Apply**: download → sha256 + minisign verify → atomic binary swap
+  (`.prev` backup kept for manual rollback) → exit; systemd/launchd/docker
+  `Restart=always` brings the new version up.
+- **Server**: `POST /api/server/update` runs the same verify+swap+exit on
+  the server binary (not on Windows — replace the binary manually there).
+- Keys: the built-in release public key is embedded; pin your own via
+  `updater.public_key` / `LOOM_UPDATE_PUBKEY`. CI signs when the
+  `MINISIGN_SECRET_KEY` repo secret is set (generate with
+  `minisign -G -p loom-release.pub -s loom-release.key -W`).
+
+### �📟 The dashboard
 
 Dark-only, zero build config needed at deploy time: live client status, queue
 depths, virtual-model editor with member management, project/API-key/user

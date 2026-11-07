@@ -160,6 +160,16 @@ impl Agent for AgentSvc {
                             applied = a.applied,
                             "config ack"
                         );
+                        if a.applied {
+                            // Consume one-shot directives (update_now) so they
+                            // don't re-fire on the next GetConfig pull.
+                            let _ = sqlx::query(
+                                "UPDATE clients SET desired_config = desired_config #- '{client,updater,update_now}' WHERE id = $1::uuid",
+                            )
+                            .bind(&client_id)
+                            .execute(&this.registry.db)
+                            .await;
+                        }
                     }
                     client_envelope::Msg::Pong(_) => {}
                     client_envelope::Msg::Hello(_) => {}

@@ -50,15 +50,27 @@ const CLIENT_NAV: NavItem[] = [
 
 function UpdateChip() {
   const [res, setRes] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const isClient = APP_VARIANT === "client";
   const check = async () =>
-    setRes(await api.get<any>(APP_VARIANT === "client" ? "/local/api/update-check" : "/api/update-check").catch(() => null));
+    setRes(await api.get<any>(isClient ? "/local/api/update-check" : "/api/update-check").catch(() => null));
+  const apply = async () => {
+    setBusy(true);
+    await api.post(isClient ? "/local/api/update" : "/api/server/update").catch(() => null);
+  };
   if (!res)
     return <button className="btn-ghost px-2 py-0.5 text-[11px]" onClick={check}>check update</button>;
   const newer = res.latest && res.latest.replace(/^v/, "") !== res.current;
   return newer ? (
-    <a className="badge bg-warn/12 text-warn" href={res.url} target="_blank" rel="noreferrer">
-      ⬆ {res.latest}
-    </a>
+    <span className="inline-flex items-center gap-1.5">
+      <a className="badge bg-warn/12 text-warn" href={res.url} target="_blank" rel="noreferrer">
+        ⬆ {res.latest}
+      </a>
+      <button className="btn-ghost px-1.5 py-0.5 text-[10px]" disabled={busy} onClick={apply}
+        title="Apply update now (downloads, verifies and restarts)">
+        {busy ? "…" : "apply"}
+      </button>
+    </span>
   ) : (
     <Badge tone="ok">up to date</Badge>
   );
@@ -117,7 +129,7 @@ export default function Layout() {
               {brand.app_name}
             </div>
             <div className="truncate text-[10px] leading-tight text-muted">
-              {APP_VARIANT === "client" ? "Workstation Client" : brand.tagline}
+              {APP_VARIANT === "client" ? "Workstation Client" : "Server Dashboard"}
             </div>
           </div>
         </div>

@@ -477,6 +477,49 @@ impl Connector {
             );
         }
         self.notify_capacity();
+
+        // Updater directives: persist enabled/auto_apply, and fire a one-shot
+        // update run when the admin pushed `update_now`.
+        if let Some(up) = &desired.client.updater {
+            if up.enabled.is_some() || up.auto_apply.is_some() {
+                let enabled = up.enabled;
+                let auto_apply = up.auto_apply;
+                self.state
+                    .cfg_store
+                    .update(|c| {
+                        if let Some(v) = enabled {
+                            c.updater.enabled = v;
+                        }
+                        if let Some(v) = auto_apply {
+                            c.updater.auto_apply = v;
+                        }
+                    })
+                    .await?;
+            }
+            if up.update_now == Some(true) {
+                let cfg_store = self.state.cfg_store.clone();
+                tokio::spawn(async move {
+                    let cfg = cfg_store.get().await;
+                    let dir = cfg_store
+                        .path()
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    match crate::updater::run_once(
+                        &cfg.updater,
+                        &cfg.server_url,
+                        env!("CARGO_PKG_VERSION"),
+                        &dir,
+                        true,
+                    )
+                    .await
+                    {
+                        Ok(st) => tracing::info!(?st, "admin-triggered update check done"),
+                        Err(e) => tracing::warn!(error = %e, "admin-triggered update failed"),
+                    }
+                });
+            }
+        }
         Ok(())
     }
 

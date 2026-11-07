@@ -9,7 +9,7 @@ use crate::telemetry;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -157,6 +157,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/local/api/metrics", get(admin_metrics))
         .route("/local/api/update-check", get(admin_update_check))
+        .route("/local/api/update", post(admin_update_apply))
         .route("/local/api/auth/status", get(auth_status))
         .route("/local/api/auth/setup", post(local_setup))
         .route("/local/api/auth/skip", post(local_skip))
@@ -848,6 +849,55 @@ async fn admin_update_check() -> Json<Value> {
         "latest": latest.as_ref().map(|r| r.0.clone()),
         "url": latest.as_ref().map(|r| r.1.clone()),
     }))
+}
+
+/// Manual update trigger: checks the server manifest and applies a pending
+/// release (`apply_staged` + process exit; the supervisor restarts us).
+/// `?apply=0` only reports whether an update is available.
+async fn admin_update_apply(
+    State(s): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Json<Value> {
+    let cfg = s.cfg.get().await;
+    if q.get("apply").map(|v| v.as_str()) == Some("0") {
+        let base = crate::updater::manifest_base(&cfg.updater, &cfg.server_url);
+        if base.is_empty() {
+            return Json(json!({ "ok": false, "error": "no server configured" }));
+        }
+        return match crate::updater::check_for_update(
+            &base,
+            &cfg.updater.channel,
+            crate::updater::arch(),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await
+        {
+            Ok((st, _)) => Json(serde_json::to_value(st).unwrap_or_default()),
+            Err(e) => Json(json!({ "ok": false, "error": e.to_string() })),
+        };
+    }
+    let dir = s
+        .cfg
+        .path()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // On success run_once swaps the binary and exits — reply first.
+    let cfg2 = cfg.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::updater::run_once(
+            &cfg2.updater,
+            &cfg2.server_url,
+            env!("CARGO_PKG_VERSION"),
+            &dir,
+            true,
+        )
+        .await
+        {
+            warn!(error = %e, "manual update failed");
+        }
+    });
+    Json(json!({ "ok": true, "applying": true }))
 }
 
 pub(crate) async fn fetch_latest_release() -> Option<(String, String)> {
