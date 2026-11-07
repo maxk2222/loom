@@ -21,6 +21,7 @@ fn dep(id: &str, model: &str, max_concurrent: u32, tier2_max: u32) -> Deployment
         max_concurrent,
         local_reserve: 0,
         tier2_max,
+        auto_load: false,
         sharing_mode: SharingMode::Shared,
         enabled: true,
     }
