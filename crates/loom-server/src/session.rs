@@ -45,11 +45,19 @@ impl SessionManager {
     }
 
     pub async fn send(&self, client_id: &str, msg: ServerEnvelope) -> Result<(), &'static str> {
-        let inner = self.inner.lock().await;
-        let Some(tx) = inner.sessions.get(client_id) else {
+        // Clone the sender under a short lock — awaiting a full channel while
+        // holding the session map would wedge every session operation.
+        let tx = {
+            let inner = self.inner.lock().await;
+            inner.sessions.get(client_id).cloned()
+        };
+        let Some(tx) = tx else {
             return Err("client not connected");
         };
-        tx.send(msg).await.map_err(|_| "control stream closed")
+        tokio::time::timeout(std::time::Duration::from_secs(3), tx.send(msg))
+            .await
+            .map_err(|_| "control stream slow")?
+            .map_err(|_| "control stream closed")
     }
 
     pub async fn connected(&self, client_id: &str) -> bool {

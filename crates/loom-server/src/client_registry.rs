@@ -147,6 +147,32 @@ impl ClientRegistry {
             upsert_deployment(&self.db, client_id, d).await?;
             write_dep_runtime(&mut c, &self.rt, client_id, d, None).await?;
         }
+        // Deployments no longer reported by the client → disable them so they
+        // leave the routing pool (soft-delete: usage/history keep FK refs).
+        let reported: Vec<String> = inv
+            .deployments
+            .iter()
+            .map(|d| d.deployment_id.clone())
+            .collect();
+        let stale: Vec<String> = sqlx::query_scalar(
+            "UPDATE deployments SET enabled=false, updated_at=now()
+             WHERE client_id=$1::uuid AND enabled=true AND NOT (id::text = ANY($2))
+             RETURNING id::text",
+        )
+        .bind(client_id)
+        .bind(&reported)
+        .fetch_all(&self.db)
+        .await
+        .unwrap_or_default();
+        for dep_id in &stale {
+            let _: () = redis::cmd("HSET")
+                .arg(self.rt.k(&format!("dep:{dep_id}")))
+                .arg("state")
+                .arg("unavailable")
+                .query_async(&mut c)
+                .await
+                .unwrap_or(());
+        }
         self.apply_capacity(client_id, &inv.capacities).await?;
         Ok(())
     }

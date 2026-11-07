@@ -234,7 +234,7 @@ impl Scheduler {
         if self.class_queue_empty(req.prio).await {
             match self.try_dispatch(&req).await {
                 Ok(o) => return Ok(o),
-                Err(SchedErr::NoCapacity) | Err(SchedErr::NoCandidates) => {}
+                Err(SchedErr::NoCapacity) => {}
                 Err(e) => return Err(e),
             }
         }
@@ -310,8 +310,10 @@ impl Scheduler {
     pub fn spawn_dispatch_loop(&self) {
         let sched = self.clone();
         tokio::spawn(async move {
+            tracing::info!("dispatch loop started");
             loop {
                 sched.inner.wake.notified().await;
+                tracing::debug!("dispatch wake fired");
                 sched.dispatch_pending().await;
             }
         });
@@ -372,12 +374,15 @@ impl Scheduler {
             let keys: Vec<String> = (0..self.inner.cfg.priority_classes.max(1))
                 .map(|p| self.inner.rt.k(&format!("queue:{p}")))
                 .collect();
-            let popped: Option<String> = redis::Script::new(crate::lua::QUEUE_POP)
+            let popped: Result<Option<String>, _> = redis::Script::new(crate::lua::QUEUE_POP)
                 .key(keys)
                 .invoke_async(&mut c)
-                .await
-                .unwrap_or(None);
-            let Some(rid) = popped else { return };
+                .await;
+            match &popped {
+                Err(e) => tracing::warn!(error=%e, "queue_pop failed"),
+                Ok(v) => tracing::debug!(popped=?v, "queue_pop result"),
+            }
+            let Ok(Some(rid)) = popped else { return };
             let _: () = redis::pipe()
                 .cmd("DECR")
                 .arg(self.inner.rt.k("queue:count"))
@@ -391,19 +396,29 @@ impl Scheduler {
                 .unwrap_or(());
             let entry = self.inner.pending.lock().await.remove(&rid);
             let Some(e) = entry else { continue };
-            match self.try_dispatch(&e.req).await {
+            let outcome = tokio::time::timeout(
+                Duration::from_millis(self.inner.cfg.assign_ack_timeout_ms.max(5000) + 30_000),
+                self.try_dispatch(&e.req),
+            )
+            .await
+            .map_err(|_| SchedErr::Timeout)
+            .and_then(|r| r);
+            match outcome {
                 Ok(outcome) => {
                     let _ = e.done_tx.send(Ok(outcome));
                 }
-                Err(SchedErr::NoCapacity) | Err(SchedErr::NoCandidates) => {
-                    // requeue preserving FIFO position — pending entry goes
-                    // back first, then the queue re-enqueue (see enqueue_and_wait).
+                Err(SchedErr::NoCapacity) => {
+                    // transient — all candidates busy/unavailable: requeue
+                    // preserving FIFO position (pending first, then enqueue).
                     if self.requeue(e, &rid).await {
                         return; // capacity exhausted → stop dispatching
                     }
                     continue;
                 }
                 Err(err) => {
+                    // NoCandidates is structural (no member can serve this
+                    // API/caps) — fail fast instead of requeueing for the
+                    // full queue timeout.
                     let _ = e.done_tx.send(Err(err));
                 }
             }
