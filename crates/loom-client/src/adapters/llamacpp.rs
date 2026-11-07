@@ -44,6 +44,11 @@ impl BackendAdapter for LlamaCppAdapter {
         self.generic.list_models().await
     }
 
+    /// llama.cpp (router mode) lists only loaded models via /v1/models.
+    async fn loaded_models(&self) -> Option<Vec<String>> {
+        self.generic.list_models().await.ok()
+    }
+
     async fn probe_capabilities(&self, model: &str) -> Result<Capabilities, AdapterError> {
         self.generic.probe_capabilities(model).await
     }

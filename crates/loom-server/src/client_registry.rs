@@ -52,12 +52,17 @@ impl ClientRegistry {
                 if status != "active" {
                     return Ok(None);
                 }
+                // Name renames propagate on reconnect — skip silently when
+                // the desired name is already taken by another client.
                 sqlx::query(
-                    "UPDATE clients SET last_seen_at = now(), version = $2, platform = $3 WHERE id = $1",
+                    "UPDATE clients SET last_seen_at = now(), version = $2, platform = $3,
+                     name = CASE WHEN $4 <> '' AND NOT EXISTS (SELECT 1 FROM clients WHERE name = $4 AND id <> $1) THEN $4 ELSE name END
+                     WHERE id = $1",
                 )
                 .bind(id)
                 .bind(version)
                 .bind(platform)
+                .bind(name)
                 .execute(&self.db)
                 .await?;
                 return Ok(Some((id.to_string(), String::new())));

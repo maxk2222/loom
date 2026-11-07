@@ -151,7 +151,10 @@ pub fn router(state: AppState) -> Router {
             get(admin_get_sharing).put(admin_put_sharing),
         )
         .route("/local/api/reprobe", post(admin_reprobe))
-        .route("/local/api/connection", get(admin_connection))
+        .route(
+            "/local/api/connection",
+            get(admin_connection).put(admin_put_connection),
+        )
         .route("/local/api/metrics", get(admin_metrics))
         .route("/local/api/update-check", get(admin_update_check))
         .route("/local/api/auth/status", get(auth_status))
@@ -520,6 +523,12 @@ async fn admin_put_config(State(s): State<AppState>, Json(body): Json<PutConfigB
             s.scheduler.sync_deployments(&dep_cfgs);
             s.scheduler.set_sharing_enabled(new_cfg.sharing_enabled);
             s.connector.notify_capacity();
+            if new_cfg.name != current.name
+                || new_cfg.server_url != current.server_url
+                || new_cfg.connect_enabled != current.connect_enabled
+            {
+                s.connector.notify_reconnect();
+            }
             Json(json!({"ok": true})).into_response()
         }
         Err(e) => err(ErrorCode::Internal, e.to_string(), "admin"),
@@ -771,10 +780,52 @@ async fn admin_reprobe(State(s): State<AppState>) -> Json<Value> {
 
 async fn admin_connection(State(s): State<AppState>) -> Json<Value> {
     let session = s.connector.state().session_id.read().unwrap().clone();
+    let cfg = s.cfg.get().await;
     Json(json!({
         "connected": s.connector.is_connected(),
         "session_id": session,
+        "name": cfg.name,
+        "server_url": cfg.server_url,
+        "client_id": cfg.client_id,
+        "enabled": cfg.connect_enabled,
     }))
+}
+
+/// Update identity/connectivity fields shown in the dashboard. Changing the
+/// name or toggling the connection drops the session so the next hello
+/// carries the fresh values.
+async fn admin_put_connection(State(s): State<AppState>, Json(b): Json<Value>) -> Response {
+    let name = b.get("name").and_then(|v| v.as_str()).map(str::to_string);
+    let url = b
+        .get("server_url")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let enabled = b.get("enabled").and_then(|v| v.as_bool());
+    if let Some(n) = &name {
+        if n.trim().is_empty() || n.len() > 128 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"name must be 1..128 chars"})),
+            )
+                .into_response();
+        }
+    }
+    let _ = s
+        .cfg
+        .update(|c| {
+            if let Some(n) = name {
+                c.name = n.trim().to_string();
+            }
+            if let Some(u) = url {
+                c.server_url = u.trim().to_string();
+            }
+            if let Some(e) = enabled {
+                c.connect_enabled = e;
+            }
+        })
+        .await;
+    s.connector.notify_reconnect();
+    Json(json!({"ok":true})).into_response()
 }
 
 async fn admin_metrics(State(_s): State<AppState>) -> Json<Value> {

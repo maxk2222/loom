@@ -71,6 +71,29 @@ impl BackendAdapter for OllamaAdapter {
         Ok(models)
     }
 
+    /// Ollama: `/api/ps` lists models currently resident in memory.
+    async fn loaded_models(&self) -> Option<Vec<String>> {
+        let url = format!("{}/api/ps", self.endpoint());
+        let v = common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(5))
+            .await
+            .ok()?;
+        let models = v
+            .get("models")
+            .and_then(|m| m.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| {
+                        m.get("name")
+                            .or_else(|| m.get("model"))
+                            .and_then(|n| n.as_str())
+                            .map(String::from)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(models)
+    }
+
     async fn probe_capabilities(&self, model: &str) -> Result<Capabilities, AdapterError> {
         let mut caps = Capabilities {
             chat: true,

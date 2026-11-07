@@ -686,13 +686,14 @@ async fn issue_enroll_token(State(s): State<AdminState>, req: Request) -> Respon
 // ---------------- deployments / virtual models ----------------
 
 async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
-    let rows: Vec<(uuid::Uuid, uuid::Uuid, String, String, String, bool)> = sqlx::query_as(
-        "SELECT id, client_id, name, backend_type, model_name, enabled FROM deployments ORDER BY name")
+    let rows: Vec<(uuid::Uuid, uuid::Uuid, String, String, String, bool, String)> = sqlx::query_as(
+        "SELECT d.id, d.client_id, d.name, d.backend_type, d.model_name, d.enabled, c.name AS client_name
+         FROM deployments d LEFT JOIN clients c ON c.id = d.client_id ORDER BY d.name")
         .fetch_all(&s.db).await.unwrap_or_default();
     let mut out = Vec::new();
-    for (id, cid, n, bt, mn, en) in rows {
+    for (id, cid, n, bt, mn, en, cn) in rows {
         let rt = s.registry.dep_runtime(&id.to_string()).await.ok().flatten();
-        out.push(json!({"id":id,"client_id":cid,"name":n,"backend_type":bt,"model_name":mn,"enabled":en,
+        out.push(json!({"id":id,"client_id":cid,"client_name":cn,"name":n,"backend_type":bt,"model_name":mn,"enabled":en,
             "runtime": rt.map(|r| json!({"state":r.state,"tier2_free":r.tier2_free,"tier2_total":r.tier2_total}))}));
     }
     Json(json!({"deployments": out}))

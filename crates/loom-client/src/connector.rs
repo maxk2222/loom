@@ -49,7 +49,10 @@ pub struct ConnectorState {
     pub session_id: RwLock<String>,
     pub server_version_hint: RwLock<String>,
     /// Notify -> debounced capacity report push.
-    pub capacity_notify: Notify,
+    pub capacity_notify: std::sync::Arc<Notify>,
+    /// Notify -> drop the current session and reconnect (name/url/enabled
+    /// changes take effect on the next hello).
+    pub reconnect_notify: std::sync::Arc<Notify>,
     ctrl_tx: RwLock<Option<mpsc::Sender<ClientEnvelope>>>,
     agent: Mutex<Option<AgentClient<Channel>>>,
     active_requests: RwLock<HashMap<String, ActiveRequest>>,
@@ -72,7 +75,8 @@ impl Connector {
                 connected: AtomicBool::new(false),
                 session_id: RwLock::new(String::new()),
                 server_version_hint: RwLock::new(String::new()),
-                capacity_notify: Notify::new(),
+                capacity_notify: std::sync::Arc::new(Notify::new()),
+                reconnect_notify: std::sync::Arc::new(Notify::new()),
                 ctrl_tx: RwLock::new(None),
                 agent: Mutex::new(None),
                 active_requests: RwLock::new(HashMap::new()),
@@ -101,6 +105,13 @@ impl Connector {
     /// Ask the connector to push a capacity report soon (debounced).
     pub fn notify_capacity(&self) {
         self.state.capacity_notify.notify_one();
+    }
+
+    /// Drop the active session and re-evaluate the config: reconnect when
+    /// enabled, stay offline when `connect_enabled` turned off. Used after
+    /// name / server_url / enabled changes so they take effect immediately.
+    pub fn notify_reconnect(&self) {
+        self.state.reconnect_notify.notify_one();
     }
 
     /// Abort a tier-2 request by request_id (admin/local cancel).
@@ -135,25 +146,40 @@ impl Connector {
                 return;
             }
             let cfg = self.state.cfg_store.get().await;
-            if cfg.server_url.is_empty() {
+            if cfg.server_url.is_empty() || !cfg.connect_enabled {
+                self.set_disconnected().await;
                 tokio::select! {
                     _ = self.state.shutdown.cancelled() => return,
+                    _ = self.state.reconnect_notify.notified() => continue,
                     _ = tokio::time::sleep(Duration::from_secs(2)) => continue,
                 }
             }
-            match self.session(&cfg).await {
-                Ok(()) => {
-                    info!("control session ended cleanly");
-                    backoff = Duration::from_secs(1);
+            let reconnect_now = tokio::select! {
+                res = self.session(&cfg) => {
+                    match res {
+                        Ok(()) => {
+                            info!("control session ended cleanly");
+                            backoff = Duration::from_secs(1);
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "control session failed");
+                            backoff = (backoff * 2).min(MAX_BACKOFF);
+                        }
+                    }
+                    false
                 }
-                Err(e) => {
-                    warn!(error = %e, "control session failed");
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
-                }
-            }
+                // Identity/connection settings changed → drop the session and
+                // reconnect immediately with the fresh config.
+                _ = self.state.reconnect_notify.notified() => true,
+            };
             self.set_disconnected().await;
+            if reconnect_now {
+                backoff = Duration::from_secs(1);
+                continue;
+            }
             tokio::select! {
                 _ = self.state.shutdown.cancelled() => return,
+                _ = self.state.reconnect_notify.notified() => continue,
                 _ = tokio::time::sleep(backoff) => {},
             }
         }

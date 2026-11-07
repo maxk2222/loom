@@ -11,6 +11,15 @@ export default function RequestsPage() {
     queryFn: () => api.get<{ requests: LocalRequest[] }>("/local/api/requests"),
     refetchInterval: 2000,
   });
+  const deps = useQuery({
+    queryKey: ["client-deps"],
+    queryFn: () => api.get<{ deployments: { deployment: { id: string; name: string; model_name: string } }[] }>("/local/api/deployments"),
+    refetchInterval: 10000,
+  });
+  const depName = (id: string) => {
+    const d = deps.data?.deployments.find((x) => x.deployment.id === id)?.deployment;
+    return d ? (d.name || d.model_name) : id.slice(0, 8);
+  };
 
   const cancel = async (id: string) => {
     await api.del(`/local/api/requests/${id}`);
@@ -32,7 +41,7 @@ export default function RequestsPage() {
                 <td className="td font-mono text-xs">{r.request_id.slice(0, 8)}…</td>
                 <td className="td"><Badge tone={r.class === "local" ? "accent" : "warn"}>{r.class}</Badge></td>
                 <td className="td text-muted">{r.api}</td>
-                <td className="td font-mono text-xs text-muted">{r.deployment_id.slice(0, 8)}…</td>
+                <td className="td text-muted">{depName(r.deployment_id)}</td>
                 <td className="td text-muted">{Math.max(0, Math.floor((Date.now() - r.started_unix_ms) / 1000))}s</td>
                 <td className="td text-right"><button className="btn-ghost p-1 text-err" onClick={() => cancel(r.request_id)}><XCircle size={15} /></button></td>
               </tr>

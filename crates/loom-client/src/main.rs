@@ -63,7 +63,6 @@ async fn async_main() -> anyhow::Result<()> {
 
     let backends = BackendManager::new();
     backends.sync_from_config(&cfg).await;
-    backends.spawn_health_loop();
 
     let dep_cfgs: Vec<_> = cfg
         .backends
@@ -74,6 +73,7 @@ async fn async_main() -> anyhow::Result<()> {
     scheduler.sync_deployments(&dep_cfgs);
 
     let connector = Connector::new(cfg_store.clone(), backends.clone(), scheduler.clone());
+    backends.spawn_health_loop(scheduler.clone(), connector.state().capacity_notify.clone());
 
     // Shared history ring: the connector appends tier-2 finishes, the local
     // API appends local finishes; both surface in /local/api/history.

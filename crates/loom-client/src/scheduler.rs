@@ -69,6 +69,11 @@ struct DeploymentLimits {
     /// Local pressure gate: when set, tier2 admissions are refused even if
     /// arithmetic capacity would remain (set on local saturation).
     tier2_gate_closed: AtomicU32,
+    /// Backend reachable (set by the health loop). Tier-2 only.
+    health_ok: AtomicU32,
+    /// Model actually servable: installed and — for auto_load deployments —
+    /// resident in the backend (not evicted). Tier-2 only.
+    model_ready: AtomicU32,
 }
 
 impl DeploymentLimits {
@@ -80,6 +85,11 @@ impl DeploymentLimits {
             sharing_mode: RwLock::new(c.sharing_mode),
             enabled: AtomicU32::new(c.enabled as u32),
             tier2_gate_closed: AtomicU32::new(0),
+            // Optimistic until the first health pass (~immediately after
+            // startup) proves otherwise — keeps tier-2 usable in contexts
+            // without a health loop and during the probe race window.
+            health_ok: AtomicU32::new(1),
+            model_ready: AtomicU32::new(1),
         }
     }
 
@@ -135,6 +145,11 @@ impl DeploymentSlots {
                 }
                 if self.limits.tier2_gate_closed.load(Ordering::SeqCst) == 1 {
                     return Err(RejectReason::AdmissionClosed);
+                }
+                if self.limits.health_ok.load(Ordering::SeqCst) == 0
+                    || self.limits.model_ready.load(Ordering::SeqCst) == 0
+                {
+                    return Err(RejectReason::BackendDown);
                 }
                 if t2 >= t2_max {
                     return Err(RejectReason::NoCapacity);
@@ -419,11 +434,28 @@ impl LocalScheduler {
                     inflight_local: local,
                     inflight_tier2: t2,
                     sharing_mode: *d.limits.sharing_mode.read().unwrap(),
+                    health_ok: d.limits.health_ok.load(Ordering::SeqCst) == 1,
+                    model_ready: d.limits.model_ready.load(Ordering::SeqCst) == 1,
                     accepting: t2_free > 0
-                        && d.limits.tier2_gate_closed.load(Ordering::SeqCst) == 0,
+                        && d.limits.tier2_gate_closed.load(Ordering::SeqCst) == 0
+                        && d.limits.health_ok.load(Ordering::SeqCst) == 1
+                        && d.limits.model_ready.load(Ordering::SeqCst) == 1,
                 }
             })
             .collect()
+    }
+
+    /// Set backend-health / model-readiness flags reported by the health
+    /// loop. Returns true when the effective pair changed (→ push capacity).
+    pub fn set_dep_ready(&self, dep_id: &str, health_ok: bool, model_ready: bool) -> bool {
+        let map = self.inner.deployments.read().unwrap();
+        let Some(d) = map.get(dep_id) else {
+            return false;
+        };
+        let (h, m) = (health_ok as u32, model_ready as u32);
+        let prev_h = d.limits.health_ok.swap(h, Ordering::SeqCst);
+        let prev_m = d.limits.model_ready.swap(m, Ordering::SeqCst);
+        prev_h != h || prev_m != m
     }
 
     /// Open/close the tier-2 admission gate for a deployment (dynamic stop).
@@ -459,5 +491,67 @@ pub struct DeploymentCapacityInfo {
     pub inflight_local: u32,
     pub inflight_tier2: u32,
     pub sharing_mode: SharingMode,
+    pub health_ok: bool,
+    pub model_ready: bool,
     pub accepting: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loom_core::config::{DeploymentConfig, SharingMode};
+
+    fn dep(id: &str) -> DeploymentConfig {
+        DeploymentConfig {
+            id: id.into(),
+            name: id.into(),
+            model_name: "m".into(),
+            capabilities: Default::default(),
+            capability_overrides: false,
+            max_concurrent: 4,
+            local_reserve: 1,
+            tier2_max: 2,
+            auto_load: true,
+            sharing_mode: SharingMode::Shared,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn tier2_gated_by_health_and_model_ready() {
+        let s = LocalScheduler::new(true);
+        s.sync_deployments(&[dep("d1")]);
+
+        // defaults: optimistic → accepting + admit ok
+        assert!(s.capacity_snapshot()[0].accepting);
+        {
+            let _tok = s.try_admit("d1", RequestClass::Tier2, "r0").unwrap();
+        } // token drop releases the slot
+
+        // backend down → admit rejected + not accepting
+        assert!(s.set_dep_ready("d1", false, true));
+        let snap = &s.capacity_snapshot()[0];
+        assert!(!snap.accepting && !snap.health_ok);
+        assert!(matches!(
+            s.try_admit("d1", RequestClass::Tier2, "r1"),
+            Err(RejectReason::BackendDown)
+        ));
+
+        // healthy but model evicted → same gate
+        assert!(s.set_dep_ready("d1", true, false));
+        assert!(matches!(
+            s.try_admit("d1", RequestClass::Tier2, "r2"),
+            Err(RejectReason::BackendDown)
+        ));
+        assert!(!s.capacity_snapshot()[0].accepting);
+
+        // back to ready → accepting again, no more change notifications
+        assert!(s.set_dep_ready("d1", true, true));
+        assert!(s.capacity_snapshot()[0].accepting);
+        assert!(!s.set_dep_ready("d1", true, true));
+
+        // local requests are never gated by backend health
+        assert!(s.set_dep_ready("d1", false, false));
+        assert!(s.try_admit("d1", RequestClass::Local, "r3").is_ok());
+    }
 }

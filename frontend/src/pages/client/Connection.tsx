@@ -8,23 +8,31 @@ interface ConnCfg {
   enabled: boolean;
   connected: boolean;
   client_id: string;
+  name: string;
 }
 
 export default function ConnectionPage() {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["conn"], queryFn: () => api.get<ConnCfg>("/local/api/connection"), refetchInterval: 3000 });
   const [enabled, setEnabled] = useState(true);
+  const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState("");
 
   useEffect(() => {
-    if (q.data) setEnabled(q.data.enabled);
+    if (q.data) {
+      setEnabled(q.data.enabled);
+      setName(q.data.name);
+    }
   }, [q.data]);
 
   const save = async () => {
     setBusy(true);
+    setSaved("");
     try {
-      await api.put("/local/api/connection", { enabled });
+      await api.put("/local/api/connection", { enabled, name });
       qc.invalidateQueries({ queryKey: ["conn"] });
+      setSaved("applied — reconnecting with new identity");
     } finally {
       setBusy(false);
     }
@@ -41,6 +49,9 @@ export default function ConnectionPage() {
           <span className="text-muted">State</span>
           {d?.connected ? <Badge tone="ok">connected</Badge> : d?.enabled ? <Badge tone="warn">reconnecting…</Badge> : <Badge tone="muted">disabled</Badge>}
         </div>
+        <Field label="Workstation name (shown in the dashboard)">
+          <input className="input w-full" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. gpu-workstation-01" maxLength={128} />
+        </Field>
         <div className="flex items-center justify-between text-sm">
           <span className="text-muted">Server URL</span>
           <span className="font-mono text-xs">{d?.server_url || "—"}</span>
@@ -56,7 +67,10 @@ export default function ConnectionPage() {
           </div>
           <Toggle checked={enabled} onChange={setEnabled} />
         </div>
-        <button className="btn-primary" onClick={save} disabled={busy}>{busy ? "Applying…" : "Apply"}</button>
+        <div className="flex items-center gap-3">
+          <button className="btn-primary" onClick={save} disabled={busy || !name.trim()}>{busy ? "Applying…" : "Apply"}</button>
+          {saved && <span className="text-xs text-muted">{saved}</span>}
+        </div>
       </Card>
       <Card>
         <h2 className="mb-2 text-sm font-medium">Enrollment</h2>

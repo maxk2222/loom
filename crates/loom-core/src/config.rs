@@ -20,6 +20,11 @@ pub struct ClientConfig {
     #[serde(default)]
     pub server_url: String,
 
+    /// Connect to the central server at all. When false the workstation runs
+    /// fully local — no gRPC session, no tier-2 sharing.
+    #[serde(default = "default_true")]
+    pub connect_enabled: bool,
+
     /// Device credential issued at enrollment.
     #[serde(default)]
     pub client_id: String,
@@ -67,6 +72,7 @@ impl Default for ClientConfig {
         Self {
             name: default_client_name(),
             server_url: String::new(),
+            connect_enabled: true,
             client_id: String::new(),
             device_credential: String::new(),
             local_api: LocalApiConfig::default(),

@@ -122,7 +122,14 @@ impl BackendManager {
     }
 
     /// Start periodic health checks + capability probing for all backends.
-    pub fn spawn_health_loop(&self) {
+    /// Also computes per-deployment tier-2 readiness (backend reachable +
+    /// model installed/loaded) and pushes a capacity report on any change so
+    /// the server stops routing to stale deployments quickly.
+    pub fn spawn_health_loop(
+        &self,
+        sched: crate::scheduler::LocalScheduler,
+        capacity_notify: std::sync::Arc<tokio::sync::Notify>,
+    ) {
         let this = self.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(10));
@@ -130,18 +137,22 @@ impl BackendManager {
                 tokio::select! {
                     _ = this.inner.cancel.cancelled() => break,
                     _ = tick.tick() => {
-                        this.health_pass().await;
+                        if this.health_pass(&sched).await {
+                            capacity_notify.notify_one();
+                        }
                     }
                 }
             }
         });
     }
 
-    async fn health_pass(&self) {
+    /// Returns true when any deployment's readiness changed this pass.
+    async fn health_pass(&self, sched: &crate::scheduler::LocalScheduler) -> bool {
+        let mut changed = false;
         // Probe each backend; mark deployments accordingly.
         let backend_ids: Vec<String> = self.inner.backends.read().await.keys().cloned().collect();
         for bid in backend_ids {
-            let adapter_health = {
+            let (adapter_health, installed, loaded, remote) = {
                 let backends = self.inner.backends.read().await;
                 let Some(be) = backends.get(&bid) else {
                     continue;
@@ -151,9 +162,18 @@ impl BackendManager {
                 }
                 let h = be.adapter.health().await;
                 *be.health.write().await = h;
-                let models = be.adapter.list_models().await.unwrap_or_default();
-                *be.models.write().await = models;
-                h
+                // Err = installed-set unknown → permissive rather than a
+                // wrong "not installed" conclusion on a flaky list call.
+                let installed = be.adapter.list_models().await.ok();
+                if let Some(m) = &installed {
+                    *be.models.write().await = m.clone();
+                }
+                let loaded = if be.cfg.remote {
+                    None
+                } else {
+                    be.adapter.loaded_models().await
+                };
+                (h, installed, loaded, be.cfg.remote)
             };
 
             let dep_ids: Vec<String> = {
@@ -167,6 +187,28 @@ impl BackendManager {
                 let deps = self.inner.deployments.read().await;
                 let Some(de) = deps.get(&did) else { continue };
                 *de.health.write().await = adapter_health;
+
+                // Tier-2 readiness: backend up AND model servable now.
+                //  - remote backends: always ready (hosted, no local model)
+                //  - installed-set known & model missing → not installed
+                //  - auto_load deployments must be resident (loaded-set
+                //    known & model absent = evicted → gate until re-warm)
+                //  - auto_load=false: JIT loads on first request → stay ready
+                let health_ok = adapter_health == Health::Healthy;
+                let model = &de.cfg.model_name;
+                let installed_ok = remote
+                    || installed
+                        .as_ref()
+                        .map(|l| l.iter().any(|m| m == model))
+                        .unwrap_or(true);
+                let loaded_ok = remote
+                    || !de.cfg.auto_load
+                    || loaded
+                        .as_ref()
+                        .map(|l| l.iter().any(|m| m == model))
+                        .unwrap_or(true);
+                let ready = installed_ok && loaded_ok;
+                changed |= sched.set_dep_ready(&did, health_ok, ready);
                 // Auto-load: warm the model once when the backend is healthy
                 // and the deployment is enabled+idle (re-warms after recovery).
                 // Keep-alive warm: JIT backends (LM Studio) evict idle models,
@@ -176,7 +218,10 @@ impl BackendManager {
                     *w = None;
                 } else if de.cfg.auto_load
                     && de.cfg.enabled
-                    && w.map(|t| t.elapsed().as_secs() >= 240).unwrap_or(true)
+                    // Re-warm on the 4-min keep-alive cadence OR immediately
+                    // when the model was just evicted (ready flipped false).
+                    && (!loaded_ok
+                        || w.map(|t| t.elapsed().as_secs() >= 240).unwrap_or(true))
                 {
                     *w = Some(std::time::Instant::now());
                     let inner = self.inner.clone();
@@ -220,6 +265,7 @@ impl BackendManager {
                 }
             }
         }
+        changed
     }
 
     /// Force re-probe all deployments of a backend.

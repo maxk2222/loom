@@ -35,6 +35,7 @@ export interface ClientRow {
 export interface DeploymentRow {
   id: string;
   client_id: string;
+  client_name?: string;
   name: string;
   backend_type: string;
   model_name: string;

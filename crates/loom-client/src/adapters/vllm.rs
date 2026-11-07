@@ -39,6 +39,11 @@ impl BackendAdapter for VllmAdapter {
         Ok(common::parse_openai_models(&v))
     }
 
+    /// vLLM serves only resident models — the listing IS the loaded set.
+    async fn loaded_models(&self) -> Option<Vec<String>> {
+        self.list_models().await.ok()
+    }
+
     async fn probe_capabilities(&self, model: &str) -> Result<Capabilities, AdapterError> {
         let models = self.list_models().await.unwrap_or_default();
         let mut caps = Capabilities {

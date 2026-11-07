@@ -231,6 +231,13 @@ Then ranked by one of five strategies:
 Every request carries a persisted **routing trace** — inspect *why* a request
 went where it went.
 
+**Readiness-aware routing.** Clients probe their backends every ~10s —
+endpoint health, installed models, and (for Ollama, vLLM, llama.cpp) the
+*actually loaded* set. A deployment whose backend is down or whose model was
+evicted stops `accepting` immediately, the scheduler removes it from
+candidates, and traffic fails over to the remaining members. `auto_load`
+deployments re-warm right away and rejoin once resident again.
+
 ### ⚖️ Fairness under contention
 
 - Priority classes (project-level) with **strict class ordering**

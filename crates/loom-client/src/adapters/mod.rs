@@ -72,6 +72,13 @@ pub trait BackendAdapter: Send + Sync {
     /// List models the backend currently serves.
     async fn list_models(&self) -> Result<Vec<String>, AdapterError>;
 
+    /// Models loaded in memory and servable immediately (JIT engines can
+    /// evict between requests). `None` = cannot determine → treated as
+    /// loaded (permissive). An empty `Some` means "known: nothing loaded".
+    async fn loaded_models(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// Probe capabilities of a specific model on this backend.
     async fn probe_capabilities(&self, model: &str) -> Result<Capabilities, AdapterError>;
 

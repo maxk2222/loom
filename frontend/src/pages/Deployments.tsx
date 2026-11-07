@@ -26,7 +26,7 @@ export default function DeploymentsPage() {
                   <td className="td font-medium">{d.name}</td>
                   <td className="td text-muted">{d.backend_type}</td>
                   <td className="td">{d.model_name}</td>
-                  <td className="td text-muted font-mono text-xs">{d.client_id.slice(0, 8)}…</td>
+                  <td className="td text-muted">{d.client_name ?? "—"}</td>
                   <td className="td">
                     {d.runtime ? (
                       <Badge tone={d.runtime.state === "available" ? "ok" : "warn"}>{d.runtime.state}</Badge>
