@@ -133,6 +133,40 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         return err(code, e, &request_id);
     }
 
+    // Auto-router: when the requested model is a `kind='router'` VM, classify
+    // the request with the configured router model and dispatch to the chosen
+    // member instead. The API key's grant on the router name covers members.
+    let mut routed: Option<crate::router_engine::RouteChoice> = None;
+    let model = {
+        if let Some(vm) = crate::router_engine::is_router(&s.models, &model).await {
+            let max_chars = vm.router_config["max_user_chars"].as_u64().unwrap_or(2000) as usize;
+            let excerpt = crate::router_engine::user_excerpt(&body, max_chars);
+            match crate::router_engine::route(
+                &s.scheduler,
+                &s.models,
+                &vm,
+                &excerpt,
+                c.priority_class,
+                s.request_deadline_ms,
+            )
+            .await
+            {
+                Ok(ch) => {
+                    info!(req = %request_id, router = %model, pick = %ch.model, reason = %ch.reason, "auto-routed");
+                    let m = ch.model.clone();
+                    routed = Some(ch);
+                    m
+                }
+                Err(e) => {
+                    s.auth.rl_release(&c.api_key_id).await;
+                    return err(ErrorCode::Unavailable, format!("router: {e}"), &request_id);
+                }
+            }
+        } else {
+            model
+        }
+    };
+
     let required = required_caps_from_request(&body);
     let streaming = request_stream(&body);
     // Ask streaming backends to emit a final `usage` chunk so the client can
@@ -284,11 +318,16 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         "application/json"
     };
     info!(req = %request_id, model = %model, streaming = is_sse, "request dispatched");
-    Response::builder()
+    let mut rb = Response::builder()
         .status(StatusCode::OK)
         .header("content-type", content_type)
-        .header("x-request-id", &request_id)
-        .body(Body::from_stream(stream))
+        .header("x-request-id", &request_id);
+    if let Some(ch) = &routed {
+        rb = rb
+            .header("x-loom-routed-model", &ch.model)
+            .header("x-loom-route-reason", &ch.reason);
+    }
+    rb.body(Body::from_stream(stream))
         .unwrap_or_else(|_| err(ErrorCode::Internal, "response build", &request_id))
 }
 

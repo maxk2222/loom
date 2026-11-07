@@ -53,6 +53,7 @@ export interface VirtualModel {
   allow_heterogeneous: boolean;
   fallback_virtual_model_id?: string | null;
   required_capabilities?: Record<string, unknown>;
+  kind?: string;
 }
 
 export interface Member {

@@ -1,6 +1,7 @@
 import { clsx } from "clsx";
 import {
   Boxes,
+  Route as RouteIcon,
   Cpu,
   Gauge,
   Home,
@@ -31,6 +32,7 @@ const SERVER_NAV: NavItem[] = [
   { to: "/", label: "Overview", icon: <Home size={16} /> },
   { to: "/clients", label: "Clients", icon: <Cpu size={16} /> },
   { to: "/models", label: "Models", icon: <Boxes size={16} /> },
+  { to: "/routers", label: "Auto Router", icon: <RouteIcon size={16} /> },
   { to: "/deployments", label: "Deployments", icon: <Layers size={16} /> },
   { to: "/scheduler", label: "Scheduler", icon: <Gauge size={16} /> },
   { to: "/api-users", label: "API Users", icon: <UserCog size={16} /> },

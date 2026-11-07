@@ -19,6 +19,10 @@ pub struct VirtualModel {
     pub allow_heterogeneous: bool,
     pub fallback_virtual_model_id: Option<String>,
     pub members: Vec<Member>,
+    /// 'vm' | 'router' | 'direct' (implicit single-deployment, hidden).
+    pub kind: String,
+    /// Router config (kind='router'): members, prompt, fallback, engine.
+    pub router_config: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +64,8 @@ impl ModelRegistry {
             required_capabilities: serde_json::Value,
             allow_heterogeneous: bool,
             fallback_virtual_model_id: Option<uuid::Uuid>,
+            kind: String,
+            router_config: serde_json::Value,
         }
         #[derive(sqlx::FromRow)]
         struct MRow {
@@ -76,7 +82,7 @@ impl ModelRegistry {
 
         let vms: Vec<VmRow> = sqlx::query_as(
             "SELECT id, api_name, api_type, routing_strategy, required_capabilities,
-                    allow_heterogeneous, fallback_virtual_model_id
+                    allow_heterogeneous, fallback_virtual_model_id, kind, router_config
              FROM virtual_models WHERE enabled = true",
         )
         .fetch_all(&self.db)
@@ -125,6 +131,8 @@ impl ModelRegistry {
                 fallback_virtual_model_id: v.fallback_virtual_model_id.map(|u| u.to_string()),
                 members: by_member.remove(&id).unwrap_or_default(),
                 id: id.clone(),
+                kind: v.kind,
+                router_config: v.router_config,
             };
             by_id.insert(id, v.api_name.clone());
             snap.insert(v.api_name, vm);
@@ -145,8 +153,15 @@ impl ModelRegistry {
     }
 
     /// List enabled virtual model api names (for /v1/models).
+    /// `direct` models are router-internal and hidden from callers.
     pub async fn list(&self) -> Vec<String> {
-        self.snapshot.read().await.keys().cloned().collect()
+        self.snapshot
+            .read()
+            .await
+            .iter()
+            .filter(|(_, vm)| vm.kind != "direct")
+            .map(|(n, _)| n.clone())
+            .collect()
     }
 
     /// Candidate members for a request, filtered by api type + required caps.

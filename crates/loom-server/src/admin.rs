@@ -76,6 +76,12 @@ pub fn router(s: AdminState) -> Router {
         // clients
         .route("/api/clients", get(list_clients))
         .route("/api/clients/{id}", get(client_detail))
+        .route("/api/routers", get(list_routers).post(create_router))
+        .route(
+            "/api/routers/{id}",
+            put(update_router).delete(delete_router),
+        )
+        .route("/api/routers/{id}/test", post(test_router))
         .route("/api/clients/{id}/status", post(client_status))
         .route("/api/clients/{id}/update", post(push_client_update))
         .route("/api/server/update", post(server_update))
@@ -709,11 +715,21 @@ async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
 }
 
 async fn list_vms(State(s): State<AdminState>) -> Json<Value> {
-    let rows: Vec<(uuid::Uuid, String, String, String, String, bool, bool)> = sqlx::query_as(
-        "SELECT id, api_name, api_type, routing_strategy, description, enabled, allow_heterogeneous FROM virtual_models ORDER BY api_name")
+    type VmListRow = (
+        uuid::Uuid,
+        String,
+        String,
+        String,
+        String,
+        bool,
+        bool,
+        String,
+    );
+    let rows: Vec<VmListRow> = sqlx::query_as(
+        "SELECT id, api_name, api_type, routing_strategy, description, enabled, allow_heterogeneous, kind FROM virtual_models WHERE kind <> 'direct' ORDER BY api_name")
         .fetch_all(&s.db).await.unwrap_or_default();
     Json(
-        json!({"models": rows.iter().map(|(id,n,t,st,d,e,h)| json!({"id":id,"api_name":n,"api_type":t,"routing_strategy":st,"description":d,"enabled":e,"allow_heterogeneous":h})).collect::<Vec<_>>()}),
+        json!({"models": rows.iter().map(|(id,n,t,st,d,e,h,k)| json!({"id":id,"api_name":n,"api_type":t,"routing_strategy":st,"description":d,"enabled":e,"allow_heterogeneous":h,"kind":k})).collect::<Vec<_>>()}),
     )
 }
 
@@ -1149,6 +1165,269 @@ async fn update_check() -> Json<Value> {
         "latest": latest.as_ref().and_then(|v| v["tag_name"].as_str().map(String::from)),
         "url": latest.as_ref().and_then(|v| v["html_url"].as_str().map(String::from)),
     }))
+}
+
+// ---------------- auto-routers ----------------
+
+/// Ensure a hidden `kind='direct'` virtual model exists wrapping a single
+/// deployment, so router members can point at deployments directly.
+async fn ensure_direct_vm(s: &AdminState, dep_id: &str) -> Result<String, StatusCode> {
+    let api_name = crate::router_engine::dep_vm_name(dep_id);
+    let exists: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT id FROM virtual_models WHERE api_name = $1")
+            .bind(&api_name)
+            .fetch_optional(&s.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if exists.is_some() {
+        return Ok(api_name);
+    }
+    let dep: Option<(uuid::Uuid, String)> =
+        sqlx::query_as("SELECT id, model_name FROM deployments WHERE id = $1::uuid")
+            .bind(dep_id)
+            .fetch_optional(&s.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let Some((dep_uuid, model_name)) = dep else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let vm_id: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO virtual_models (api_name, description, api_type, kind, allow_heterogeneous)
+         VALUES ($1, $2, 'chat', 'direct', true) RETURNING id",
+    )
+    .bind(&api_name)
+    .bind(format!("direct deployment {model_name}"))
+    .fetch_one(&s.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = sqlx::query(
+        "INSERT INTO virtual_model_members (virtual_model_id, deployment_id, priority)
+         VALUES ($1, $2, 100) ON CONFLICT DO NOTHING",
+    )
+    .bind(vm_id.0)
+    .bind(dep_uuid)
+    .execute(&s.db)
+    .await;
+    Ok(api_name)
+}
+
+fn router_row_to_json(
+    id: uuid::Uuid,
+    api_name: String,
+    description: String,
+    enabled: bool,
+    cfg: Value,
+) -> Value {
+    json!({"id": id, "api_name": api_name, "description": description,
+           "enabled": enabled, "config": cfg})
+}
+
+async fn list_routers(State(s): State<AdminState>) -> Json<Value> {
+    let rows: Vec<(uuid::Uuid, String, String, bool, Value)> = sqlx::query_as(
+        "SELECT id, api_name, description, enabled, router_config
+         FROM virtual_models WHERE kind = 'router' ORDER BY api_name",
+    )
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default();
+    Json(
+        json!({"routers": rows.into_iter().map(|r| router_row_to_json(r.0,r.1,r.2,r.3,r.4)).collect::<Vec<_>>()}),
+    )
+}
+
+async fn create_router(State(s): State<AdminState>, Json(b): Json<Value>) -> Response {
+    let name = b["api_name"].as_str().unwrap_or("");
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"api_name required"})),
+        )
+            .into_response();
+    }
+    let mut cfg = b["config"].clone();
+    if !cfg.is_object() {
+        cfg = json!({});
+    }
+    if let Err(code) = validate_router_cfg(&s, &cfg).await {
+        return (code, Json(json!({"error":"invalid router config: engine/fallback must be real models, members required"}))).into_response();
+    }
+    if let Err(code) = materialize_members(&s, &mut cfg).await {
+        return (code, Json(json!({"error":"bad member ref"}))).into_response();
+    }
+    let res = sqlx::query(
+        "INSERT INTO virtual_models (api_name, description, api_type, routing_strategy, kind, router_config, enabled)
+         VALUES ($1,$2,'chat','priority','router',$3,$4) RETURNING id::text",
+    )
+    .bind(name)
+    .bind(b["description"].as_str().unwrap_or(""))
+    .bind(&cfg)
+    .bind(b["enabled"].as_bool().unwrap_or(true))
+    .fetch_one(&s.db)
+    .await;
+    match res {
+        Ok(row) => {
+            use sqlx::Row;
+            let id: String = row.get(0);
+            let _ = s.models.reload().await;
+            audit(&s.db, "router", "create", &id).await;
+            Json(json!({"ok":true,"id":id})).into_response()
+        }
+        Err(_) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"api_name exists"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn update_router(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Response {
+    let mut cfg = b["config"].clone();
+    if cfg.is_object() {
+        if let Err(code) = validate_router_cfg(&s, &cfg).await {
+            return (code, Json(json!({"error":"invalid router config"}))).into_response();
+        }
+        if let Err(code) = materialize_members(&s, &mut cfg).await {
+            return (code, Json(json!({"error":"bad member ref"}))).into_response();
+        }
+    }
+    let sets = json!({
+        "api_name": b["api_name"].as_str(),
+        "description": b["description"].as_str(),
+        "router_config": cfg,
+        "enabled": b["enabled"].as_bool(),
+    });
+    let res = sqlx::query(
+        "UPDATE virtual_models SET
+            api_name = COALESCE($2, api_name),
+            description = COALESCE($3, description),
+            router_config = CASE WHEN $4::jsonb IS NULL THEN router_config ELSE $4 END,
+            enabled = COALESCE($5, enabled),
+            updated_at = now()
+         WHERE id = $1::uuid AND kind = 'router'",
+    )
+    .bind(&id)
+    .bind(sets["api_name"].as_str())
+    .bind(sets["description"].as_str())
+    .bind(if cfg.is_object() {
+        Some(cfg.clone())
+    } else {
+        None
+    })
+    .bind(b["enabled"].as_bool())
+    .execute(&s.db)
+    .await;
+    match res {
+        Ok(r) if r.rows_affected() > 0 => {
+            let _ = s.models.reload().await;
+            audit(&s.db, "router", "update", &id).await;
+            Json(json!({"ok":true})).into_response()
+        }
+        Ok(_) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"no such router"})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"db"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_router(State(s): State<AdminState>, Path(id): Path<String>) -> Response {
+    let r = sqlx::query("DELETE FROM virtual_models WHERE id=$1::uuid AND kind='router'")
+        .bind(&id)
+        .execute(&s.db)
+        .await;
+    match r {
+        Ok(x) if x.rows_affected() > 0 => {
+            let _ = s.models.reload().await;
+            audit(&s.db, "router", "delete", &id).await;
+            Json(json!({"ok":true})).into_response()
+        }
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"no such router"})),
+        )
+            .into_response(),
+    }
+}
+
+/// Router config sanity: engine/fallback must resolve to non-router models,
+/// at least one member required.
+async fn validate_router_cfg(s: &AdminState, cfg: &Value) -> Result<(), StatusCode> {
+    for k in ["router_model", "fallback_model"] {
+        if let Some(n) = cfg[k].as_str().filter(|v| !v.is_empty()) {
+            match s.models.resolve(n).await {
+                Some(v) if v.kind != "router" => {}
+                _ => return Err(StatusCode::BAD_REQUEST),
+            }
+        }
+    }
+    if cfg["members"]
+        .as_array()
+        .map(|m| m.is_empty())
+        .unwrap_or(true)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    // `vm:` member refs must resolve to a real non-router model — otherwise
+    // the router would either 503 at dispatch time or recurse. `dep:` refs
+    // are checked by materialize_members (unknown ids → 400).
+    for m in cfg["members"].as_array().into_iter().flatten() {
+        if let Some(name) = m["ref"].as_str().and_then(|r| r.strip_prefix("vm:")) {
+            match s.models.resolve(name).await {
+                Some(v) if v.kind != "router" => {}
+                _ => return Err(StatusCode::BAD_REQUEST),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Materialize `dep:` member refs into hidden direct VMs. Returns Err(400)
+/// when a ref points at nothing.
+async fn materialize_members(s: &AdminState, cfg: &mut Value) -> Result<(), StatusCode> {
+    let Some(ms) = cfg["members"].as_array_mut() else {
+        return Ok(());
+    };
+    for m in ms.iter_mut() {
+        let Some(refv) = m["ref"].as_str().map(String::from) else {
+            continue;
+        };
+        if let Some(dep) = refv.strip_prefix("dep:") {
+            let name = ensure_direct_vm(s, dep).await?;
+            // The dispatch target is the materialized direct model's api_name.
+            m["resolved"] = json!(name);
+        } else if let Some(o) = m.as_object_mut() {
+            // ref switched away from dep: — drop the stale materialization or
+            // to_choice would keep routing to the old deployment.
+            o.remove("resolved");
+        }
+    }
+    Ok(())
+}
+
+/// Dry-run the router on a prompt — returns raw classifier output + pick.
+async fn test_router(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Json<Value> {
+    let vm = match s.models.resolve_by_id(&id).await {
+        Some(v) => Some(v),
+        None => s.models.resolve(&id).await, // also allow api_name
+    };
+    let Some(vm) = vm else {
+        return Json(json!({"ok": false, "error": "no such router"}));
+    };
+    let prompt = b["prompt"].as_str().unwrap_or("");
+    Json(crate::router_engine::test_classify(&s.scheduler, &s.models, &vm, prompt, 10_000).await)
 }
 
 // ---------------- releases / updater ----------------

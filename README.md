@@ -231,6 +231,18 @@ Then ranked by one of five strategies:
 Every request carries a persisted **routing trace** — inspect *why* a request
 went where it went.
 
+**Auto routers.** A `kind='router'` virtual model classifies each incoming
+request with a small, fast *router engine* model and forwards it to the
+best-matching member — pick by speed, task fit or language. Members can be
+other virtual models (`vm:…`) or single deployments (`dep:…`, materialized as
+hidden direct models). Configure the engine, member names/descriptions,
+fallback and an optional custom prompt template (`{{models}}` / `{{request}}`
+placeholders) under **Auto Router** in the dashboard; a built-in test console
+dry-runs classification on any prompt. Routed responses carry
+`x-loom-routed-model` / `x-loom-route-reason` headers; unparsable or failed
+classifications fall back to the configured fallback model. The API key's
+grant on the router name transparently covers all members.
+
 **Readiness-aware routing.** Clients probe their backends every ~10s —
 endpoint health, installed models, and (for Ollama, vLLM, llama.cpp) the
 *actually loaded* set. A deployment whose backend is down or whose model was

@@ -15,6 +15,7 @@ pub mod metrics;
 pub mod model_registry;
 pub mod redisx;
 pub mod router;
+pub mod router_engine;
 pub mod scheduler;
 pub mod session;
 pub mod settings;

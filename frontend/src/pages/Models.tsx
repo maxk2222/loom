@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { Badge, Card, Field, Modal, Select, Spinner, Toggle } from "../components/ui";
 import type { DeploymentRow, Member, VirtualModel } from "../lib/types";
@@ -127,10 +128,15 @@ export default function ModelsPage() {
               <div className="flex flex-wrap gap-2 text-xs text-muted">
                 <Badge tone="accent">{m.api_type}</Badge>
                 <Badge tone="muted">{m.routing_strategy}</Badge>
+                {m.kind === "router" && <Badge tone="warn">auto-router</Badge>}
                 {m.allow_heterogeneous && <Badge tone="warn">heterogeneous</Badge>}
               </div>
               <div className="flex gap-2 pt-1">
-                <button className="btn-outline flex-1 justify-center py-1 text-xs" onClick={() => openEdit(m.id)}>Edit</button>
+                {m.kind === "router" ? (
+                  <Link className="btn-outline flex-1 justify-center py-1 text-xs" to="/routers">Manage in Auto Routers</Link>
+                ) : (
+                  <button className="btn-outline flex-1 justify-center py-1 text-xs" onClick={() => openEdit(m.id)}>Edit</button>
+                )}
                 <button className="btn-danger py-1 text-xs" onClick={() => del(m.id)}>Delete</button>
               </div>
             </Card>
