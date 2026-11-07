@@ -487,6 +487,7 @@ async fn admin_add_backend(State(s): State<AppState>, Json(body): Json<BackendBo
                 .collect();
             s.scheduler.sync_deployments(&deps);
             s.connector.notify_capacity();
+            s.connector.state().push_inventory().await;
             Json(json!({"ok": true, "id": b.id})).into_response()
         }
         Err(e) => err(ErrorCode::Internal, e.to_string(), "admin"),
@@ -517,6 +518,7 @@ async fn admin_delete_backend(State(s): State<AppState>, Path(id): Path<String>)
                 .collect();
             s.scheduler.sync_deployments(&deps);
             s.connector.notify_capacity();
+            s.connector.state().push_inventory().await;
             Json(json!({"ok": true})).into_response()
         }
         Err(e) => err(ErrorCode::Internal, e.to_string(), "admin"),

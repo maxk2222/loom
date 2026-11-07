@@ -506,6 +506,29 @@ impl Connector {
 }
 
 impl ConnectorState {
+    /// Push a fresh inventory report (deployments + capacities) when config
+    /// changed at runtime — without this the server only learns about new
+    /// backends on the next reconnect.
+    pub async fn push_inventory(&self) {
+        let tx = self.ctrl_tx.read().unwrap().clone();
+        if let Some(tx) = tx {
+            let inv = InventoryReport {
+                deployments: self.backends.inventory().await,
+                capacities: self
+                    .scheduler
+                    .capacity_snapshot()
+                    .iter()
+                    .map(capacity_to_pb)
+                    .collect(),
+                reported_at_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            };
+            let _ = tx.send(client_msgs::inventory(inv)).await;
+        }
+    }
+
     /// Send a capacity report if connected.
     pub async fn send_capacity_report(&self) {
         let tx = self.ctrl_tx.read().unwrap().clone();
