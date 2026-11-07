@@ -45,6 +45,11 @@ impl BackendAdapter for GenericAdapter {
         let models = self.list_models().await.unwrap_or_default();
         let mut caps = Capabilities {
             streaming: true,
+            // OpenAI-compatible chat APIs accept tools/json_mode body params —
+            // worst case the backend ignores or errors, which is a better UX
+            // than wrongly blocking. Vision stays opt-in (input-format-specific).
+            tools: true,
+            json_mode: true,
             ..Default::default()
         };
         if models.iter().any(|m| m == model) || models.is_empty() {
