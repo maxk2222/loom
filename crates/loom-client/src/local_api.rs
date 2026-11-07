@@ -45,12 +45,17 @@ pub struct FinReq {
     pub class: String,
     pub api: String,
     pub duration_ms: i64,
+    pub ttft_ms: i64,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
     pub status: String,
     pub ended_unix_ms: i64,
 }
 
 /// Remove an active request and append it to the history ring.
-pub fn finish_req(s: &AppState, rid: &str, status: &str) {
+/// `pt`/`ct` are real backend-reported tokens, or the estimate stored at
+/// admission time when the backend omitted usage.
+pub fn finish_req(s: &AppState, rid: &str, status: &str, pt: u32, ct: u32, ttft_ms: i64) {
     if let Some(i) = s.requests.write().unwrap().remove(rid) {
         let mut h = s.history.write().unwrap();
         if h.len() >= 300 {
@@ -60,6 +65,9 @@ pub fn finish_req(s: &AppState, rid: &str, status: &str) {
             class: i.class,
             api: i.api,
             duration_ms: now_ms() - i.started_unix_ms,
+            ttft_ms,
+            prompt_tokens: if pt > 0 { pt } else { i.est_tokens },
+            completion_tokens: ct,
             status: status.into(),
             ended_unix_ms: now_ms(),
         });
@@ -73,6 +81,9 @@ pub struct RequestInfo {
     pub deployment_id: String,
     pub api: String,
     pub started_unix_ms: i64,
+    /// Fallback token estimate when the backend omits `usage`.
+    #[serde(skip)]
+    pub est_tokens: u32,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -261,6 +272,7 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
             deployment_id: dep_id.clone(),
             api: api.as_str().into(),
             started_unix_ms: now_ms(),
+            est_tokens: loom_core::tokens::estimate_request_tokens(&body),
         },
     );
 
@@ -273,7 +285,7 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
         Err(e) => {
             telemetry::req_finished("failed");
             s.scheduler.finish_request(&request_id);
-            finish_req(&s, &request_id, "failed");
+            finish_req(&s, &request_id, "failed", 0, 0, 0);
             s.connector.notify_capacity();
             drop(token); // release the admission slot
             return err(ErrorCode::UpstreamError, e.to_string(), &request_id);
@@ -293,6 +305,9 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
         tokio::spawn(async move {
             let _token = token; // keep slot until stream ends
             use futures_util::StreamExt;
+            let mut usage = loom_core::openai::Usage::default();
+            let mut finish_reason = String::new();
+            let mut ttft_ms: i64 = 0;
             loop {
                 let next = tokio::select! {
                     _ = cancel.cancelled() => break,
@@ -300,6 +315,10 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
                 };
                 match next {
                     Some(Ok(b)) => {
+                        if ttft_ms == 0 {
+                            ttft_ms = started.elapsed().as_millis() as i64;
+                        }
+                        crate::connector::inspect_sse_tail(&b, &mut usage, &mut finish_reason);
                         if tx.send(Ok(b)).await.is_err() {
                             // caller disconnected -> abort upstream work
                             cancel.cancel();
@@ -320,7 +339,14 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
             telemetry::req_finished("done");
             telemetry::req_duration(started.elapsed().as_secs_f64(), "local");
             sched.finish_request(&rid);
-            finish_req(&s, &rid, "done");
+            finish_req(
+                &s,
+                &rid,
+                "done",
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                ttft_ms,
+            );
             conn.notify_capacity();
         });
     }
@@ -696,7 +722,7 @@ async fn admin_metrics(State(_s): State<AppState>) -> Json<Value> {
     Json(json!({"note": "prometheus metrics at the dedicated listener when configured"}))
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

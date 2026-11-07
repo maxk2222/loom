@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../lib/api";
-import { AreaChart, Area, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
+import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { Badge, Card, Stat } from "../../components/ui";
 import type { ClientStatus } from "../../lib/types";
 
@@ -109,6 +109,14 @@ function ClientCharts() {
     return [...m.entries()].map(([name, n]) => ({ name: name === "local" ? "tier-1 local" : "tier-2 shared", n }));
   })();
   const latChart = rows.slice(-30).map((r: any) => ({ t: new Date(r.ended_unix_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), ms: r.duration_ms }));
+  const tokRows = rows.slice(-30).map((r: any) => ({
+    t: new Date(r.ended_unix_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+    pt: r.prompt_tokens ?? 0,
+    ct: r.completion_tokens ?? 0,
+    e2e: r.duration_ms > 0 ? +(((r.prompt_tokens ?? 0) + (r.completion_tokens ?? 0)) / (r.duration_ms / 1000)).toFixed(1) : 0,
+    dec: r.duration_ms > (r.ttft_ms ?? 0) && (r.ttft_ms ?? 0) > 0 ? +((r.completion_tokens ?? 0) / ((r.duration_ms - r.ttft_ms) / 1000)).toFixed(1) : 0,
+    cls: r.class === "local" ? "t1" : "t2",
+  }));
   if (rows.length === 0) return null;
   return (
     <div className="grid gap-4 md:grid-cols-2">
@@ -136,6 +144,34 @@ function ClientCharts() {
             <Tooltip contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
             <Area type="monotone" dataKey="ms" stroke="#4a86c8" fill="#4a86c8" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
           </AreaChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="card p-4">
+        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">tokens / request</div>
+        <ResponsiveContainer width="100%" height={130}>
+          <BarChart data={tokRows} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+            <CartesianGrid stroke="#1c2740" vertical={false} />
+            <XAxis dataKey="t" tick={{ fontSize: 9, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+            <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+            <Tooltip contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Bar dataKey="pt" name="prompt" stackId="tok" fill="#3d6fae" />
+            <Bar dataKey="ct" name="completion" stackId="tok" fill="#7fa8d9" radius={[4, 4, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="card p-4">
+        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">tok/s <span className="normal-case text-muted/70">(e2e vs decode)</span></div>
+        <ResponsiveContainer width="100%" height={130}>
+          <ComposedChart data={tokRows} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+            <CartesianGrid stroke="#1c2740" vertical={false} />
+            <XAxis dataKey="t" tick={{ fontSize: 9, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+            <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+            <Tooltip contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Area type="monotone" dataKey="e2e" name="e2e tok/s" stroke="#3d6fae" fill="#3d6fae" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
+            <Area type="monotone" dataKey="dec" name="decode tok/s" stroke="#8fb3d9" fill="none" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+          </ComposedChart>
         </ResponsiveContainer>
       </div>
     </div>

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Boxes, Cpu, ListOrdered, Zap } from "lucide-react";
-import { AreaChart, Area, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
+import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { LiveBadge, PageHeader, Stat } from "../components/ui";
@@ -61,6 +61,40 @@ export default function OverviewPage() {
     }
     return [...m.values()];
   })();
+  // Token throughput: stacked prompt/completion tokens per minute, plus
+  // aggregate e2e tok/s = total tokens / total request time per bucket.
+  const tokSeries = (() => {
+    const m = new Map<string, { t: string; pt: number; ct: number; tps: number; dur: number }>();
+    for (const h of [...(hist.data?.requests ?? [])].reverse()) {
+      const t = new Date(h.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const b = m.get(t) ?? { t, pt: 0, ct: 0, tps: 0, dur: 0 };
+      b.pt += h.prompt_tokens ?? 0; b.ct += h.completion_tokens ?? 0;
+      b.dur += (h.duration_ms ?? 0) / 1000;
+      m.set(t, b);
+    }
+    return [...m.values()].map(b => ({ ...b, tps: b.dur > 0 ? +((b.pt + b.ct) / b.dur).toFixed(1) : 0 })).slice(-30);
+  })();
+  // Per-model + per-client e2e tok/s: Σ tokens / Σ duration per group.
+  const depName = (id?: string) => depCap.data?.deployments.find(d => d.id === id)?.name ?? id?.slice(0, 8) ?? "?";
+  const clientName = (id?: string) => clients.data?.clients.find(c => c.id === id)?.name ?? "?";
+  const tpsBy = (key: (h: any) => string | undefined) => {
+    const m = new Map<string, { name: string; e2e: number; dec: number; pt: number; ct: number; dur: number; decdur: number; n: number }>();
+    for (const h of hist.data?.requests ?? []) {
+      const k = key(h); if (!k) continue;
+      const b = m.get(k) ?? { name: k, e2e: 0, dec: 0, pt: 0, ct: 0, dur: 0, decdur: 0, n: 0 };
+      b.pt += h.prompt_tokens ?? 0; b.ct += h.completion_tokens ?? 0;
+      b.dur += (h.duration_ms ?? 0) / 1000;
+      b.decdur += Math.max(0, (h.duration_ms ?? 0) - (h.ttft_ms ?? 0)) / 1000;
+      b.n++; m.set(k, b);
+    }
+    return [...m.values()].map(b => ({
+      name: b.name, n: b.n, pt: b.pt, ct: b.ct,
+      e2e: b.dur > 0 ? +((b.pt + b.ct) / b.dur).toFixed(1) : 0,
+      dec: b.decdur > 0 ? +(b.ct / b.decdur).toFixed(1) : 0,
+    }));
+  };
+  const tpsModel = tpsBy(h => depName(h.deployment_id));
+  const tpsClient = tpsBy(h => clientName(h.client_id));
   const perClient = (() => {
     const m = new Map<string, { name: string; cap: number }>();
     for (const d of depCap.data?.deployments ?? []) {
@@ -187,6 +221,61 @@ export default function OverviewPage() {
                 <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} />
                 <Tooltip contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
                 <Bar dataKey="n" fill="#3d6fae" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+      {tokSeries.length > 0 && (
+        <div className="card p-4">
+          <div className="mb-2 flex items-baseline justify-between">
+            <div className="text-xs font-medium uppercase tracking-wide text-muted">tokens / min</div>
+            <div className="text-[10px] text-muted">e2e tok/s = total tokens ÷ total request time</div>
+          </div>
+          <ResponsiveContainer width="100%" height={170}>
+            <ComposedChart data={tokSeries} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+              <CartesianGrid stroke="#1c2740" vertical={false} />
+              <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+              <YAxis yAxisId="l" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+              <YAxis yAxisId="r" orientation="right" tick={{ fontSize: 10, fill: "#8fb3d9" }} tickLine={false} axisLine={false} />
+              <Tooltip contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar yAxisId="l" dataKey="pt" name="prompt" stackId="tok" fill="#3d6fae" />
+              <Bar yAxisId="l" dataKey="ct" name="completion" stackId="tok" fill="#7fa8d9" radius={[4, 4, 0, 0]} />
+              <Area yAxisId="r" dataKey="tps" name="tok/s" stroke="#8fb3d9" fill="none" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+      <div className="grid gap-4 md:grid-cols-2">
+        {tpsModel.length > 0 && (
+          <div className="card p-4">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">tok/s by model <span className="normal-case text-muted/70">(e2e vs decode)</span></div>
+            <ResponsiveContainer width="100%" height={150}>
+              <BarChart data={tpsModel} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+                <CartesianGrid stroke="#1c2740" vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <Tooltip contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Bar dataKey="e2e" name="e2e tok/s" fill="#3d6fae" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="dec" name="decode tok/s" fill="#4a86c8" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+        {tpsClient.length > 0 && (
+          <div className="card p-4">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">tok/s by client <span className="normal-case text-muted/70">(e2e vs decode)</span></div>
+            <ResponsiveContainer width="100%" height={150}>
+              <BarChart data={tpsClient} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+                <CartesianGrid stroke="#1c2740" vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <Tooltip contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Bar dataKey="e2e" name="e2e tok/s" fill="#3d6fae" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="dec" name="decode tok/s" fill="#4a86c8" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>

@@ -75,6 +75,12 @@ async fn async_main() -> anyhow::Result<()> {
 
     let connector = Connector::new(cfg_store.clone(), backends.clone(), scheduler.clone());
 
+    // Shared history ring: the connector appends tier-2 finishes, the local
+    // API appends local finishes; both surface in /local/api/history.
+    let history: std::sync::Arc<std::sync::RwLock<std::collections::VecDeque<local_api::FinReq>>> =
+        Default::default();
+    connector.set_history(history.clone());
+
     let state = AppState {
         cfg: cfg_store.clone(),
         backends: backends.clone(),
@@ -82,7 +88,7 @@ async fn async_main() -> anyhow::Result<()> {
         connector: connector.clone(),
         started: Instant::now(),
         requests: Default::default(),
-        history: Default::default(),
+        history,
     };
 
     // Metrics listener (optional).

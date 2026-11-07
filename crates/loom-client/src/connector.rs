@@ -53,6 +53,8 @@ pub struct ConnectorState {
     ctrl_tx: RwLock<Option<mpsc::Sender<ClientEnvelope>>>,
     agent: Mutex<Option<AgentClient<Channel>>>,
     active_requests: RwLock<HashMap<String, ActiveRequest>>,
+    /// Shared finished-request history (wired to local_api::AppState).
+    pub history: RwLock<Option<Arc<RwLock<std::collections::VecDeque<crate::local_api::FinReq>>>>>,
     shutdown: CancellationToken,
 }
 
@@ -74,9 +76,18 @@ impl Connector {
                 ctrl_tx: RwLock::new(None),
                 agent: Mutex::new(None),
                 active_requests: RwLock::new(HashMap::new()),
+                history: RwLock::new(None),
                 shutdown: CancellationToken::new(),
             }),
         }
+    }
+
+    /// Wire the finished-request history ring shared with the local API.
+    pub fn set_history(
+        &self,
+        h: Arc<RwLock<std::collections::VecDeque<crate::local_api::FinReq>>>,
+    ) {
+        *self.state.history.write().unwrap() = Some(h);
     }
 
     pub fn state(&self) -> Arc<ConnectorState> {
@@ -749,6 +760,23 @@ async fn run_request(
 
     telemetry::req_finished(&status);
     telemetry::req_duration(started.elapsed().as_secs_f64(), "tier2");
+    // Mirror into the shared request history (local UI charts include tier-2).
+    if let Some(h) = state.history.read().unwrap().as_ref() {
+        let mut h = h.write().unwrap();
+        if h.len() >= 300 {
+            h.pop_front();
+        }
+        h.push_back(crate::local_api::FinReq {
+            class: "tier-2".into(),
+            api: a.api_type.clone(),
+            duration_ms: started.elapsed().as_millis() as i64,
+            ttft_ms,
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            status: status.clone(),
+            ended_unix_ms: crate::local_api::now_ms(),
+        });
+    }
     state.scheduler.finish_request(&request_id);
     state.active_requests.write().unwrap().remove(&request_id);
     state.notify_capacity_now();
@@ -756,7 +784,7 @@ async fn run_request(
 }
 
 /// Parse trailing SSE data for usage + finish_reason (best effort).
-fn inspect_sse_tail(
+pub(crate) fn inspect_sse_tail(
     bytes: &bytes::Bytes,
     usage: &mut loom_core::openai::Usage,
     finish_reason: &mut String,
