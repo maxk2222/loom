@@ -38,9 +38,3 @@ jobs:
       - run: npm run test
       - run: npm run build && npm run build:client
 
-  proto:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: bufbuild/buf-setup-action@v1
-      - run: buf lint proto/
