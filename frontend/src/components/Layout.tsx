@@ -18,6 +18,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { api, APP_VARIANT } from "../lib/api";
 import { useBranding } from "../lib/branding";
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Badge, Logo } from "./ui";
 
 interface NavItem {
@@ -47,6 +48,22 @@ const CLIENT_NAV: NavItem[] = [
   { to: "/connection", label: "Connection", icon: <Gauge size={16} /> },
 ];
 
+function UpdateChip() {
+  const [res, setRes] = useState<any>(null);
+  const check = async () =>
+    setRes(await api.get<any>(APP_VARIANT === "client" ? "/local/api/update-check" : "/api/update-check").catch(() => null));
+  if (!res)
+    return <button className="btn-ghost px-2 py-0.5 text-[11px]" onClick={check}>check update</button>;
+  const newer = res.latest && res.latest.replace(/^v/, "") !== res.current;
+  return newer ? (
+    <a className="badge bg-warn/12 text-warn" href={res.url} target="_blank" rel="noreferrer">
+      ⬆ {res.latest}
+    </a>
+  ) : (
+    <Badge tone="ok">up to date</Badge>
+  );
+}
+
 function StatusBar() {
   const isClient = APP_VARIANT === "client";
   const q = useQuery({
@@ -68,6 +85,7 @@ function StatusBar() {
         <Badge tone="muted">{d.clients_online ?? 0}/{d.clients_total ?? 0} clients</Badge>
       )}
       <span className="flex-1" />
+      <UpdateChip />
       <span className="text-[11px] text-muted/60">LOOM {isClient ? "client" : "control"}</span>
     </header>
   );

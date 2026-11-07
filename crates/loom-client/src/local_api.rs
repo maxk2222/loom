@@ -82,6 +82,7 @@ pub fn router(state: AppState) -> Router {
         .route("/local/api/reprobe", post(admin_reprobe))
         .route("/local/api/connection", get(admin_connection))
         .route("/local/api/metrics", get(admin_metrics))
+        .route("/local/api/update-check", get(admin_update_check))
         .route("/healthz", get(|| async { "ok" }));
 
     let api = if state.cfg_blocking().local_api.serve_ui {
@@ -673,4 +674,34 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or_default()
+}
+
+/// Check GitHub for a newer release vs CARGO_PKG_VERSION.
+async fn admin_update_check() -> Json<Value> {
+    let latest = fetch_latest_release().await;
+    Json(json!({
+        "current": env!("CARGO_PKG_VERSION"),
+        "latest": latest.as_ref().map(|r| r.0.clone()),
+        "url": latest.as_ref().map(|r| r.1.clone()),
+    }))
+}
+
+pub(crate) async fn fetch_latest_release() -> Option<(String, String)> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .user_agent("loom-client")
+        .build()
+        .ok()?;
+    let v: Value = client
+        .get("https://api.github.com/repos/maxk2222/loom/releases/latest")
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    Some((
+        v["tag_name"].as_str()?.to_string(),
+        v["html_url"].as_str()?.to_string(),
+    ))
 }

@@ -37,6 +37,7 @@ pub struct AdminState {
 pub fn router(s: AdminState) -> Router {
     let public = Router::new()
         .route("/api/branding", get(branding))
+        .route("/api/update-check", get(update_check))
         .route("/api/branding/logo.{ext}", get(brand_logo))
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup/admin", post(setup_admin))
@@ -955,4 +956,26 @@ async fn bump_version(db: &PgPool, entity: &str, entity_id: &str, change: &Value
     .bind(change)
     .execute(db)
     .await;
+}
+
+/// Check GitHub for a newer release vs CARGO_PKG_VERSION.
+async fn update_check() -> Json<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .user_agent("loom-server")
+        .build()
+        .unwrap_or_default();
+    let latest = match client
+        .get("https://api.github.com/repos/maxk2222/loom/releases/latest")
+        .send()
+        .await
+    {
+        Ok(r) => r.json::<Value>().await.ok(),
+        Err(_) => None,
+    };
+    Json(json!({
+        "current": env!("CARGO_PKG_VERSION"),
+        "latest": latest.as_ref().and_then(|v| v["tag_name"].as_str().map(String::from)),
+        "url": latest.as_ref().and_then(|v| v["html_url"].as_str().map(String::from)),
+    }))
 }
