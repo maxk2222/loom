@@ -1,4 +1,11 @@
-# LOOM server image: Rust binary + embedded dashboard + migrations.
+# LOOM server image: UI build → Rust binary (embeds dashboard) → slim runtime.
+FROM node:22-slim AS ui-build
+WORKDIR /ui
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ .
+RUN npm run build && npm run build:client
+
 FROM rust:1.88-slim AS rust-build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
@@ -6,15 +13,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY proto proto
 COPY migrations migrations
-COPY frontend/dist frontend/dist
+COPY --from=ui-build /ui/dist frontend/dist
+COPY --from=ui-build /ui/dist-client frontend/dist-client
 RUN cargo build --release -p loom-server && cp target/release/loom-server /out-server
-
-FROM node:22-slim AS ui-build
-WORKDIR /ui
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund
-COPY frontend/ .
-RUN npm run build
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*

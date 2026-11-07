@@ -283,10 +283,32 @@ impl Agent for AgentSvc {
         .await
         .map_err(|_| Status::internal("db"))?;
         match row {
-            Some((s,)) if s == "active" => Ok(Response::new(ConfigSnapshot {
-                config_version: 0,
-                desired_config_json: b"{}".to_vec(),
-            })),
+            Some((s,)) if s == "active" => {
+                #[derive(sqlx::FromRow)]
+                struct Cfg {
+                    config_version: i64,
+                    desired_config: serde_json::Value,
+                }
+                let c: Option<Cfg> = sqlx::query_as(
+                    "SELECT config_version, desired_config FROM clients WHERE id = $1::uuid",
+                )
+                .bind(&req.client_id)
+                .fetch_optional(&self.registry.db)
+                .await
+                .unwrap_or(None);
+                let (version, desired) = c
+                    .map(|c| {
+                        (
+                            c.config_version.max(0) as u64,
+                            serde_json::to_vec(&c.desired_config).unwrap_or_else(|_| b"{}".to_vec()),
+                        )
+                    })
+                    .unwrap_or((0, b"{}".to_vec()));
+                Ok(Response::new(ConfigSnapshot {
+                    config_version: version,
+                    desired_config_json: desired,
+                }))
+            }
             _ => Err(Status::unauthenticated("bad credential")),
         }
     }
