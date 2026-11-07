@@ -118,6 +118,39 @@ UNIT
   systemctl enable --now loom-client
   echo ">> loom-client enabled and started"
 elif [[ "$OS" == "Darwin" ]]; then
+  # Install as a proper .app bundle: menu-bar agent (LSUIElement → no Dock
+  # icon, system-tray icon only) auto-started via launchd LaunchAgent.
+  APP_DIR="${HOME}/Applications/LOOM Client.app"
+  echo ">> Installing ${APP_DIR}"
+  mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
+  install -m 0755 "${BIN_DIR}/loom-client" "${APP_DIR}/Contents/MacOS/loom-client"
+  cat > "${APP_DIR}/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>LOOM Client</string>
+  <key>CFBundleDisplayName</key><string>LOOM Client</string>
+  <key>CFBundleIdentifier</key><string>com.loom.client</string>
+  <key>CFBundleExecutable</key><string>loom-client</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>0.2.0</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>LSUIElement</key><true/>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+</dict></plist>
+PLIST
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  if [[ -f "${SCRIPT_DIR}/macos/AppIcon.icns" ]]; then
+    install -m 0644 "${SCRIPT_DIR}/macos/AppIcon.icns" "${APP_DIR}/Contents/Resources/AppIcon.icns"
+  fi
+  touch "${APP_DIR}" # refresh LaunchServices timestamp
+
+  # Enable the tray icon unless the operator opted out.
+  if ! grep -q '^\[tray\]' "$CFG"; then
+    printf '\n[tray]\nenabled = true\n' >> "$CFG"
+  fi
+
   PLIST="${HOME}/Library/LaunchAgents/com.loom.client.plist"
   mkdir -p "$(dirname "$PLIST")"
   cat > "$PLIST" <<PLIST
@@ -125,17 +158,19 @@ elif [[ "$OS" == "Darwin" ]]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.loom.client</string>
-  <key>ProgramArguments</key><array><string>${BIN_DIR}/loom-client</string></array>
+  <key>ProgramArguments</key><array><string>${APP_DIR}/Contents/MacOS/loom-client</string></array>
   <key>EnvironmentVariables</key><dict>
     <key>LOOM_CONFIG</key><string>${CFG}</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${CONFIG_DIR}/client.log</string>
+  <key>StandardErrorPath</key><string>${CONFIG_DIR}/client.log</string>
 </dict></plist>
 PLIST
   launchctl unload "$PLIST" 2>/dev/null || true
   launchctl load "$PLIST"
-  echo ">> loom-client loaded via launchd ($PLIST)"
+  echo ">> LOOM Client.app installed — tray icon active, autostart via launchd"
 fi
 
 echo ""

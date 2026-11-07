@@ -48,6 +48,9 @@ http = "1"
 tray-icon = "0.26"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[target."cfg(target_os = \"macos\")".dependencies]
+core-foundation = "0.10"
+
 [dev-dependencies]
 loom-testkit.workspace = true
 

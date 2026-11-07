@@ -1,6 +1,7 @@
 <div align="center">
+<img src="docs/logo.png" width="140" alt="LOOM logo"/>
 
-# 🔶 LOOM
+# LOOM
 
 ### LLM Orchestration & Operations Mesh
 
@@ -8,10 +9,16 @@
 **with hard guarantees that local workloads always come first.**
 
 [![CI](https://github.com/maxk2222/loom/actions/workflows/ci.yml/badge.svg)](https://github.com/maxk2222/loom/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
-[![TypeScript](https://img.shields.io/badge/typescript-5.x-blue?logo=typescript)](https://www.typescriptlang.org)
+[![Release](https://img.shields.io/github/v/release/maxk2222/loom?logo=github&label=release)](https://github.com/maxk2222/loom/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Protocol](https://img.shields.io/badge/protocol-loom.agent.v1-purple)](docs/protocol.md)
+
+[![Rust](https://img.shields.io/badge/rust-2024-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![gRPC](https://img.shields.io/badge/gRPC-tonic-5c4d9c?logo=grpc&logoColor=white)](docs/protocol.md)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org)
+[![Redis](https://img.shields.io/badge/Redis-7-dc382d?logo=redis&logoColor=white)](https://redis.io)
+[![React](https://img.shields.io/badge/React-18-61dafb?logo=react&logoColor=black)](https://react.dev)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![OpenAI compatible](https://img.shields.io/badge/API-OpenAI--compatible-412991)](docs/protocol.md)
 
 </div>
 
@@ -325,7 +332,9 @@ docs/              ADRs, protocol spec, security model, runbooks
 - [x] OpenAI gateway: chat, completions, embeddings, streaming, tools, vision
 - [x] Full admin dashboard + embedded client UI
 - [x] Atomic leases, fencing, watchdogs, heartbeat detection
-- [x] Installer, systemd, self-update pipeline
+- [x] Backend management from the client UI (add/edit/delete + live probe)
+- [x] Native client install: systemd (Linux), `.app` bundle + launchd + menu-bar tray (macOS)
+- [x] Installer + self-update pipeline
 - [ ] mTLS for agent channel (TLS + device credential today)
 - [ ] TPM metering (best-effort), project quotas
 - [ ] Multi-replica scheduler coordination

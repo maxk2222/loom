@@ -1998,6 +1998,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "core-foundation",
  "eventsource-stream",
  "futures",
  "futures-util",

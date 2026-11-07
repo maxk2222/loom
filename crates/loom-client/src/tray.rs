@@ -2,6 +2,7 @@
 //!
 //! Runs on the main thread on macOS (AppKit requirement) — call `run()`
 //! from `main` AFTER the tokio runtime has been moved to a worker thread.
+//! On macOS the AppKit run loop must be pumped or menu clicks never fire.
 
 use anyhow::{Context, Result};
 
@@ -34,6 +35,18 @@ fn open_ui() {
     .spawn();
 }
 
+fn handle_menu(
+    ev: tray_icon::menu::MenuEvent,
+    open_id: &tray_icon::menu::MenuId,
+    quit_id: &tray_icon::menu::MenuId,
+) {
+    if ev.id == *open_id {
+        open_ui();
+    } else if ev.id == *quit_id {
+        std::process::exit(0);
+    }
+}
+
 /// Blocking tray event loop — must run on the main thread (macOS).
 /// Returns when the user picks Quit.
 pub fn run() -> Result<()> {
@@ -58,19 +71,33 @@ pub fn run() -> Result<()> {
 
     let menu_rx = MenuEvent::receiver();
     let tray_rx = TrayIconEvent::receiver();
+
+    #[cfg(target_os = "macos")]
+    {
+        // Menu clicks are delivered through the app run loop — pump it in
+        // short bursts so our channel polling stays responsive.
+        use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoopRunInMode};
+        loop {
+            unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 1) };
+            if let Ok(ev) = tray_rx.try_recv() {
+                if matches!(ev, TrayIconEvent::DoubleClick { .. }) {
+                    open_ui();
+                }
+            }
+            if let Ok(ev) = menu_rx.try_recv() {
+                handle_menu(ev, &open_id, &quit_id);
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     loop {
-        // Double-click / click on the icon also opens the UI.
         if let Ok(ev) = tray_rx.try_recv() {
             if matches!(ev, TrayIconEvent::DoubleClick { .. }) {
                 open_ui();
             }
         }
         if let Ok(ev) = menu_rx.try_recv() {
-            if ev.id == open_id {
-                open_ui();
-            } else if ev.id == quit_id {
-                std::process::exit(0);
-            }
+            handle_menu(ev, &open_id, &quit_id);
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
