@@ -28,21 +28,24 @@ fn main() -> anyhow::Result<()> {
     init_tracing();
     // Peek at the tray flag before deciding where the runtime lives —
     // on macOS the tray needs the main thread.
-    let config_path = Args::parse()
-        .config
-        .map(Into::into)
-        .unwrap_or_else(default_config_path);
-    let tray_on = std::fs::read_to_string(&config_path)
-        .ok()
-        .and_then(|raw| toml::from_str::<loom_core::config::ClientConfig>(&raw).ok())
-        .map(|c| c.tray.enabled)
-        .unwrap_or(false);
-    if tray_on {
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-            let _ = rt.block_on(async_main());
-        });
-        return loom_client::tray::run();
+    #[cfg(feature = "tray")]
+    {
+        let config_path = Args::parse()
+            .config
+            .map(Into::into)
+            .unwrap_or_else(default_config_path);
+        let tray_on = std::fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|raw| toml::from_str::<loom_core::config::ClientConfig>(&raw).ok())
+            .map(|c| c.tray.enabled)
+            .unwrap_or(false);
+        if tray_on {
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+                let _ = rt.block_on(async_main());
+            });
+            return loom_client::tray::run();
+        }
     }
     tokio::runtime::Runtime::new()?.block_on(async_main())
 }

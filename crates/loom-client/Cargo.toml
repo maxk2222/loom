@@ -45,11 +45,15 @@ clap.workspace = true
 minisign-verify.workspace = true
 http = "1"
 
-tray-icon = "0.26"
-image = { version = "0.25", default-features = false, features = ["png"] }
+tray-icon = { version = "0.26", optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 
 [target."cfg(target_os = \"macos\")".dependencies]
-core-foundation = "0.10"
+core-foundation = { version = "0.10", optional = true }
+
+[features]
+default = []
+tray = ["dep:tray-icon", "dep:image", "dep:core-foundation"]
 
 [dev-dependencies]
 loom-testkit.workspace = true
