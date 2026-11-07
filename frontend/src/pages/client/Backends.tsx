@@ -1,53 +1,177 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { PlugZap, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useState } from "react";
 import { api } from "../../lib/api";
-import { Badge, Card, Spinner } from "../../components/ui";
-import type { LocalDeployment } from "../../lib/types";
+import { Badge, Card, Empty, Field, Modal, PageHeader, Select, Spinner, Toggle } from "../../components/ui";
+
+interface DepForm {
+  id: string;
+  name: string;
+  model_name: string;
+  max_concurrent: number;
+  local_reserve: number;
+  tier2_max: number;
+  sharing_mode: string;
+  enabled: boolean;
+}
+
+interface BackendForm {
+  id: string;
+  name: string;
+  backend_type: string;
+  endpoint: string;
+  api_key: string;
+  has_api_key?: boolean;
+  enabled: boolean;
+  health_interval_secs: number;
+  deployments: DepForm[];
+}
+
+const EMPTY_DEP: DepForm = {
+  id: "",
+  name: "",
+  model_name: "",
+  max_concurrent: 4,
+  local_reserve: 1,
+  tier2_max: 2,
+  sharing_mode: "shared",
+  enabled: true,
+};
+
+const EMPTY_BACKEND: BackendForm = {
+  id: "",
+  name: "",
+  backend_type: "ollama",
+  endpoint: "",
+  api_key: "",
+  enabled: true,
+  health_interval_secs: 15,
+  deployments: [{ ...EMPTY_DEP }],
+};
+
+const TYPE_OPTS = [
+  { value: "ollama", label: "Ollama" },
+  { value: "vllm", label: "vLLM" },
+  { value: "generic_open_ai", label: "OpenAI-compatible" },
+];
+const SHARE_OPTS = [
+  { value: "shared", label: "shared" },
+  { value: "opportunistic", label: "opportunistic" },
+  { value: "private", label: "private" },
+];
 
 export default function BackendsPage() {
   const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["client-backends"],
-    queryFn: () => api.get<{ backends: { backend: { id: string; url: string; kind: string }; deployments: LocalDeployment[] }[] }>("/local/api/backends"),
-    refetchInterval: 5000,
+    queryFn: () => api.get<{ backends: (BackendForm & { url?: string; kind?: string })[] }>("/local/api/backends"),
+    refetchInterval: 8000,
+  });
+  const [editing, setEditing] = useState<BackendForm | null>(null);
+  const [testing, setTesting] = useState<null | { ok?: boolean; error?: string; latency_ms?: number; models?: string[] }>(null);
+
+  const save = useMutation({
+    mutationFn: (b: BackendForm) =>
+      b.id ? api.put(`/local/api/backends/${b.id}`, { backend: b }) : api.post("/local/api/backends", { backend: b }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["client-backends"] });
+      setEditing(null);
+    },
+  });
+  const del = useMutation({
+    mutationFn: (id: string) => api.del(`/local/api/backends/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["client-backends"] }),
   });
 
   const probe = async () => {
-    await api.post("/local/api/probe");
+    await api.post("/local/api/reprobe");
     qc.invalidateQueries({ queryKey: ["client-backends"] });
+  };
+
+  const test = async (b: BackendForm) => {
+    setTesting({});
+    try {
+      const r = await api.post<{ ok?: boolean; error?: string; latency_ms?: number; models?: string[] }>(
+        "/local/api/backends/test",
+        { endpoint: b.endpoint, api_key: b.api_key, backend_type: b.backend_type },
+      );
+      setTesting(r);
+    } catch (e: any) {
+      setTesting({ ok: false, error: e?.message ?? "request failed" });
+    }
+  };
+
+  const upd = (b: BackendForm, patch: Partial<BackendForm>) => setEditing({ ...b, ...patch });
+  const updDep = (b: BackendForm, i: number, patch: Partial<DepForm>) => {
+    const ds = b.deployments.map((d, j) => (j === i ? { ...d, ...patch } : d));
+    upd(b, { deployments: ds });
   };
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Backends & models</h1>
-        <button className="btn-outline" onClick={probe}><RefreshCw size={15} /> Re-probe capabilities</button>
-      </div>
-      {q.isLoading ? <Spinner /> : (q.data?.backends ?? []).length === 0 ? (
-        <Card className="text-center text-sm text-muted">No backends configured — add them to the client config file.</Card>
+      <PageHeader
+        title="Backends & models"
+        desc="Inference backends running on this workstation"
+        actions={
+          <>
+            <button className="btn-outline" onClick={probe}>
+              <RefreshCw size={15} /> Re-probe
+            </button>
+            <button className="btn-primary" onClick={() => setEditing({ ...EMPTY_BACKEND, deployments: [{ ...EMPTY_DEP }] })}>
+              <Plus size={15} /> Add backend
+            </button>
+          </>
+        }
+      />
+      {q.isLoading ? (
+        <Spinner />
+      ) : (q.data?.backends ?? []).length === 0 ? (
+        <Card>
+          <Empty msg="No backends configured — add one to expose models." />
+        </Card>
       ) : (
         <div className="space-y-4">
           {(q.data?.backends ?? []).map((b) => (
-            <Card key={b.backend.id} className="space-y-3">
-              <div className="flex items-center gap-3">
-                <Badge tone="accent">{b.backend.kind}</Badge>
-                <span className="font-mono text-xs text-muted">{b.backend.url}</span>
+            <Card key={b.id} className="space-y-3" hover>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Badge tone="accent">{b.backend_type}</Badge>
+                  <span className="font-mono text-xs text-muted">{b.endpoint}</span>
+                  {b.has_api_key && <Badge tone="muted">api key</Badge>}
+                  {!b.enabled && <Badge tone="err">disabled</Badge>}
+                </div>
+                <div className="flex gap-1">
+                  <button className="btn-ghost px-2 py-1 text-xs" onClick={() => setEditing({ ...b, api_key: "" })}>
+                    Edit
+                  </button>
+                  <button
+                    className="btn-ghost px-2 py-1 text-xs text-err"
+                    onClick={() => confirm(`Delete backend "${b.name}"?`) && del.mutate(b.id)}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               </div>
               <table className="w-full">
-                <thead><tr><th className="th">Deployment</th><th className="th">Model</th><th className="th">Health</th><th className="th">Capabilities</th><th className="th">Limits</th><th className="th">Enabled</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th className="th">Deployment</th>
+                    <th className="th">Model</th>
+                    <th className="th">Limits</th>
+                    <th className="th">Sharing</th>
+                    <th className="th">Enabled</th>
+                  </tr>
+                </thead>
                 <tbody>
                   {b.deployments.map((d) => (
-                    <tr key={d.deployment.id}>
-                      <td className="td">{d.deployment.name}</td>
-                      <td className="td text-muted">{d.deployment.model_name}</td>
-                      <td className="td">{d.health === "ok" ? <Badge tone="ok">ok</Badge> : d.health ? <Badge tone="err">{d.health}</Badge> : <Badge tone="muted">unknown</Badge>}</td>
+                    <tr key={d.id}>
+                      <td className="td">{d.name}</td>
+                      <td className="td font-mono text-xs text-muted">{d.model_name}</td>
                       <td className="td text-xs text-muted">
-                        {d.capabilities
-                          ? Object.entries(d.capabilities).filter(([k, v]) => v === true && typeof v === "boolean").map(([k]) => k).join(", ") || "—"
-                          : "—"}
+                        max {d.max_concurrent} · res {d.local_reserve} · t2 {d.tier2_max}
                       </td>
-                      <td className="td text-muted text-xs">max {d.deployment.max_concurrent} · res {d.deployment.local_reserve} · t2 {d.deployment.tier2_max}</td>
-                      <td className="td">{d.deployment.enabled ? <Badge tone="ok">on</Badge> : <Badge tone="err">off</Badge>}</td>
+                      <td className="td text-xs text-muted">{d.sharing_mode}</td>
+                      <td className="td">{d.enabled ? <Badge tone="ok">on</Badge> : <Badge tone="err">off</Badge>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -56,6 +180,109 @@ export default function BackendsPage() {
           ))}
         </div>
       )}
+
+      <Modal open={!!editing} title={editing?.id ? "Edit backend" : "Add backend"} onClose={() => { setEditing(null); setTesting(null); }} wide>
+        {editing && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Name">
+                <input className="input" value={editing.name} onChange={(e) => upd(editing, { name: e.target.value })} placeholder="e.g. ollama-main" />
+              </Field>
+              <Field label="Type">
+                <Select value={editing.backend_type} onChange={(v) => upd(editing, { backend_type: v })} options={TYPE_OPTS} />
+              </Field>
+            </div>
+            <Field label="Endpoint URL" hint="Base URL, e.g. http://127.0.0.1:11434 or http://gpu-01:8000">
+              <input className="input font-mono" value={editing.endpoint} onChange={(e) => upd(editing, { endpoint: e.target.value })} placeholder="http://…" />
+            </Field>
+            <div className="flex items-end gap-3">
+              <Field label={editing.has_api_key || editing.id ? "API key (blank = keep existing)" : "API key (optional)"}>
+                <input
+                  className="input font-mono"
+                  type="password"
+                  value={editing.api_key}
+                  onChange={(e) => upd(editing, { api_key: e.target.value })}
+                  placeholder={editing.has_api_key ? "••••••••" : "sk-…"}
+                  autoComplete="off"
+                />
+              </Field>
+              <button className="btn-outline shrink-0" onClick={() => test(editing)} disabled={!editing.endpoint}>
+                <PlugZap size={15} /> Test connection
+              </button>
+            </div>
+            {testing && (
+              <div className={`rounded-lg px-3 py-2 text-sm ${testing.ok === undefined ? "bg-panel2 text-muted" : testing.ok ? "bg-ok/10 text-ok" : "bg-err/10 text-err"}`}>
+                {testing.ok === undefined
+                  ? "Testing…"
+                  : testing.ok
+                    ? `Connected in ${testing.latency_ms}ms — ${testing.models?.length ?? 0} models: ${(testing.models ?? []).slice(0, 6).join(", ")}`
+                    : `Failed: ${testing.error ?? `status ${(testing as any).status ?? "?"}`}`}
+              </div>
+            )}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="label mb-0">Deployments</div>
+                <button
+                  className="btn-ghost px-2 py-1 text-xs"
+                  onClick={() => upd(editing, { deployments: [...editing.deployments, { ...EMPTY_DEP }] })}
+                >
+                  <Plus size={13} /> add
+                </button>
+              </div>
+              {editing.deployments.map((d, i) => (
+                <div key={i} className="card space-y-2 border-border/70 p-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    <Field label="Deployment name">
+                      <input className="input" value={d.name} onChange={(e) => updDep(editing, i, { name: e.target.value })} placeholder="llama-8b" />
+                    </Field>
+                    <Field label="Physical model">
+                      <input className="input font-mono" value={d.model_name} onChange={(e) => updDep(editing, i, { model_name: e.target.value })} placeholder="llama3.1:8b" />
+                    </Field>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    <Field label="Max">
+                      <input className="input" type="number" min={1} value={d.max_concurrent} onChange={(e) => updDep(editing, i, { max_concurrent: +e.target.value })} />
+                    </Field>
+                    <Field label="Reserve">
+                      <input className="input" type="number" min={0} value={d.local_reserve} onChange={(e) => updDep(editing, i, { local_reserve: +e.target.value })} />
+                    </Field>
+                    <Field label="Tier-2">
+                      <input className="input" type="number" min={0} value={d.tier2_max} onChange={(e) => updDep(editing, i, { tier2_max: +e.target.value })} />
+                    </Field>
+                    <Field label="Sharing">
+                      <Select value={d.sharing_mode} onChange={(v) => updDep(editing, i, { sharing_mode: v })} options={SHARE_OPTS} />
+                    </Field>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <Toggle checked={d.enabled} onChange={(v) => updDep(editing, i, { enabled: v })} label="enabled" />
+                    {editing.deployments.length > 1 && (
+                      <button
+                        className="btn-ghost px-2 py-1 text-xs text-err"
+                        onClick={() => upd(editing, { deployments: editing.deployments.filter((_, j) => j !== i) })}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center justify-between border-t border-border pt-3">
+              <Toggle checked={editing.enabled} onChange={(v) => upd(editing, { enabled: v })} label="backend enabled" />
+              <div className="flex gap-2">
+                <button className="btn-ghost" onClick={() => setEditing(null)}>Cancel</button>
+                <button
+                  className="btn-primary"
+                  disabled={!editing.name || !editing.endpoint || editing.deployments.some((d) => !d.name || !d.model_name)}
+                  onClick={() => save.mutate(editing)}
+                >
+                  {editing.id ? "Save" : "Add backend"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

@@ -68,6 +68,7 @@ pub fn router(state: AppState) -> Router {
             "/local/api/backends/{id}",
             put(admin_update_backend).delete(admin_delete_backend),
         )
+        .route("/local/api/backends/test", post(admin_test_backend))
         .route("/local/api/deployments", get(admin_list_deployments))
         .route("/local/api/requests", get(admin_list_requests))
         .route(
@@ -408,17 +409,63 @@ struct BackendBody {
 
 async fn admin_list_backends(State(s): State<AppState>) -> Json<Value> {
     let cfg = s.cfg.get().await;
-    Json(json!({"backends": cfg.backends}))
+    // Never echo secrets: mask api_key, expose only whether one is set.
+    let masked: Vec<Value> = cfg
+        .backends
+        .iter()
+        .map(|b| {
+            let mut v = serde_json::to_value(b).unwrap_or_default();
+            v["api_key"] = json!("");
+            v["has_api_key"] = json!(!b.api_key.is_empty());
+            v
+        })
+        .collect();
+    Json(json!({"backends": masked}))
+}
+
+/// Endpoint must be a concrete http(s) URL — blocks file://, javascript:,
+/// bare strings and (best-effort) keeps the operator from pointing the
+/// adapter at non-HTTP schemes.
+fn validate_endpoint(endpoint: &str) -> Result<(), String> {
+    if endpoint.len() > 512 {
+        return Err("endpoint too long".into());
+    }
+    let u = reqwest::Url::parse(endpoint.trim()).map_err(|e| e.to_string())?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return Err("endpoint must be http(s)".into());
+    }
+    if u.host_str().map(|h| h.is_empty()).unwrap_or(true) {
+        return Err("endpoint has no host".into());
+    }
+    Ok(())
 }
 
 async fn admin_add_backend(State(s): State<AppState>, Json(body): Json<BackendBody>) -> Response {
     let mut b = body.backend;
+    if let Err(e) = validate_endpoint(&b.endpoint) {
+        return err(ErrorCode::InvalidRequest, e, "admin");
+    }
     if b.id.is_empty() {
         b.id = uuid::Uuid::new_v4().to_string();
     }
     for d in &mut b.deployments {
         if d.id.is_empty() {
             d.id = uuid::Uuid::new_v4().to_string();
+        }
+        if d.name.len() > 128 || d.model_name.len() > 256 {
+            return err(
+                ErrorCode::InvalidRequest,
+                "name/model_name too long",
+                "admin",
+            );
+        }
+    }
+    // Preserve the stored api_key when the update sends none (the UI never
+    // receives the plaintext key back, so it can't resend it).
+    if b.api_key.is_empty() {
+        let cfg = s.cfg.get().await;
+        if let Some(old) = cfg.backends.iter().find(|x| x.id == b.id) {
+            b.api_key = old.api_key.clone();
         }
     }
     let res = s
@@ -430,6 +477,7 @@ async fn admin_add_backend(State(s): State<AppState>, Json(body): Json<BackendBo
         .await;
     match res {
         Ok(_) => {
+            let _ = s.cfg.persist().await;
             let cfg = s.cfg.get().await;
             s.backends.sync_from_config(&cfg).await;
             let deps: Vec<_> = cfg
@@ -438,6 +486,7 @@ async fn admin_add_backend(State(s): State<AppState>, Json(body): Json<BackendBo
                 .flat_map(|b| b.deployments.clone())
                 .collect();
             s.scheduler.sync_deployments(&deps);
+            s.connector.notify_capacity();
             Json(json!({"ok": true, "id": b.id})).into_response()
         }
         Err(e) => err(ErrorCode::Internal, e.to_string(), "admin"),
@@ -458,6 +507,7 @@ async fn admin_delete_backend(State(s): State<AppState>, Path(id): Path<String>)
     let res = s.cfg.update(|c| c.backends.retain(|b| b.id != id)).await;
     match res {
         Ok(_) => {
+            let _ = s.cfg.persist().await;
             let cfg = s.cfg.get().await;
             s.backends.sync_from_config(&cfg).await;
             let deps: Vec<_> = cfg
@@ -466,9 +516,73 @@ async fn admin_delete_backend(State(s): State<AppState>, Path(id): Path<String>)
                 .flat_map(|b| b.deployments.clone())
                 .collect();
             s.scheduler.sync_deployments(&deps);
+            s.connector.notify_capacity();
             Json(json!({"ok": true})).into_response()
         }
         Err(e) => err(ErrorCode::Internal, e.to_string(), "admin"),
+    }
+}
+
+/// Connectivity probe for the UI's "Test connection" button — hits the
+/// endpoint's /v1/models without persisting anything.
+#[derive(Debug, Deserialize)]
+struct TestBody {
+    endpoint: String,
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    backend_type: String,
+}
+
+async fn admin_test_backend(State(_s): State<AppState>, Json(b): Json<TestBody>) -> Json<Value> {
+    if let Err(e) = validate_endpoint(&b.endpoint) {
+        return Json(json!({"ok": false, "error": e}));
+    }
+    let path = match b.backend_type.as_str() {
+        "ollama" => "/api/tags",
+        _ => "/v1/models",
+    };
+    let url = format!("{}{}", b.endpoint.trim_end_matches('/'), path);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_default();
+    let mut req = client.get(&url);
+    if !b.api_key.is_empty() {
+        req = req.bearer_auth(&b.api_key);
+    }
+    let t = std::time::Instant::now();
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let models: Vec<String> = if b.backend_type == "ollama" {
+                body["models"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|m| m["name"].as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                body["data"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|m| m["id"].as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            Json(json!({
+                "ok": (200..300).contains(&status),
+                "status": status,
+                "latency_ms": t.elapsed().as_millis() as u64,
+                "models": models,
+            }))
+        }
+        Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
     }
 }
 
