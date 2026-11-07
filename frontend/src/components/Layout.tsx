@@ -75,19 +75,20 @@ function StatusBar() {
   const d = q.data ?? {};
   const connected = isClient ? d.server_connected : true;
   return (
-    <header className="sticky top-0 z-20 flex h-11 items-center gap-2 border-b border-border bg-bg/80 px-5 backdrop-blur">
+    <div className="mt-auto space-y-2 border-t border-border/60 px-4 py-3 text-[11px]">
       <Badge tone={connected ? "ok" : "err"} dot>
-        {isClient ? (connected ? "server connected" : "server offline") : "server live"}
-      </Badge>
+        {isClient ? (connected ? "server" : "offline") : "server live"}
+      </Badge>{" "}
       {isClient ? (
-        <Badge tone="muted">local {d.inflight_local ?? 0} · tier2 {d.inflight_tier2 ?? 0}</Badge>
+        <Badge tone="muted">l{d.inflight_local ?? 0} · t{d.inflight_tier2 ?? 0}</Badge>
       ) : (
         <Badge tone="muted">{d.clients_online ?? 0}/{d.clients_total ?? 0} clients</Badge>
       )}
-      <span className="flex-1" />
-      <UpdateChip />
-      <span className="text-[11px] text-muted/60">LOOM {isClient ? "client" : "control"}</span>
-    </header>
+      <div className="flex items-center justify-between pt-1">
+        <UpdateChip />
+        <span className="text-muted/50">{isClient ? "client" : "control"}</span>
+      </div>
+    </div>
   );
 }
 
@@ -153,7 +154,8 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="space-y-1 border-t border-border p-2.5">
+        
+        <StatusBar /><div className="space-y-1 border-t border-border p-2.5">
           {APP_VARIANT === "server" && (
             <button onClick={logout} className="btn-ghost w-full justify-start px-3">
               <LogOut size={16} /> Sign out
@@ -165,7 +167,6 @@ export default function Layout() {
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
-        <StatusBar />
         <main className="min-w-0 flex-1 p-6 lg:p-8">
         <div className="page-enter mx-auto w-full max-w-6xl">
           <Outlet />

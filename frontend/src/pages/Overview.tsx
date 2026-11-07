@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Boxes, Cpu, ListOrdered, Zap } from "lucide-react";
-import { AreaChart, Area, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
+import { AreaChart, Area, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { LiveBadge, PageHeader, Stat } from "../components/ui";
@@ -19,6 +19,28 @@ export default function OverviewPage() {
       buckets.set(t, b);
     }
     return [...buckets.values()].slice(-30);
+  })();
+  const ttftChart = (() => {
+    const buckets = new Map<string, { t: string; ttft: number; n: number }>();
+    for (const h of [...(hist.data?.requests ?? [])].reverse()) {
+      if (!h.ttft_ms) continue;
+      const t = new Date(h.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const b = buckets.get(t) ?? { t, ttft: 0, n: 0 };
+      b.ttft += h.ttft_ms; b.n++; buckets.set(t, b);
+    }
+    return [...buckets.values()].map(b => ({ t: b.t, ttft: Math.round(b.ttft / b.n) })).slice(-30);
+  })();
+  const lat = [...(hist.data?.requests ?? [])].map(h => h.duration_ms ?? 0).filter(Boolean).sort((a, b) => a - b);
+  const pct = (p: number) => lat.length ? Math.round(lat[Math.min(lat.length - 1, Math.floor(p * lat.length))]) : 0;
+  const depCap = useQuery({ queryKey: ["deps"], queryFn: () => api.get<{ deployments: any[] }>("/api/deployments") });
+  const perClient = (() => {
+    const m = new Map<string, { name: string; cap: number }>();
+    for (const d of depCap.data?.deployments ?? []) {
+      const n = clients.data?.clients.find(c => c.id === d.client_id)?.name ?? "client";
+      const b = m.get(n) ?? { name: n, cap: 0 };
+      b.cap += d.runtime?.tier2_total ?? 0; m.set(n, b);
+    }
+    return [...m.values()];
   })();
   const [, setTick] = useState(0);
 
@@ -63,6 +85,44 @@ export default function OverviewPage() {
           </ResponsiveContainer>
         </div>
       )}
+      <div className="grid gap-4 md:grid-cols-3">
+        {ttftChart.length > 1 && (
+          <div className="card p-4">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">avg TTFT (ms)</div>
+            <ResponsiveContainer width="100%" height={130}>
+              <AreaChart data={ttftChart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+                <CartesianGrid stroke="#1c2740" vertical={false} />
+                <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <Tooltip contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <Area type="monotone" dataKey="ttft" stroke="#5b7eae" fill="#5b7eae" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+        <div className="card p-4">
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">latency (ms)</div>
+          <div className="grid grid-cols-3 gap-2 pt-3 text-center">
+            <div><div className="text-xl font-semibold text-text">{pct(0.5)}</div><div className="text-[10px] text-muted">p50</div></div>
+            <div><div className="text-xl font-semibold text-text">{pct(0.95)}</div><div className="text-[10px] text-muted">p95</div></div>
+            <div><div className="text-xl font-semibold text-text">{pct(0.99)}</div><div className="text-[10px] text-muted">p99</div></div>
+          </div>
+        </div>
+        {perClient.length > 0 && (
+          <div className="card p-4">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">tier-2 capacity / client</div>
+            <ResponsiveContainer width="100%" height={130}>
+              <BarChart data={perClient} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+                <CartesianGrid stroke="#1c2740" vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} />
+                <Tooltip contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <Bar dataKey="cap" fill="#3d6fae" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
       <div className="card">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Connected clients</div>
         <table className="w-full">
