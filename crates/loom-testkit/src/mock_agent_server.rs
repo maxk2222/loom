@@ -134,6 +134,7 @@ impl MockAgentServer {
                 payload_len_hint,
                 virtual_model,
                 deployment_id,
+                "application/json",
             ))
             .await
             .map_err(|_| Status::unavailable("control stream closed"))?;

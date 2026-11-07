@@ -10,6 +10,16 @@ pub enum ApiType {
     Embeddings,
     /// Virtual model that serves more than one api type (resolved per request).
     Multi,
+    /// POST /v1/images/generations (JSON).
+    Images,
+    /// POST /v1/audio/speech — text-to-speech (JSON).
+    AudioSpeech,
+    /// POST /v1/audio/transcriptions — speech-to-text (multipart).
+    AudioTranscription,
+    /// POST /v1/audio/translations (multipart).
+    AudioTranslation,
+    /// POST /v1/videos (JSON passthrough; job-style polling not yet routed).
+    Video,
 }
 
 impl ApiType {
@@ -19,6 +29,11 @@ impl ApiType {
             ApiType::Completions => "completions",
             ApiType::Embeddings => "embeddings",
             ApiType::Multi => "multi",
+            ApiType::Images => "images",
+            ApiType::AudioSpeech => "audio_speech",
+            ApiType::AudioTranscription => "audio_transcription",
+            ApiType::AudioTranslation => "audio_translation",
+            ApiType::Video => "video",
         }
     }
 
@@ -28,7 +43,30 @@ impl ApiType {
             ApiType::Completions => "/v1/completions",
             ApiType::Embeddings => "/v1/embeddings",
             ApiType::Multi => "/v1",
+            ApiType::Images => "/v1/images/generations",
+            ApiType::AudioSpeech => "/v1/audio/speech",
+            ApiType::AudioTranscription => "/v1/audio/transcriptions",
+            ApiType::AudioTranslation => "/v1/audio/translations",
+            ApiType::Video => "/v1/videos",
         }
+    }
+
+    /// Text-family apis where an unprobed deployment is admitted permissively.
+    /// Media apis require an explicit capability flag — a never-probed text
+    /// deployment must never absorb e.g. an image-generation request.
+    pub fn is_text_family(&self) -> bool {
+        matches!(
+            self,
+            ApiType::Chat | ApiType::Completions | ApiType::Embeddings | ApiType::Multi
+        )
+    }
+
+    /// Whether the request body is multipart/form-data rather than JSON.
+    pub fn is_multipart(&self) -> bool {
+        matches!(
+            self,
+            ApiType::AudioTranscription | ApiType::AudioTranslation
+        )
     }
 }
 
@@ -46,6 +84,11 @@ impl std::str::FromStr for ApiType {
             "completions" => ApiType::Completions,
             "embeddings" => ApiType::Embeddings,
             "multi" => ApiType::Multi,
+            "images" => ApiType::Images,
+            "audio_speech" => ApiType::AudioSpeech,
+            "audio_transcription" => ApiType::AudioTranscription,
+            "audio_translation" => ApiType::AudioTranslation,
+            "video" => ApiType::Video,
             _ => return Err(()),
         })
     }
@@ -60,6 +103,21 @@ pub struct Capabilities {
     pub completions: bool,
     #[serde(default)]
     pub embeddings: bool,
+    /// POST /v1/images/generations support.
+    #[serde(default)]
+    pub images: bool,
+    /// POST /v1/audio/speech (TTS).
+    #[serde(default)]
+    pub audio_speech: bool,
+    /// POST /v1/audio/transcriptions (STT).
+    #[serde(default)]
+    pub audio_transcription: bool,
+    /// POST /v1/audio/translations.
+    #[serde(default)]
+    pub audio_translation: bool,
+    /// POST /v1/videos.
+    #[serde(default)]
+    pub video: bool,
     #[serde(default)]
     pub tools: bool,
     #[serde(default)]
@@ -83,6 +141,11 @@ impl Capabilities {
             ApiType::Completions => self.completions,
             ApiType::Embeddings => self.embeddings,
             ApiType::Multi => self.chat || self.completions || self.embeddings,
+            ApiType::Images => self.images,
+            ApiType::AudioSpeech => self.audio_speech,
+            ApiType::AudioTranscription => self.audio_transcription,
+            ApiType::AudioTranslation => self.audio_translation,
+            ApiType::Video => self.video,
         }
     }
 

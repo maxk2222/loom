@@ -100,6 +100,23 @@ pub trait BackendAdapter: Send + Sync {
         body: Value,
         cancel: CancellationToken,
     ) -> Result<BackendResponse, AdapterError>;
+
+    /// Forward a raw multipart body (audio transcriptions/translations). The
+    /// `model` form field is rewritten to the deployment's physical model.
+    /// Default: unsupported — most backends serve no multipart endpoints.
+    async fn forward_multipart(
+        &self,
+        api: ApiType,
+        model: &str,
+        body: &[u8],
+        content_type: &str,
+        cancel: CancellationToken,
+    ) -> Result<BackendResponse, AdapterError> {
+        let _ = (api, model, body, content_type, cancel);
+        Err(AdapterError::Protocol(
+            "multipart not supported by this backend".into(),
+        ))
+    }
 }
 
 /// Build an adapter for a backend config.
@@ -141,6 +158,65 @@ pub(crate) mod common {
             req = req.bearer_auth(api_key);
         }
 
+        send_stream(req, cancel).await
+    }
+
+    /// Forward a raw multipart/form-data body to `{endpoint}{api.path()}`,
+    /// rewriting the `model` form field to the physical model name. File
+    /// parts, filenames and part content types are preserved.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn forward_multipart_openai(
+        http: &reqwest::Client,
+        endpoint: &str,
+        api_key: &str,
+        api: ApiType,
+        model: &str,
+        body: &[u8],
+        content_type: &str,
+        cancel: CancellationToken,
+        timeout: std::time::Duration,
+    ) -> Result<BackendResponse, AdapterError> {
+        let boundary = multer::parse_boundary(content_type)
+            .map_err(|e| AdapterError::Protocol(format!("multipart: {e}")))?;
+        let bytes = bytes::Bytes::copy_from_slice(body);
+        let stream = futures_util::stream::once(async move { Ok::<_, std::io::Error>(bytes) });
+        let mut mp = multer::Multipart::new(stream, boundary);
+        let mut form = reqwest::multipart::Form::new();
+        while let Some(field) = mp
+            .next_field()
+            .await
+            .map_err(|e| AdapterError::Protocol(format!("multipart: {e}")))?
+        {
+            let name = field.name().unwrap_or_default().to_string();
+            if name == "model" {
+                continue; // rewritten with the deployment's physical name below
+            }
+            let fname = field.file_name().map(str::to_string);
+            let fct = field.content_type().map(|m| m.to_string());
+            let data = field
+                .bytes()
+                .await
+                .map_err(|e| AdapterError::Io(e.to_string()))?;
+            let mut part = reqwest::multipart::Part::bytes(data.to_vec());
+            if let Some(f) = fname {
+                part = part.file_name(f);
+            }
+            if let Some(c) = fct {
+                // mime_str consumes the part on failure — rebuild one from the
+                // (cheaply cloned) data in that unreachable case.
+                part = match part.mime_str(&c) {
+                    Ok(p) => p,
+                    Err(_) => reqwest::multipart::Part::bytes(data.to_vec()),
+                };
+            }
+            form = form.part(name, part);
+        }
+        form = form.text("model", model.to_string());
+        let url = format!("{}{}", endpoint.trim_end_matches('/'), api.path());
+        let mut req = http.post(&url).multipart(form).timeout(timeout);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
         send_stream(req, cancel).await
     }
 

@@ -57,7 +57,10 @@ export default function ApiUsersPage() {
   const [editScopes, setEditScopes] = useState<Set<string>>(new Set());
   const [editName, setEditName] = useState("");
 
-  const SCOPES = ["chat", "completions", "embeddings", "models"];
+  const SCOPES = [
+    "chat", "completions", "embeddings", "models",
+    "images", "audio_speech", "audio_transcription", "audio_translation", "video",
+  ];
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["projects"] });

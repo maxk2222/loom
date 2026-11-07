@@ -47,6 +47,7 @@ rustls.workspace = true
 rcgen.workspace = true
 url.workspace = true
 reqwest.workspace = true
+multer.workspace = true
 clap.workspace = true
 async-once-cell.workspace = true
 http = "1"

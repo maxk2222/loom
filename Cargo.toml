@@ -40,7 +40,8 @@ axum = { version = "0.8", features = ["multipart", "macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "fs"] }
 hyper = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "multipart"], default-features = false }
+multer = "3"
 eventsource-stream = "0.2"
 
 # grpc

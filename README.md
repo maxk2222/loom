@@ -243,6 +243,23 @@ dry-runs classification on any prompt. Routed responses carry
 classifications fall back to the configured fallback model. The API key's
 grant on the router name transparently covers all members.
 
+**Deterministic routing.** Routers also support `mode: "heuristic"` — no
+engine model, zero added latency. Each member gets `when` rules over request
+metrics (`chars`, `msgs`, `code`, `images`, `system`); the first matching
+member in list order wins, with a catch-all member or fallback model behind
+it. Rule editing, ordering and a metrics-preview test console live on the
+same dashboard page.
+
+**Media endpoints.** Beyond chat, virtual models can serve the wider OpenAI
+surface: `POST /v1/images/generations`, `/v1/audio/speech`,
+`/v1/audio/transcriptions`, `/v1/audio/translations` and `/v1/videos`
+(multipart bodies pass through verbatim). Deployments advertise these via
+capability flags (`images`, `audio_speech`, `audio_transcription`,
+`audio_translation`, `video` — settable per deployment in the client
+config); routing, grants, scopes and rate limits apply exactly like chat.
+Generic OpenAI-compatible and vLLM adapters forward media requests; async
+video *job polling* is not routed yet — creation requests only.
+
 **Readiness-aware routing.** Clients probe their backends every ~10s —
 endpoint health, installed models, and (for Ollama, vLLM, llama.cpp) the
 *actually loaded* set. A deployment whose backend is down or whose model was

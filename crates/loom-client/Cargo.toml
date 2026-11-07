@@ -19,6 +19,7 @@ axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 reqwest.workspace = true
+multer.workspace = true
 eventsource-stream.workspace = true
 tonic.workspace = true
 serde.workspace = true

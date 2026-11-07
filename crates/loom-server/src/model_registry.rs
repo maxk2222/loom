@@ -179,11 +179,14 @@ impl ModelRegistry {
                 if !m.enabled {
                     return false;
                 }
-                // Unprobed members (reported all-false / empty) are permissive —
-                // the client's local admission is authoritative. Required caps
-                // only gate members that actually reported capabilities.
+                // Unprobed members (reported all-false / empty) are permissive
+                // for text-family apis — the client's local admission is
+                // authoritative. Media apis require an explicit flag: an
+                // unprobed chat deployment must never absorb image/audio
+                // requests.
                 let unknown = m.capabilities == Capabilities::default();
-                unknown || (m.capabilities.supports_api(api) && m.capabilities.satisfies(&merged))
+                (unknown && api.is_text_family())
+                    || (m.capabilities.supports_api(api) && m.capabilities.satisfies(&merged))
             })
             .cloned()
             .collect();

@@ -119,4 +119,27 @@ impl BackendAdapter for VllmAdapter {
         )
         .await
     }
+
+    // vLLM ≥0.5 serves /v1/audio/transcriptions for whisper-class models.
+    async fn forward_multipart(
+        &self,
+        api: ApiType,
+        model: &str,
+        body: &[u8],
+        content_type: &str,
+        cancel: CancellationToken,
+    ) -> Result<BackendResponse, AdapterError> {
+        common::forward_multipart_openai(
+            &self.http,
+            self.endpoint(),
+            &self.cfg.api_key,
+            api,
+            model,
+            body,
+            content_type,
+            cancel,
+            Duration::from_secs(600),
+        )
+        .await
+    }
 }

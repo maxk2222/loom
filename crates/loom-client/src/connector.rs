@@ -532,6 +532,21 @@ impl Connector {
         let state = self.state.clone();
         tokio::spawn(async move {
             let request_id = a.request_id.clone();
+            // Reject api types this build doesn't understand *before*
+            // accepting — retryable, so the server tries the next candidate
+            // instead of failing the request on this client.
+            if a.api_type.parse::<ApiType>().is_err() {
+                let _ = ctrl_tx
+                    .send(client_msgs::assign_reject(
+                        &request_id,
+                        &a.lease_id,
+                        a.fencing_token,
+                        "unsupported_api",
+                        true,
+                    ))
+                    .await;
+                return;
+            }
             // Admission check.
             let admit =
                 state
@@ -713,16 +728,37 @@ async fn run_request(
             return Err("empty request payload".to_string());
         }
 
-        let body: serde_json::Value =
-            serde_json::from_slice(&payload).map_err(|e| format!("bad payload json: {e}"))?;
-        let api: ApiType = a.api_type.parse().unwrap_or(ApiType::Chat);
+        // Unknown api types are rejected — routing them as chat would send a
+        // media request body to /v1/chat/completions. The server then tries
+        // the next candidate (Reject is the graceful "not me" path).
+        let api: ApiType = a
+            .api_type
+            .parse()
+            .map_err(|_| format!("unknown api type '{}'", a.api_type))?;
 
-        // Forward to backend.
-        let resp = state
-            .backends
-            .forward(&a.deployment_id, api, body, cancel.clone())
-            .await
-            .map_err(|e| format!("upstream: {e}"))?;
+        // Multipart bodies (audio transcription/translation) skip JSON
+        // parsing and go through the raw verbatim forward path.
+        let resp = if api.is_multipart() || a.content_type.starts_with("multipart/") {
+            state
+                .backends
+                .forward_multipart(
+                    &a.deployment_id,
+                    api,
+                    &payload,
+                    &a.content_type,
+                    cancel.clone(),
+                )
+                .await
+                .map_err(|e| format!("upstream: {e}"))?
+        } else {
+            let body: serde_json::Value =
+                serde_json::from_slice(&payload).map_err(|e| format!("bad payload json: {e}"))?;
+            state
+                .backends
+                .forward(&a.deployment_id, api, body, cancel.clone())
+                .await
+                .map_err(|e| format!("upstream: {e}"))?
+        };
 
         let mut ttft_ms: i64 = 0;
         let mut usage = loom_core::openai::Usage::default();

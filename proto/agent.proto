@@ -103,6 +103,11 @@ message Capabilities {
   bool streaming = 7;
   uint32 context_length = 8;
   repeated string modalities = 9;    // "text","image","audio",...
+  bool images = 10;                  // POST /v1/images/generations
+  bool audio_speech = 11;            // POST /v1/audio/speech
+  bool audio_transcription = 12;     // POST /v1/audio/transcriptions
+  bool audio_translation = 13;       // POST /v1/audio/translations
+  bool video = 14;                   // POST /v1/videos
 }
 
 message DeploymentCapacity {
@@ -167,6 +172,7 @@ message AssignRequest {
   uint32 payload_bytes = 7;          // expected size of request body on data stream
   string virtual_model = 8;
   string deployment_id = 9;          // the leased deployment the client must use
+  string content_type = 10;          // request body media type; empty = application/json
 }
 
 message RequiredCaps {

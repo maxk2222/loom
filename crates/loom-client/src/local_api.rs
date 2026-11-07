@@ -16,7 +16,7 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use loom_core::capability::{ApiType, BackendType};
+use loom_core::capability::{ApiType, BackendType, RequiredCaps};
 use loom_core::config::BackendConfig;
 use loom_core::error::{ApiError, ErrorCode};
 use loom_core::openai::{request_model, required_caps_from_request, ModelList};
@@ -123,6 +123,19 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/chat/completions", post(openai_chat))
         .route("/v1/completions", post(openai_completions))
         .route("/v1/embeddings", post(openai_embeddings))
+        .route("/v1/images/generations", post(openai_images))
+        .route("/v1/audio/speech", post(openai_speech))
+        .route(
+            "/v1/audio/transcriptions",
+            post(openai_transcription)
+                .route_layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/audio/translations",
+            post(openai_translation)
+                .route_layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024)),
+        )
+        .route("/v1/videos", post(openai_videos))
         .route("/v1/models", get(openai_models))
         // local admin
         .route("/local/api/status", get(admin_status))
@@ -274,6 +287,88 @@ async fn openai_embeddings(
 ) -> Response {
     openai_inference(s, ApiType::Embeddings, headers, body).await
 }
+async fn openai_images(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    openai_inference(s, ApiType::Images, headers, body).await
+}
+async fn openai_speech(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    openai_inference(s, ApiType::AudioSpeech, headers, body).await
+}
+async fn openai_videos(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    openai_inference(s, ApiType::Video, headers, body).await
+}
+
+/// Raw-body variants for multipart audio endpoints. `openai_inference`
+/// takes an `InBody` so the downstream admit/forward/bridge flow is shared.
+enum InBody {
+    Json(Value),
+    Multipart {
+        bytes: bytes::Bytes,
+        content_type: String,
+    },
+}
+
+async fn openai_multipart(
+    s: AppState,
+    headers: HeaderMap,
+    api: ApiType,
+    body: bytes::Bytes,
+) -> Response {
+    let request_id = loom_core::ids::RequestId::new().to_string();
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let model = match multipart_model(&body, &content_type).await {
+        Some(m) => m,
+        None => {
+            return err(
+                ErrorCode::InvalidRequest,
+                "missing model field",
+                &request_id,
+            )
+        }
+    };
+    openai_inference_raw(
+        s,
+        api,
+        headers,
+        InBody::Multipart {
+            bytes: body,
+            content_type,
+        },
+        model,
+        request_id,
+    )
+    .await
+}
+
+async fn openai_transcription(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    openai_multipart(s, headers, ApiType::AudioTranscription, body).await
+}
+async fn openai_translation(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    openai_multipart(s, headers, ApiType::AudioTranslation, body).await
+}
 
 async fn openai_models(State(s): State<AppState>) -> Json<Value> {
     let models = s.backends.local_models().await;
@@ -289,14 +384,29 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
         Some(m) => m.to_string(),
         None => return err(ErrorCode::InvalidRequest, "missing model", &request_id),
     };
+    openai_inference_raw(s, api, headers, InBody::Json(body), model, request_id).await
+}
+
+/// Shared admit → forward → bridge flow for JSON and multipart bodies.
+/// `model` is the caller-facing name (JSON field or multipart form field).
+async fn openai_inference_raw(
+    s: AppState,
+    api: ApiType,
+    headers: HeaderMap,
+    ib: InBody,
+    model: String,
+    request_id: String,
+) -> Response {
     let Some(dep_id) = s.backends.resolve_model(&model).await else {
         return err(ErrorCode::ModelNotFound, "no such model", &request_id);
     };
 
-    // Capability check.
     // Capability check — only enforced when probing succeeded; unknown caps
     // defer to the backend (its own error surfaces upstream).
-    let req_caps = required_caps_from_request(&body);
+    let req_caps = match &ib {
+        InBody::Json(b) => required_caps_from_request(b),
+        InBody::Multipart { .. } => RequiredCaps::default(),
+    };
     if let Some(caps) = s.backends.capabilities(&dep_id).await {
         if !caps.supports_api(api) {
             return err(
@@ -345,13 +455,31 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
             deployment_id: dep_id.clone(),
             api: api.as_str().into(),
             started_unix_ms: now_ms(),
-            est_tokens: loom_core::tokens::estimate_request_tokens(&body),
+            est_tokens: match &ib {
+                InBody::Json(b) => loom_core::tokens::estimate_request_tokens(b),
+                // rough proxy: ~1 token per 4 bytes of audio payload
+                InBody::Multipart { bytes, .. } => (bytes.len() / 4) as u32,
+            },
         },
     );
 
     let started = Instant::now();
     let cancel = CancellationToken::new();
-    let resp = s.backends.forward(&dep_id, api, body, cancel.clone()).await;
+    let resp = match &ib {
+        InBody::Json(b) => {
+            s.backends
+                .forward(&dep_id, api, b.clone(), cancel.clone())
+                .await
+        }
+        InBody::Multipart {
+            bytes,
+            content_type,
+        } => {
+            s.backends
+                .forward_multipart(&dep_id, api, bytes, content_type, cancel.clone())
+                .await
+        }
+    };
 
     let resp = match resp {
         Ok(r) => r,
@@ -425,9 +553,13 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
     }
 
     let content_type = if resp.is_event_stream {
-        "text/event-stream"
+        "text/event-stream".to_string()
+    } else if !resp.content_type.is_empty() {
+        // upstream media type (audio/mpeg, application/json, …) — the
+        // backend's own answer wins over a static guess.
+        resp.content_type.clone()
     } else {
-        "application/json"
+        "application/json".to_string()
     };
     let _ = headers;
 
@@ -439,6 +571,21 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
             tokio_stream::wrappers::ReceiverStream::new(rx),
         ))
         .unwrap_or_else(|_| err(ErrorCode::Internal, "response build", &request_id))
+}
+
+/// Extract the `model` form field from a raw multipart request body — it
+/// decides which local deployment serves the transcription/translation.
+async fn multipart_model(body: &[u8], content_type: &str) -> Option<String> {
+    let boundary = multer::parse_boundary(content_type).ok()?;
+    let bytes = bytes::Bytes::copy_from_slice(body);
+    let stream = futures_util::stream::once(async move { Ok::<_, std::io::Error>(bytes) });
+    let mut mp = multer::Multipart::new(stream, boundary);
+    while let Ok(Some(field)) = mp.next_field().await {
+        if field.name() == Some("model") {
+            return field.text().await.ok().map(|s| s.trim().to_string());
+        }
+    }
+    None
 }
 
 fn err(code: ErrorCode, msg: impl Into<String>, request_id: &str) -> Response {

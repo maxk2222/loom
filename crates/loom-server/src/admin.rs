@@ -701,14 +701,29 @@ async fn issue_enroll_token(State(s): State<AdminState>, req: Request) -> Respon
 // ---------------- deployments / virtual models ----------------
 
 async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
-    let rows: Vec<(uuid::Uuid, uuid::Uuid, String, String, String, bool, String)> = sqlx::query_as(
-        "SELECT d.id, d.client_id, d.name, d.backend_type, d.model_name, d.enabled, c.name AS client_name
-         FROM deployments d LEFT JOIN clients c ON c.id = d.client_id ORDER BY d.name")
-        .fetch_all(&s.db).await.unwrap_or_default();
+    type DepRow = (
+        uuid::Uuid,
+        uuid::Uuid,
+        String,
+        String,
+        String,
+        bool,
+        String,
+        Value,
+    );
+    let rows: Vec<DepRow> = sqlx::query_as(
+        "SELECT d.id, d.client_id, d.name, d.backend_type, d.model_name, d.enabled,
+                    c.name AS client_name, d.capabilities
+             FROM deployments d LEFT JOIN clients c ON c.id = d.client_id ORDER BY d.name",
+    )
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default();
     let mut out = Vec::new();
-    for (id, cid, n, bt, mn, en, cn) in rows {
+    for (id, cid, n, bt, mn, en, cn, caps) in rows {
         let rt = s.registry.dep_runtime(&id.to_string()).await.ok().flatten();
         out.push(json!({"id":id,"client_id":cid,"client_name":cn,"name":n,"backend_type":bt,"model_name":mn,"enabled":en,
+            "capabilities": caps,
             "runtime": rt.map(|r| json!({"state":r.state,"tier2_free":r.tier2_free,"tier2_total":r.tier2_total}))}));
     }
     Json(json!({"deployments": out}))
@@ -1359,8 +1374,18 @@ async fn delete_router(State(s): State<AdminState>, Path(id): Path<String>) -> R
 }
 
 /// Router config sanity: engine/fallback must resolve to non-router models,
-/// at least one member required.
+/// at least one member required. `mode: "heuristic"` needs no engine model
+/// but requires a catch-all member (empty/absent `when`) or a fallback.
 async fn validate_router_cfg(s: &AdminState, cfg: &Value) -> Result<(), StatusCode> {
+    let heuristic = cfg["mode"].as_str() == Some("heuristic");
+    if !heuristic
+        && cfg["router_model"]
+            .as_str()
+            .map(|v| v.is_empty())
+            .unwrap_or(true)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     for k in ["router_model", "fallback_model"] {
         if let Some(n) = cfg[k].as_str().filter(|v| !v.is_empty()) {
             match s.models.resolve(n).await {
@@ -1375,6 +1400,20 @@ async fn validate_router_cfg(s: &AdminState, cfg: &Value) -> Result<(), StatusCo
         .unwrap_or(true)
     {
         return Err(StatusCode::BAD_REQUEST);
+    }
+    if heuristic {
+        let has_fallback = cfg["fallback_model"]
+            .as_str()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let catch_all = cfg["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|m| m["when"].as_object().map(|o| o.is_empty()).unwrap_or(true));
+        if !has_fallback && !catch_all {
+            return Err(StatusCode::BAD_REQUEST);
+        }
     }
     // `vm:` member refs must resolve to a real non-router model — otherwise
     // the router would either 503 at dispatch time or recurse. `dep:` refs

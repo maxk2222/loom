@@ -15,6 +15,11 @@ const STRATEGIES = [
 ];
 const API_TYPES = [
   { value: "chat", label: "Chat completions" },
+  { value: "images", label: "Image generation" },
+  { value: "audio_speech", label: "Audio — speech (TTS)" },
+  { value: "audio_transcription", label: "Audio — transcription (STT)" },
+  { value: "audio_translation", label: "Audio — translation" },
+  { value: "video", label: "Video generation" },
   { value: "completions", label: "Completions" },
   { value: "embeddings", label: "Embeddings" },
 ];

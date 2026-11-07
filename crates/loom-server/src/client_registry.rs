@@ -347,6 +347,9 @@ async fn upsert_deployment(db: &PgPool, client_id: &str, d: &DeploymentReport) -
             "tools": c.tools, "vision": c.vision, "json_mode": c.json_mode,
             "streaming": c.streaming, "context_length": c.context_length,
             "modalities": c.modalities,
+            "images": c.images, "audio_speech": c.audio_speech,
+            "audio_transcription": c.audio_transcription,
+            "audio_translation": c.audio_translation, "video": c.video,
         })
     });
     sqlx::query(

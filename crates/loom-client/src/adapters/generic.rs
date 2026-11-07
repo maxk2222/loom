@@ -124,4 +124,26 @@ impl BackendAdapter for GenericAdapter {
         )
         .await
     }
+
+    async fn forward_multipart(
+        &self,
+        api: ApiType,
+        model: &str,
+        body: &[u8],
+        content_type: &str,
+        cancel: CancellationToken,
+    ) -> Result<BackendResponse, AdapterError> {
+        common::forward_multipart_openai(
+            &self.http,
+            self.endpoint(),
+            &self.cfg.api_key,
+            api,
+            model,
+            body,
+            content_type,
+            cancel,
+            Duration::from_secs(600),
+        )
+        .await
+    }
 }

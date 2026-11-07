@@ -1,16 +1,27 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Route, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Plus, Route, Trash2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { Badge, Card, Field, Modal, Select, Spinner, Toggle } from "../components/ui";
 import type { DeploymentRow, VirtualModel } from "../lib/types";
 
+interface WhenRule {
+  chars_lt?: number;
+  chars_gte?: number;
+  msgs_lt?: number;
+  msgs_gte?: number;
+  code?: boolean;
+  images?: boolean;
+  system?: boolean;
+}
 interface RouterMember {
   ref: string; // "vm:<api_name>" | "dep:<uuid>"
   name: string;
   description: string;
+  when?: WhenRule; // heuristic mode: first matching member wins
 }
 interface RouterConfig {
+  mode: "llm" | "heuristic";
   router_model: string;
   system_prompt: string;
   fallback_model: string;
@@ -26,8 +37,14 @@ interface RouterRow {
 }
 
 const EMPTY_CFG: RouterConfig = {
-  router_model: "", system_prompt: "", fallback_model: "", max_user_chars: 2000, members: [],
+  mode: "llm", router_model: "", system_prompt: "", fallback_model: "", max_user_chars: 2000, members: [],
 };
+
+const TRI = [
+  { value: "", label: "any" },
+  { value: "true", label: "yes" },
+  { value: "false", label: "no" },
+];
 
 export default function RoutersPage() {
   const qc = useQueryClient();
@@ -38,7 +55,11 @@ export default function RoutersPage() {
   });
   const vms = useQuery({ queryKey: ["vms"], queryFn: () => api.get<{ models: (VirtualModel & { kind?: string })[] }>("/api/models") });
   const deps = useQuery({ queryKey: ["deployments"], queryFn: () => api.get<{ deployments: DeploymentRow[] }>("/api/deployments") });
-  const engines = (vms.data?.models ?? []).filter((m) => (m.kind ?? "vm") === "vm" && m.api_type !== "embeddings");
+  // Engines must answer chat completions; members are routed chat traffic.
+  // Routers and non-chat models (media/embedding only) are excluded.
+  const engines = (vms.data?.models ?? []).filter(
+    (m) => (m.kind ?? "vm") === "vm" && ["chat", "multi", "completions"].includes(m.api_type),
+  );
 
   const [open, setOpen] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
@@ -47,6 +68,7 @@ export default function RoutersPage() {
   const [testPrompt, setTestPrompt] = useState("");
   const [testRes, setTestRes] = useState<any>(null);
   const [testing, setTesting] = useState(false);
+  const [saveErr, setSaveErr] = useState("");
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["routers"] });
   const setC = (patch: Partial<RouterConfig>) => setF({ ...f, config: { ...f.config, ...patch } });
@@ -63,11 +85,16 @@ export default function RoutersPage() {
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
+    setSaveErr("");
     const body = { api_name: f.api_name, description: f.description, enabled: f.enabled, config: f.config };
-    if (editId) await api.put(`/api/routers/${editId}`, body);
-    else await api.post("/api/routers", body);
-    setOpen(false);
-    refresh();
+    try {
+      if (editId) await api.put(`/api/routers/${editId}`, body);
+      else await api.post("/api/routers", body);
+      setOpen(false);
+      refresh();
+    } catch (err: any) {
+      setSaveErr(err?.message ?? "save failed");
+    }
   };
 
   const del = async (id: string) => {
@@ -76,12 +103,33 @@ export default function RoutersPage() {
     refresh();
   };
 
+  const isHeuristic = f.config.mode === "heuristic";
   const addMember = () =>
     setC({ members: [...f.config.members, { ref: "", name: "", description: "" }] });
   const setMember = (i: number, patch: Partial<RouterMember>) => {
     const members = f.config.members.slice();
     members[i] = { ...members[i], ...patch };
     setC({ members });
+  };
+  const setWhen = (i: number, patch: Partial<WhenRule>) => {
+    const members = f.config.members.slice();
+    const w = { ...(members[i].when ?? {}), ...patch } as Record<string, unknown>;
+    for (const k of Object.keys(w)) if (w[k] === undefined || w[k] === "") delete w[k];
+    members[i] = { ...members[i], when: w as WhenRule };
+    setC({ members });
+  };
+  const moveMember = (i: number, dir: -1 | 1) => {
+    const j = i + dir;
+    if (j < 0 || j >= f.config.members.length) return;
+    const members = f.config.members.slice();
+    [members[i], members[j]] = [members[j], members[i]];
+    setC({ members });
+  };
+  const whenSummary = (w?: WhenRule) => {
+    if (!w || Object.keys(w).length === 0) return "catch-all";
+    return Object.entries(w)
+      .map(([k, v]) => `${k.replace("_lt", "<").replace("_gte", "≥")} ${typeof v === "number" ? v : v ? "yes" : "no"}`)
+      .join(" · ");
   };
   const memberLabel = (ref: string) => {
     if (ref.startsWith("vm:")) return `virtual · ${ref.slice(3)}`;
@@ -126,7 +174,9 @@ export default function RoutersPage() {
               </div>
               {r.description && <div className="text-xs text-muted">{r.description}</div>}
               <div className="flex flex-wrap gap-1.5 text-[11px]">
-                <Badge tone="accent">engine: {r.config?.router_model || "—"}</Badge>
+                <Badge tone={r.config?.mode === "heuristic" ? "warn" : "accent"}>
+                  {r.config?.mode === "heuristic" ? "rules" : `engine: ${r.config?.router_model || "—"}`}
+                </Badge>
                 <Badge tone="muted">{(r.config?.members ?? []).length} members</Badge>
                 {r.config?.fallback_model && <Badge tone="warn">fallback: {r.config.fallback_model}</Badge>}
               </div>
@@ -134,6 +184,9 @@ export default function RoutersPage() {
                 {(r.config?.members ?? []).map((m, i) => (
                   <div key={i} className="flex items-baseline gap-2 text-xs">
                     <span className="font-mono text-text/90">{m.name}</span>
+                    {r.config?.mode === "heuristic" && (
+                      <span className="rounded bg-panel2 px-1 font-mono text-[10px] text-accent/90">{whenSummary(m.when)}</span>
+                    )}
                     <span className="truncate text-muted/80">{memberLabel(m.ref)} — {m.description}</span>
                   </div>
                 ))}
@@ -186,12 +239,22 @@ export default function RoutersPage() {
                 <input className="input font-mono" required value={f.api_name} placeholder="loom-auto"
                   onChange={(e) => setF({ ...f, api_name: e.target.value })} />
               </Field>
+              <Field label="Routing mode" hint={isHeuristic ? "first matching member wins — order matters" : undefined}>
+                <Select value={f.config.mode}
+                  options={[
+                    { value: "llm", label: "LLM classifier" },
+                    { value: "heuristic", label: "Heuristic rules" },
+                  ]}
+                  onChange={(v) => setC({ mode: v as RouterConfig["mode"] })} />
+              </Field>
+            </div>
+            {!isHeuristic && (
               <Field label="Router engine (classifier model)">
                 <Select value={f.config.router_model}
                   options={[{ value: "", label: "choose…" }, ...engines.map((m) => ({ value: m.api_name, label: m.api_name }))]}
                   onChange={(v) => setC({ router_model: v })} />
               </Field>
-            </div>
+            )}
             <Field label="Description">
               <input className="input" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} />
             </Field>
@@ -202,27 +265,59 @@ export default function RoutersPage() {
                 <button type="button" className="btn-ghost px-2 py-0.5 text-xs" onClick={addMember}><Plus size={13} /> add</button>
               </div>
               {f.config.members.map((m, i) => (
-                <Card key={i} className="grid grid-cols-[1fr,140px,1fr,28px] items-center gap-2 bg-panel2/50 p-2.5">
-                  <Select value={m.ref} onChange={(ref) => {
-                    const auto = ref.startsWith("vm:") ? ref.slice(3)
-                      : (deps.data?.deployments ?? []).find((d) => d.id === ref.slice(4))?.model_name ?? "";
-                    setMember(i, { ref, name: m.name || auto });
-                  }}
-                    options={[
-                      { value: "", label: memberLabel(m.ref) },
-                      ...engines.map((v) => ({ value: `vm:${v.api_name}`, label: `vm · ${v.api_name}` })),
-                      ...(deps.data?.deployments ?? []).filter((d) => d.enabled).map((d) => ({
-                        value: `dep:${d.id}`, label: `dep · ${d.name} · ${d.model_name} (${d.client_name})`,
-                      })),
-                    ]} />
-                  <input className="input font-mono py-1.5" placeholder="choice name" value={m.name}
-                    onChange={(e) => setMember(i, { name: e.target.value })} />
-                  <input className="input py-1.5" placeholder="what it's good at…" value={m.description}
-                    onChange={(e) => setMember(i, { description: e.target.value })} />
-                  <button type="button" className="btn-ghost p-1 text-err"
-                    onClick={() => setC({ members: f.config.members.filter((_, j) => j !== i) })}>
-                    <Trash2 size={14} />
-                  </button>
+                <Card key={i} className="space-y-2 bg-panel2/50 p-2.5">
+                  <div className="grid grid-cols-[1fr,140px,1fr,52px] items-center gap-2">
+                    <Select value={m.ref} onChange={(ref) => {
+                      const auto = ref.startsWith("vm:") ? ref.slice(3)
+                        : (deps.data?.deployments ?? []).find((d) => d.id === ref.slice(4))?.model_name ?? "";
+                      setMember(i, { ref, name: m.name || auto });
+                    }}
+                      options={[
+                        { value: "", label: memberLabel(m.ref) },
+                        ...engines.map((v) => ({ value: `vm:${v.api_name}`, label: `vm · ${v.api_name}` })),
+                        ...(deps.data?.deployments ?? []).filter((d) => d.enabled).map((d) => ({
+                          value: `dep:${d.id}`, label: `dep · ${d.name} · ${d.model_name} (${d.client_name})`,
+                        })),
+                      ]} />
+                    <input className="input font-mono py-1.5" placeholder="choice name" value={m.name}
+                      onChange={(e) => setMember(i, { name: e.target.value })} />
+                    <input className="input py-1.5" placeholder="what it's good at…" value={m.description}
+                      onChange={(e) => setMember(i, { description: e.target.value })} />
+                    <div className="flex items-center gap-0.5">
+                      {isHeuristic && (
+                        <>
+                          <button type="button" className="btn-ghost p-1" disabled={i === 0}
+                            onClick={() => moveMember(i, -1)}><ArrowUp size={13} /></button>
+                          <button type="button" className="btn-ghost p-1" disabled={i === f.config.members.length - 1}
+                            onClick={() => moveMember(i, 1)}><ArrowDown size={13} /></button>
+                        </>
+                      )}
+                      <button type="button" className="btn-ghost p-1 text-err"
+                        onClick={() => setC({ members: f.config.members.filter((_, j) => j !== i) })}>
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                  {isHeuristic && (
+                    <div className="grid grid-cols-[repeat(4,minmax(70px,1fr)),repeat(3,minmax(64px,1fr))] items-end gap-1.5 border-t border-border/40 pt-2">
+                      {(["chars_lt", "chars_gte", "msgs_lt", "msgs_gte"] as const).map((k) => (
+                        <label key={k} className="text-[10px] text-muted">
+                          {k.replace("_", " ")}
+                          <input className="input mt-0.5 px-1.5 py-1 font-mono text-[11px]" type="number" min={0}
+                            value={m.when?.[k] ?? ""} placeholder="—"
+                            onChange={(e) => setWhen(i, { [k]: e.target.value === "" ? undefined : Number(e.target.value) })} />
+                        </label>
+                      ))}
+                      {(["code", "images", "system"] as const).map((k) => (
+                        <label key={k} className="text-[10px] text-muted">
+                          {k}
+                          <Select value={m.when?.[k] === undefined ? "" : String(m.when[k])}
+                            options={TRI}
+                            onChange={(v) => setWhen(i, { [k]: v === "" ? undefined : v === "true" })} />
+                        </label>
+                      ))}
+                    </div>
+                  )}
                 </Card>
               ))}
               {f.config.members.length === 0 && (
@@ -230,30 +325,35 @@ export default function RoutersPage() {
               )}
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Fallback model">
+            <div className={`grid gap-3 ${isHeuristic ? "" : "grid-cols-2"}`}>
+              <Field label="Fallback model" hint={isHeuristic ? "used when no rule matches (else a catch-all member is required)" : undefined}>
                 <Select value={f.config.fallback_model}
                   options={[{ value: "", label: "none" }, ...engines.map((m) => ({ value: m.api_name, label: m.api_name }))]}
                   onChange={(v) => setC({ fallback_model: v })} />
               </Field>
-              <Field label="Max chars classified">
-                <input className="input" type="number" min={100} max={8000} value={f.config.max_user_chars}
-                  onChange={(e) => setC({ max_user_chars: Number(e.target.value) || 2000 })} />
-              </Field>
+              {!isHeuristic && (
+                <Field label="Max chars classified">
+                  <input className="input" type="number" min={100} max={8000} value={f.config.max_user_chars}
+                    onChange={(e) => setC({ max_user_chars: Number(e.target.value) || 2000 })} />
+                </Field>
+              )}
             </div>
 
-            <Field label="Prompt template (optional — {{models}} and {{request}} are substituted)">
-              <textarea className="input min-h-24 font-mono text-xs" value={f.config.system_prompt}
-                placeholder="You are a request router…\nAvailable models:\n{{models}}"
-                onChange={(e) => setC({ system_prompt: e.target.value })} />
-            </Field>
+            {!isHeuristic && (
+              <Field label="Prompt template (optional — {{models}} and {{request}} are substituted)">
+                <textarea className="input min-h-24 font-mono text-xs" value={f.config.system_prompt}
+                  placeholder="You are a request router…\nAvailable models:\n{{models}}"
+                  onChange={(e) => setC({ system_prompt: e.target.value })} />
+              </Field>
+            )}
 
             <div className="flex items-center justify-between pt-1">
               <Toggle checked={f.enabled} onChange={(v) => setF({ ...f, enabled: v })} label="Enabled" />
-              <button className="btn-primary" disabled={!f.api_name || !f.config.router_model || f.config.members.length === 0}>
+              <button className="btn-primary" disabled={!f.api_name || (!isHeuristic && !f.config.router_model) || f.config.members.length === 0}>
                 {editId ? "Save" : "Create router"}
               </button>
             </div>
+            {saveErr && <div className="text-xs text-err">{saveErr}</div>}
           </form>
         </Modal>
       )}

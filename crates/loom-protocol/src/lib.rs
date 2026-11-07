@@ -65,6 +65,7 @@ pub mod server_msgs {
         payload_bytes: u32,
         virtual_model: &str,
         deployment_id: &str,
+        content_type: &str,
     ) -> ServerEnvelope {
         ServerEnvelope {
             msg: Some(server_envelope::Msg::AssignRequest(AssignRequest {
@@ -77,6 +78,7 @@ pub mod server_msgs {
                 payload_bytes,
                 virtual_model: virtual_model.into(),
                 deployment_id: deployment_id.into(),
+                content_type: content_type.into(),
             })),
         }
     }

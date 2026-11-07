@@ -46,6 +46,12 @@ impl AzureAdapter {
             ApiType::Completions => "completions",
             ApiType::Embeddings => "embeddings",
             ApiType::Multi => "chat/completions",
+            // Azure OpenAI serves these under the deployment scope as well.
+            ApiType::Images => "images/generations",
+            ApiType::AudioSpeech => "audio/speech",
+            ApiType::AudioTranscription => "audio/transcriptions",
+            ApiType::AudioTranslation => "audio/translations",
+            ApiType::Video => "videos",
         }
     }
 }

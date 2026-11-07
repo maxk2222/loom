@@ -244,6 +244,11 @@ impl BackendManager {
                     });
                 }
                 drop(w);
+                // capability_overrides: skip probing entirely — the config's
+                // own capability table IS the authoritative report.
+                if de.cfg.capability_overrides && de.caps.read().await.is_none() {
+                    *de.caps.write().await = Some(de.cfg.capabilities.clone());
+                }
                 // Probe capabilities once (or when empty) unless overridden.
                 let needs_probe = !de.cfg.capability_overrides
                     && de.caps.read().await.is_none()
@@ -374,6 +379,39 @@ impl BackendManager {
         be.adapter.forward(api, &model, body, cancel).await
     }
 
+    /// Raw multipart forward (audio transcription/translation). The adapter
+    /// rewrites the `model` form field to the physical model name.
+    pub async fn forward_multipart(
+        &self,
+        dep_id: &str,
+        api: ApiType,
+        body: &[u8],
+        content_type: &str,
+        cancel: CancellationToken,
+    ) -> Result<crate::adapters::BackendResponse, AdapterError> {
+        let (backend_id, model) = {
+            let deps = self.inner.deployments.read().await;
+            let Some(d) = deps.get(dep_id) else {
+                return Err(AdapterError::Protocol(format!(
+                    "unknown deployment {dep_id}"
+                )));
+            };
+            (d.backend_id.clone(), d.cfg.model_name.clone())
+        };
+        let backends = self.inner.backends.read().await;
+        let Some(be) = backends.get(&backend_id) else {
+            return Err(AdapterError::Connect(format!(
+                "missing backend {backend_id}"
+            )));
+        };
+        if !be.cfg.enabled {
+            return Err(AdapterError::Connect("backend disabled".into()));
+        }
+        be.adapter
+            .forward_multipart(api, &model, body, content_type, cancel)
+            .await
+    }
+
     /// Full inventory for server reports.
     pub async fn inventory(&self) -> Vec<loom_protocol::pb::DeploymentReport> {
         let deps = self.inner.deployments.read().await;
@@ -457,6 +495,11 @@ fn merge_overrides(probed: &mut Capabilities, overrides: &Capabilities) {
     probed.chat |= overrides.chat;
     probed.completions |= overrides.completions;
     probed.embeddings |= overrides.embeddings;
+    probed.images |= overrides.images;
+    probed.audio_speech |= overrides.audio_speech;
+    probed.audio_transcription |= overrides.audio_transcription;
+    probed.audio_translation |= overrides.audio_translation;
+    probed.video |= overrides.video;
     probed.tools |= overrides.tools;
     probed.vision |= overrides.vision;
     probed.json_mode |= overrides.json_mode;
@@ -480,6 +523,11 @@ pub fn caps_to_pb(c: &Capabilities) -> loom_protocol::pb::Capabilities {
         streaming: c.streaming,
         context_length: c.context_length,
         modalities: c.modalities.iter().cloned().collect(),
+        images: c.images,
+        audio_speech: c.audio_speech,
+        audio_transcription: c.audio_transcription,
+        audio_translation: c.audio_translation,
+        video: c.video,
     }
 }
 
@@ -494,5 +542,10 @@ pub fn caps_from_pb(c: &loom_protocol::pb::Capabilities) -> Capabilities {
         streaming: c.streaming,
         context_length: c.context_length,
         modalities: c.modalities.iter().cloned().collect(),
+        images: c.images,
+        audio_speech: c.audio_speech,
+        audio_transcription: c.audio_transcription,
+        audio_translation: c.audio_translation,
+        video: c.video,
     }
 }

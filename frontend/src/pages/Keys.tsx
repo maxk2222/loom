@@ -5,7 +5,10 @@ import { api } from "../lib/api";
 import { Badge, Card, Field, Modal, Select, Spinner } from "../components/ui";
 import type { ApiKey, Project } from "../lib/types";
 
-const SCOPES = ["chat", "completions", "embeddings", "models"];
+const SCOPES = [
+  "chat", "completions", "embeddings", "models",
+  "images", "audio_speech", "audio_transcription", "audio_translation", "video",
+];
 
 export default function KeysPage() {
   const qc = useQueryClient();

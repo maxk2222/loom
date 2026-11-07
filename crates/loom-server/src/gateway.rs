@@ -38,6 +38,19 @@ pub fn router(state: GatewayState) -> Router {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/images/generations", post(images_generations))
+        .route("/v1/audio/speech", post(audio_speech))
+        .route(
+            "/v1/audio/transcriptions",
+            post(audio_transcriptions)
+                .route_layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/audio/translations",
+            post(audio_translations)
+                .route_layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024)),
+        )
+        .route("/v1/videos", post(videos))
         .route("/v1/models", get(models))
         .layer(middleware::from_fn_with_state(state.clone(), apikey_mw))
         .with_state(state)
@@ -78,6 +91,21 @@ async fn completions(State(s): State<GatewayState>, req: Request) -> Response {
 async fn embeddings(State(s): State<GatewayState>, req: Request) -> Response {
     infer(s, ApiType::Embeddings, req).await
 }
+async fn images_generations(State(s): State<GatewayState>, req: Request) -> Response {
+    infer(s, ApiType::Images, req).await
+}
+async fn audio_speech(State(s): State<GatewayState>, req: Request) -> Response {
+    infer(s, ApiType::AudioSpeech, req).await
+}
+async fn audio_transcriptions(State(s): State<GatewayState>, req: Request) -> Response {
+    infer(s, ApiType::AudioTranscription, req).await
+}
+async fn audio_translations(State(s): State<GatewayState>, req: Request) -> Response {
+    infer(s, ApiType::AudioTranslation, req).await
+}
+async fn videos(State(s): State<GatewayState>, req: Request) -> Response {
+    infer(s, ApiType::Video, req).await
+}
 
 async fn models(State(s): State<GatewayState>, req: Request) -> Response {
     let c = ctx(&req);
@@ -95,18 +123,48 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
     let c = ctx(&req);
     let request_id = RequestId::new().to_string();
 
-    // Body (bounded)
-    let body_bytes = match axum::body::to_bytes(req.into_body(), 4 * 1024 * 1024).await {
+    let content_type = req
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // Audio files ride multipart bodies and can be tens of MB; JSON apis
+    // stay bounded at 4MB.
+    let limit = if api.is_multipart() {
+        128 * 1024 * 1024
+    } else {
+        4 * 1024 * 1024
+    };
+    let body_bytes = match axum::body::to_bytes(req.into_body(), limit).await {
         Ok(b) => b,
         Err(_) => return err(ErrorCode::PayloadTooLarge, "request too large", &request_id),
     };
-    let body: Value = match serde_json::from_slice(&body_bytes) {
-        Ok(v) => v,
-        Err(e) => return err(ErrorCode::InvalidRequest, e.to_string(), &request_id),
-    };
-    let model = match request_model(&body) {
-        Some(m) => m.to_string(),
-        None => return err(ErrorCode::InvalidRequest, "missing model", &request_id),
+
+    // Multipart bodies (audio transcription/translation) are forwarded raw;
+    // the `model` form field is extracted for routing and grants only.
+    let (body, model) = if api.is_multipart() {
+        let m = match multipart_model(&body_bytes, &content_type).await {
+            Some(m) => m,
+            None => {
+                return err(
+                    ErrorCode::InvalidRequest,
+                    "missing model field",
+                    &request_id,
+                )
+            }
+        };
+        (Value::Null, m)
+    } else {
+        let b: Value = match serde_json::from_slice(&body_bytes) {
+            Ok(v) => v,
+            Err(e) => return err(ErrorCode::InvalidRequest, e.to_string(), &request_id),
+        };
+        let m = match request_model(&b) {
+            Some(m) => m.to_string(),
+            None => return err(ErrorCode::InvalidRequest, "missing model", &request_id),
+        };
+        (b, m)
     };
 
     // Scope + model permission
@@ -138,14 +196,17 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
     // member instead. The API key's grant on the router name covers members.
     let mut routed: Option<crate::router_engine::RouteChoice> = None;
     let model = {
-        if let Some(vm) = crate::router_engine::is_router(&s.models, &model).await {
-            let max_chars = vm.router_config["max_user_chars"].as_u64().unwrap_or(2000) as usize;
-            let excerpt = crate::router_engine::user_excerpt(&body, max_chars);
+        let router_vm = if api == ApiType::Chat {
+            crate::router_engine::is_router(&s.models, &model).await
+        } else {
+            None
+        };
+        if let Some(vm) = router_vm {
             match crate::router_engine::route(
                 &s.scheduler,
                 &s.models,
                 &vm,
-                &excerpt,
+                &body,
                 c.priority_class,
                 s.request_deadline_ms,
             )
@@ -185,13 +246,22 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
     } else {
         body
     };
-    let out_bytes = serde_json::to_vec(&body).unwrap_or_else(|_| body_bytes.to_vec());
+    let out_bytes = if api.is_multipart() {
+        body_bytes.to_vec()
+    } else {
+        serde_json::to_vec(&body).unwrap_or_else(|_| body_bytes.to_vec())
+    };
     let now = crate::client_registry::now_ms();
     let pending = PendingRequest {
         request_id: RequestId::parse(&request_id).unwrap_or_default(),
         api,
         model: model.clone(),
         body: out_bytes,
+        content_type: if api.is_multipart() {
+            content_type.clone()
+        } else {
+            "application/json".into()
+        },
         required,
         project_id: c.project_id.clone(),
         prio: c.priority_class,
@@ -275,6 +345,29 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         });
     }
 
+    // Media apis return single-buffer replies (binary audio, image/video
+    // JSON): collect the full upstream body, then answer with the inferred
+    // content type — the upstream media type is not relayed over the data
+    // stream, and these endpoints never stream SSE.
+    if !api.is_text_family() {
+        let mut rx = rx;
+        let mut buf = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            match chunk {
+                Ok(b) => buf.extend_from_slice(&b),
+                Err(e) => {
+                    return err(ErrorCode::UpstreamError, e.to_string(), &request_id);
+                }
+            }
+        }
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", media_content_type(api, &body))
+            .header("x-request-id", &request_id)
+            .body(Body::from(buf))
+            .unwrap_or_else(|_| err(ErrorCode::Internal, "response build", &request_id));
+    }
+
     let stream = async_stream::stream! {
         let mut rx = rx;
         let mut first = true;
@@ -329,6 +422,38 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
     }
     rb.body(Body::from_stream(stream))
         .unwrap_or_else(|_| err(ErrorCode::Internal, "response build", &request_id))
+}
+
+/// Response content type for buffered media replies. For speech the caller's
+/// `response_format` selects the codec (mp3 default), everything else is JSON.
+fn media_content_type(api: ApiType, body: &Value) -> &'static str {
+    if api == ApiType::AudioSpeech {
+        match body["response_format"].as_str().unwrap_or("mp3") {
+            "opus" => "audio/opus",
+            "aac" => "audio/aac",
+            "flac" => "audio/flac",
+            "wav" => "audio/wav",
+            "pcm" => "audio/pcm",
+            _ => "audio/mpeg",
+        }
+    } else {
+        "application/json"
+    }
+}
+
+/// Extract the `model` form field from a raw multipart request body —
+/// needed for routing and grant checks before the body is forwarded as-is.
+async fn multipart_model(body: &[u8], content_type: &str) -> Option<String> {
+    let boundary = multer::parse_boundary(content_type).ok()?;
+    let bytes = Bytes::copy_from_slice(body);
+    let stream = futures_util::stream::once(async move { Ok::<_, std::io::Error>(bytes) });
+    let mut mp = multer::Multipart::new(stream, boundary);
+    while let Ok(Some(field)) = mp.next_field().await {
+        if field.name() == Some("model") {
+            return field.text().await.ok().map(|s| s.trim().to_string());
+        }
+    }
+    None
 }
 
 struct RequestOutcomeParts {

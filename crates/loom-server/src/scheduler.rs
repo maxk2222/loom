@@ -45,6 +45,9 @@ pub struct PendingRequest {
     pub api: ApiType,
     pub model: String,
     pub body: Vec<u8>,
+    /// Request body media type ("" / "application/json" for JSON apis,
+    /// "multipart/form-data; boundary=…" for audio transcriptions).
+    pub content_type: String,
     pub required: RequiredCaps,
     pub project_id: String,
     pub prio: u32,
@@ -623,6 +626,7 @@ impl Scheduler {
             req.body.len() as u32,
             &req.model,
             &dep_id,
+            &req.content_type,
         );
         if self.inner.sessions.send(&client_id, assign).await.is_err() {
             self.cleanup_assign(&rid, &lease_id, fencing, &dep_id).await;

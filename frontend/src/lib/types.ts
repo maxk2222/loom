@@ -40,6 +40,7 @@ export interface DeploymentRow {
   backend_type: string;
   model_name: string;
   enabled: boolean;
+  capabilities?: Record<string, unknown> | null;
   runtime?: { state: string; tier2_free: number; tier2_total: number } | null;
 }
 
