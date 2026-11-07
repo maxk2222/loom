@@ -82,6 +82,7 @@ async fn async_main() -> anyhow::Result<()> {
         connector: connector.clone(),
         started: Instant::now(),
         requests: Default::default(),
+        history: Default::default(),
     };
 
     // Metrics listener (optional).

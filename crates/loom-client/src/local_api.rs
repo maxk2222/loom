@@ -20,7 +20,7 @@ use loom_core::error::{ApiError, ErrorCode};
 use loom_core::openai::{request_model, required_caps_from_request, ModelList};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Instant;
@@ -36,6 +36,34 @@ pub struct AppState {
     pub started: Instant,
     /// Live request registry for the admin UI.
     pub requests: Arc<RwLock<HashMap<String, RequestInfo>>>,
+    /// Finished-request ring buffer (charts).
+    pub history: Arc<RwLock<VecDeque<FinReq>>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FinReq {
+    pub class: String,
+    pub api: String,
+    pub duration_ms: i64,
+    pub status: String,
+    pub ended_unix_ms: i64,
+}
+
+/// Remove an active request and append it to the history ring.
+pub fn finish_req(s: &AppState, rid: &str, status: &str) {
+    if let Some(i) = s.requests.write().unwrap().remove(rid) {
+        let mut h = s.history.write().unwrap();
+        if h.len() >= 300 {
+            h.pop_front();
+        }
+        h.push_back(FinReq {
+            class: i.class,
+            api: i.api,
+            duration_ms: now_ms() - i.started_unix_ms,
+            status: status.into(),
+            ended_unix_ms: now_ms(),
+        });
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -244,7 +272,7 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
         Err(e) => {
             telemetry::req_finished("failed");
             s.scheduler.finish_request(&request_id);
-            s.requests.write().unwrap().remove(&request_id);
+            finish_req(&s, &request_id, "failed");
             s.connector.notify_capacity();
             drop(token); // release the admission slot
             return err(ErrorCode::UpstreamError, e.to_string(), &request_id);
@@ -259,7 +287,6 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
     {
         let sched = s.scheduler.clone();
         let conn = s.connector.clone();
-        let reqs = s.requests.clone();
         let rid = request_id.clone();
         let mut stream = resp.stream;
         tokio::spawn(async move {
@@ -292,7 +319,7 @@ async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: V
             telemetry::req_finished("done");
             telemetry::req_duration(started.elapsed().as_secs_f64(), "local");
             sched.finish_request(&rid);
-            reqs.write().unwrap().remove(&rid);
+            finish_req(&s, &rid, "done");
             conn.notify_capacity();
         });
     }

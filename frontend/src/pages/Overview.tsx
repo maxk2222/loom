@@ -33,6 +33,26 @@ export default function OverviewPage() {
   const lat = [...(hist.data?.requests ?? [])].map(h => h.duration_ms ?? 0).filter(Boolean).sort((a, b) => a - b);
   const pct = (p: number) => lat.length ? Math.round(lat[Math.min(lat.length - 1, Math.floor(p * lat.length))]) : 0;
   const depCap = useQuery({ queryKey: ["deps"], queryFn: () => api.get<{ deployments: any[] }>("/api/deployments") });
+  const latChart = (() => {
+    const m = new Map<string, { t: string; ms: number; n: number }>();
+    for (const h of [...(hist.data?.requests ?? [])].reverse()) {
+      if (!h.duration_ms) continue;
+      const t = new Date(h.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const b = m.get(t) ?? { t, ms: 0, n: 0 };
+      b.ms += h.duration_ms; b.n++; m.set(t, b);
+    }
+    return [...m.values()].map(b => ({ t: b.t, ms: Math.round(b.ms / b.n) })).slice(-30);
+  })();
+  const reqPerClient = (() => {
+    const m = new Map<string, { name: string; n: number }>();
+    for (const h of hist.data?.requests ?? []) {
+      if (!h.client_id) continue;
+      const n = clients.data?.clients.find(c => c.id === h.client_id)?.name ?? "?";
+      const b = m.get(n) ?? { name: n, n: 0 };
+      b.n++; m.set(n, b);
+    }
+    return [...m.values()];
+  })();
   const perClient = (() => {
     const m = new Map<string, { name: string; cap: number }>();
     for (const d of depCap.data?.deployments ?? []) {
@@ -108,6 +128,34 @@ export default function OverviewPage() {
             <div><div className="text-xl font-semibold text-text">{pct(0.99)}</div><div className="text-[10px] text-muted">p99</div></div>
           </div>
         </div>
+        {latChart.length > 1 && (
+          <div className="card p-4">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">avg latency (ms)</div>
+            <ResponsiveContainer width="100%" height={130}>
+              <AreaChart data={latChart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+                <CartesianGrid stroke="#1c2740" vertical={false} />
+                <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <Tooltip contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <Area type="monotone" dataKey="ms" stroke="#4a86c8" fill="#4a86c8" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+        {reqPerClient.length > 0 && (
+          <div className="card p-4">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">requests / client</div>
+            <ResponsiveContainer width="100%" height={130}>
+              <BarChart data={reqPerClient} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+                <CartesianGrid stroke="#1c2740" vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} />
+                <Tooltip contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <Bar dataKey="n" fill="#3d6fae" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
         {perClient.length > 0 && (
           <div className="card p-4">
             <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">tier-2 capacity / client</div>
