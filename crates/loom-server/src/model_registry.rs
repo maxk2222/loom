@@ -164,13 +164,11 @@ impl ModelRegistry {
                 if !m.enabled {
                     return false;
                 }
-                // Unknown capabilities (never probed, reported as all-false) are
-                // permissive for the api-type filter — the client's admission
-                // control remains authoritative; required extras still enforced.
+                // Unprobed members (reported all-false / empty) are permissive —
+                // the client's local admission is authoritative. Required caps
+                // only gate members that actually reported capabilities.
                 let unknown = m.capabilities == Capabilities::default();
-                (unknown || m.capabilities.supports_api(api))
-                    && (unknown && merged == RequiredCaps::default()
-                        || m.capabilities.satisfies(&merged))
+                unknown || (m.capabilities.supports_api(api) && m.capabilities.satisfies(&merged))
             })
             .cloned()
             .collect();
