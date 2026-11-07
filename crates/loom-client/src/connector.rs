@@ -769,6 +769,7 @@ async fn run_request(
         h.push_back(crate::local_api::FinReq {
             class: "tier-2".into(),
             api: a.api_type.clone(),
+            deployment_id: a.deployment_id.clone(),
             duration_ms: started.elapsed().as_millis() as i64,
             ttft_ms,
             prompt_tokens: usage.prompt_tokens,

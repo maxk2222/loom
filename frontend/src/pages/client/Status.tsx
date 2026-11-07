@@ -102,7 +102,30 @@ export default function ClientStatusPage() {
 
 function ClientCharts() {
   const q = useQuery({ queryKey: ["client-hist"], queryFn: () => api.get<{ history: any[] }>("/local/api/history"), refetchInterval: 8000 });
+  const bk = useQuery({ queryKey: ["chart-backends"], queryFn: () => api.get<{ backends: LocalBackend[] }>("/local/api/backends"), refetchInterval: 30000 });
   const rows = q.data?.history ?? [];
+  const modelName = (() => {
+    const m = new Map<string, string>();
+    for (const b of bk.data?.backends ?? []) for (const d of b.deployments ?? []) m.set(d.id, d.model_name || d.name);
+    return m;
+  })();
+  const byModel = (() => {
+    const m = new Map<string, { name: string; t1: number; t2: number; pt: number; ct: number; dur: number; decdur: number }>();
+    for (const r of rows) {
+      const name = modelName.get(r.deployment_id) ?? (r.deployment_id ? String(r.deployment_id).slice(0, 8) : "?");
+      const b = m.get(name) ?? { name, t1: 0, t2: 0, pt: 0, ct: 0, dur: 0, decdur: 0 };
+      if (r.class === "local") b.t1++; else b.t2++;
+      b.pt += r.prompt_tokens ?? 0; b.ct += r.completion_tokens ?? 0;
+      b.dur += (r.duration_ms ?? 0) / 1000;
+      b.decdur += Math.max(0, (r.duration_ms ?? 0) - (r.ttft_ms ?? 0)) / 1000;
+      m.set(name, b);
+    }
+    return [...m.values()].map(b => ({
+      ...b,
+      e2e: b.dur > 0 ? +(((b.pt + b.ct) / b.dur).toFixed(1)) : 0,
+      dec: b.decdur > 0 ? +((b.ct / b.decdur).toFixed(1)) : 0,
+    }));
+  })();
   const byClass = (() => {
     const m = new Map<string, number>();
     for (const r of rows) m.set(r.class, (m.get(r.class) ?? 0) + 1);
@@ -160,6 +183,38 @@ function ClientCharts() {
           </BarChart>
         </ResponsiveContainer>
       </div>
+      {byModel.length > 0 && (
+        <div className="card p-4">
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">requests / model <span className="normal-case text-muted/70">(tier-1 + tier-2)</span></div>
+          <ResponsiveContainer width="100%" height={130}>
+            <BarChart data={byModel} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+              <CartesianGrid stroke="#1c2740" vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} />
+              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar dataKey="t1" name="tier-1 local" stackId="c" fill="#3d6fae" />
+              <Bar dataKey="t2" name="tier-2 shared" stackId="c" fill="#7fa8d9" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+      {byModel.length > 0 && (
+        <div className="card p-4">
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">tok/s / model <span className="normal-case text-muted/70">(e2e vs decode)</span></div>
+          <ResponsiveContainer width="100%" height={130}>
+            <BarChart data={byModel} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+              <CartesianGrid stroke="#1c2740" vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar dataKey="e2e" name="e2e tok/s" fill="#3d6fae" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="dec" name="decode tok/s" fill="#8fb3d9" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
       <div className="card p-4">
         <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">tok/s <span className="normal-case text-muted/70">(e2e vs decode)</span></div>
         <ResponsiveContainer width="100%" height={130}>

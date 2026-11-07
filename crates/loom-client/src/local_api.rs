@@ -45,6 +45,7 @@ pub struct AppState {
 pub struct FinReq {
     pub class: String,
     pub api: String,
+    pub deployment_id: String,
     pub duration_ms: i64,
     pub ttft_ms: i64,
     pub prompt_tokens: u32,
@@ -65,6 +66,7 @@ pub fn finish_req(s: &AppState, rid: &str, status: &str, pt: u32, ct: u32, ttft_
         h.push_back(FinReq {
             class: i.class,
             api: i.api,
+            deployment_id: i.deployment_id,
             duration_ms: now_ms() - i.started_unix_ms,
             ttft_ms,
             prompt_tokens: if pt > 0 { pt } else { i.est_tokens },

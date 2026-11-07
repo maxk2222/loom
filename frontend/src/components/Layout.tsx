@@ -161,9 +161,7 @@ export default function Layout() {
               <LogOut size={16} /> Sign out
             </button>
           )}
-          <div className="px-3 pb-1 pt-1 text-[10px] text-muted/50">
-            {APP_VARIANT === "client" ? "loom-client" : "loom-server"} · dark
-          </div>
+          <VersionTag />
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
@@ -173,6 +171,23 @@ export default function Layout() {
         </div>
         </main>
       </div>
+    </div>
+  );
+}
+
+function VersionTag() {
+  const v = useQuery({
+    queryKey: ["loom-version"],
+    queryFn: () =>
+      APP_VARIANT === "client"
+        ? api.get<{ version?: string }>("/local/api/status").then(d => d.version)
+        : api.get<{ version?: string }>("/api/system").then(d => d.version),
+    refetchInterval: 60000,
+  });
+  return (
+    <div className="px-3 pb-1 pt-1 text-[10px] text-muted/50">
+      {APP_VARIANT === "client" ? "loom-client" : "loom-server"}
+      {v.data ? ` v${v.data}` : ""}
     </div>
   );
 }
