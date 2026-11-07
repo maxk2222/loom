@@ -761,20 +761,22 @@ async fn history(State(s): State<AdminState>, Query(q): Query<HistQ>) -> Json<Va
     type HistRow = (
         uuid::Uuid,
         String,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
         i64,
         i64,
-        i64,
-        i64,
-        i64,
-        String,
+        Option<String>,
         chrono::DateTime<chrono::Utc>,
+        Option<String>,
+        Option<String>,
     );
     let limit = q.limit.unwrap_or(100).min(500);
     let rows: Vec<HistRow> = sqlx::query_as(
         "SELECT id, status, queue_wait_ms, ttft_ms, duration_ms, prompt_tokens, completion_tokens, error_code, created_at, client_id::text AS client_id, deployment_id::text AS deployment_id FROM requests_history ORDER BY created_at DESC LIMIT $1")
         .bind(limit).fetch_all(&s.db).await.unwrap_or_default();
     Json(
-        json!({"requests": rows.iter().map(|(id,st,qw,t,d,pt,ct,ec,ca)| json!({"id":id,"status":st,"queue_wait_ms":qw,"ttft_ms":t,"duration_ms":d,"prompt_tokens":pt,"completion_tokens":ct,"error_code":ec,"created_at":ca})).collect::<Vec<_>>()}),
+        json!({"requests": rows.iter().map(|(id,st,qw,t,d,pt,ct,ec,ca,cid,did)| json!({"id":id,"status":st,"queue_wait_ms":qw,"ttft_ms":t,"duration_ms":d,"prompt_tokens":pt,"completion_tokens":ct,"error_code":ec,"created_at":ca,"client_id":cid,"deployment_id":did})).collect::<Vec<_>>()}),
     )
 }
 

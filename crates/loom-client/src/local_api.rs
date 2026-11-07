@@ -99,6 +99,7 @@ pub fn router(state: AppState) -> Router {
         .route("/local/api/backends/test", post(admin_test_backend))
         .route("/local/api/deployments", get(admin_list_deployments))
         .route("/local/api/requests", get(admin_list_requests))
+        .route("/local/api/history", get(admin_history))
         .route(
             "/local/api/requests/{id}/cancel",
             post(admin_cancel_request),
@@ -731,4 +732,10 @@ pub(crate) async fn fetch_latest_release() -> Option<(String, String)> {
         v["tag_name"].as_str()?.to_string(),
         v["html_url"].as_str()?.to_string(),
     ))
+}
+
+/// Finished-request history for charts.
+async fn admin_history(State(s): State<AppState>) -> Json<Value> {
+    let h: Vec<FinReq> = s.history.read().unwrap().iter().cloned().collect();
+    Json(json!({ "history": h }))
 }
