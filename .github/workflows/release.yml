@@ -13,12 +13,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  arch: linux-x86_64 }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, arch: linux-aarch64 }
-          - { os: macos-latest,     target: aarch64-apple-darwin,      arch: macos-aarch64 }
-          - { os: macos-13,         target: x86_64-apple-darwin,       arch: macos-x86_64 }
-          - { os: windows-latest,   target: x86_64-pc-windows-msvc,    arch: windows-x86_64 }
-          - { os: windows-11-arm,   target: aarch64-pc-windows-msvc,   arch: windows-aarch64 }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, arch: linux-x86_64 }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, arch: linux-aarch64, zig: true }
+          - { os: macos-latest,   target: aarch64-apple-darwin,    arch: macos-aarch64 }
+          - { os: macos-13,       target: x86_64-apple-darwin,     arch: macos-x86_64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,  arch: windows-x86_64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -41,8 +40,23 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install zig (aarch64 cross toolchain)
+        if: ${{ matrix.zig }}
+        run: pip install ziglang
+      - name: Install cargo-zigbuild
+        if: ${{ matrix.zig }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
       - name: Build binaries
-        run: cargo build --release -p loom-server -p loom-client --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.zig }}" = "true" ]; then
+            cargo zigbuild --release -p loom-server -p loom-client --target ${{ matrix.target }}
+          else
+            cargo build --release -p loom-server -p loom-client --target ${{ matrix.target }}
+          fi
+        shell: bash
 
       - name: Package artifacts
         shell: bash
@@ -60,7 +74,9 @@ jobs:
           done
           ls -la "$out"
 
-      - uses: taiki-e/install-action@minisign
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: minisign
 
       - name: Sign artifacts (minisign)
         shell: bash
