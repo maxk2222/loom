@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
+use tracing::warn;
 
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
 
@@ -81,6 +82,14 @@ impl Agent for AgentSvc {
                     .await;
                 return;
             };
+            if hello.client_version != env!("CARGO_PKG_VERSION") {
+                warn!(
+                    client = %client_id,
+                    client_version = %hello.client_version,
+                    server_version = env!("CARGO_PKG_VERSION"),
+                    "client version skew — semantics may differ"
+                );
+            }
             let session_id = uuid::Uuid::new_v4().to_string();
             if out_tx
                 .send(server_msgs::hello_ack(

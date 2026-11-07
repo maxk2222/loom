@@ -372,3 +372,62 @@ async fn queue_fifo_and_pop_order() {
     assert_eq!(pop(&mut c, &q0, &q1).await.as_deref(), Some("req-b"));
     assert_eq!(pop(&mut c, &q0, &q1).await, None);
 }
+
+#[tokio::test]
+async fn requeue_preserves_attempts() {
+    // Regression: QUEUE_ENQUEUE used to HSET attempts='0' on every enqueue,
+    // so a structurally-undispatchable request requeued with its counter
+    // reset forever — head-of-line blocking the whole class queue.
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let q0 = format!("{p}queue:0");
+    let req = format!("{p}req:r1");
+    let count = format!("{p}queue:count");
+    let wd = format!("{p}req:watchdog");
+
+    async fn enq(
+        c: &mut ConnectionManager,
+        q0: &str,
+        req: &str,
+        count: &str,
+        wd: &str,
+        ts: i64,
+    ) -> String {
+        redis::Script::new(lua::QUEUE_ENQUEUE)
+            .key(q0)
+            .key(req)
+            .key(count)
+            .key(wd)
+            .arg("req-r1")
+            .arg(ts)
+            .arg(10i64)
+            .arg("proj")
+            .arg("vm")
+            .arg(0i64)
+            .arg(9_999_999_999i64)
+            .invoke_async::<String>(c)
+            .await
+            .unwrap()
+    }
+
+    assert_eq!(enq(&mut c, &q0, &req, &count, &wd, 1000).await, "OK");
+    // simulate two failed dispatch attempts (scheduler HINCRBYs before requeue)
+    for _ in 0..2 {
+        let _: i64 = redis::cmd("HINCRBY")
+            .arg(&req)
+            .arg("attempts")
+            .arg(1)
+            .query_async(&mut c)
+            .await
+            .unwrap();
+        assert_eq!(enq(&mut c, &q0, &req, &count, &wd, 1000).await, "OK");
+    }
+    let attempts: i64 = redis::cmd("HGET")
+        .arg(&req)
+        .arg("attempts")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 2, "requeue must preserve the attempts counter");
+}
