@@ -44,7 +44,10 @@ export default function DeploymentsPage() {
                   </td>
                   <td className="td">
                     {d.runtime ? (
-                      <Badge tone={d.runtime.state === "available" ? "ok" : "warn"}>{d.runtime.state}</Badge>
+                      <span className="inline-flex items-center gap-1.5">
+                        <Badge tone={d.runtime.state === "available" ? "ok" : "warn"}>{d.runtime.state}</Badge>
+                        {d.runtime.pressure_gated && <Badge tone="err">pressure</Badge>}
+                      </span>
                     ) : <Badge tone="muted">no report</Badge>}
                   </td>
                   <td className="td text-muted">

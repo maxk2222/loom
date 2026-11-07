@@ -37,6 +37,7 @@ message ServerEnvelope {
     AssignRequest assign_request = 3;
     CancelRequest cancel_request = 4;
     Ping ping = 5;
+    NotesSync notes_sync = 6;
   }
 }
 
@@ -118,6 +119,7 @@ message DeploymentCapacity {
   uint32 inflight_tier2 = 5;
   string sharing_mode = 6;           // "private" | "opportunistic" | "shared"
   bool accepting = 7;                // admission gate currently open for tier2
+  bool pressure_gated = 8;           // closed by local resource pressure (cpu/ram)
 }
 
 message InventoryReport {
@@ -129,6 +131,25 @@ message InventoryReport {
 message CapacityReport {
   repeated DeploymentCapacity capacities = 1;
   uint64 reported_at_unix_ms = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Admin notices: server-pushed notes/briefings shown in the client dashboard.
+// Full-sync semantics — the pushed list replaces the client's stored set.
+// ---------------------------------------------------------------------------
+
+message ClientNote {
+  string id = 1;
+  string title = 2;
+  string body = 3;
+  string severity = 4;               // "info" | "warning" | "critical"
+  bool persistent = 5;               // cannot be dismissed client-side
+  int64 created_at_unix = 6;
+  int64 expires_at_unix = 7;         // 0 = never expires
+}
+
+message NotesSync {
+  repeated ClientNote notes = 1;
 }
 
 // ---------------------------------------------------------------------------

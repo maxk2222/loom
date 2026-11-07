@@ -58,6 +58,8 @@ pub struct ConnectorState {
     active_requests: RwLock<HashMap<String, ActiveRequest>>,
     /// Shared finished-request history (wired to local_api::AppState).
     pub history: RwLock<Option<Arc<RwLock<std::collections::VecDeque<crate::local_api::FinReq>>>>>,
+    /// Admin notices synced from the server (+ persistence path).
+    pub notes: RwLock<Option<(crate::notes::SharedNotes, std::path::PathBuf)>>,
     shutdown: CancellationToken,
 }
 
@@ -81,6 +83,7 @@ impl Connector {
                 agent: Mutex::new(None),
                 active_requests: RwLock::new(HashMap::new()),
                 history: RwLock::new(None),
+                notes: RwLock::new(None),
                 shutdown: CancellationToken::new(),
             }),
         }
@@ -92,6 +95,11 @@ impl Connector {
         h: Arc<RwLock<std::collections::VecDeque<crate::local_api::FinReq>>>,
     ) {
         *self.state.history.write().unwrap() = Some(h);
+    }
+
+    /// Wire the shared admin-notes store (+ its persistence path).
+    pub fn set_notes(&self, n: crate::notes::SharedNotes, path: std::path::PathBuf) {
+        *self.state.notes.write().unwrap() = Some((n, path));
     }
 
     pub fn state(&self) -> Arc<ConnectorState> {
@@ -423,6 +431,15 @@ impl Connector {
                 server_envelope::Msg::Ping(p) => {
                     let _ = ctrl_tx.send(client_msgs::pong(p.sent_at_unix_ms)).await;
                 }
+                server_envelope::Msg::NotesSync(sync) => {
+                    let slot = self.state.notes.read().unwrap().clone();
+                    if let Some((store, path)) = slot {
+                        if crate::notes::apply_sync(&store, sync.notes) {
+                            crate::notes::save_notes(&path, &store);
+                            debug!("admin notes synced");
+                        }
+                    }
+                }
                 server_envelope::Msg::HelloAck(_) => {}
             }
         }
@@ -662,6 +679,7 @@ fn capacity_to_pb(c: &crate::scheduler::DeploymentCapacityInfo) -> DeploymentCap
         inflight_tier2: c.inflight_tier2,
         sharing_mode: c.sharing_mode.as_str().into(),
         accepting: c.accepting,
+        pressure_gated: c.pressure_gated,
     }
 }
 

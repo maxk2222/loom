@@ -81,6 +81,23 @@ impl BackendAdapter for LlamaCppAdapter {
         }
     }
 
+    /// Native router-mode unload (llama-server --models-max).
+    async fn unload(&self, model: &str) -> Result<(), AdapterError> {
+        let req = self
+            .http
+            .post(format!("{}/models/unload", self.endpoint()))
+            .json(&serde_json::json!({"model": model}))
+            .timeout(Duration::from_secs(30));
+        match req.send().await {
+            Ok(r) if r.status().is_success() => Ok(()),
+            Ok(r) => Err(AdapterError::Upstream {
+                status: r.status().as_u16(),
+                message: "unload failed".into(),
+            }),
+            Err(e) => Err(AdapterError::Connect(e.to_string())),
+        }
+    }
+
     async fn forward(
         &self,
         api: ApiType,

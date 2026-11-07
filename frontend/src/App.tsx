@@ -8,6 +8,7 @@ import DeploymentsPage from "./pages/Deployments";
 import KeysPage from "./pages/Keys";
 import ModelsPage from "./pages/Models";
 import MonitoringPage from "./pages/Monitoring";
+import NotesPage from "./pages/Notes";
 import OverviewPage from "./pages/Overview";
 import RoutersPage from "./pages/Routers";
 import ApiUsersPage from "./pages/ApiUsers";
@@ -28,6 +29,7 @@ function ServerRoutes() {
         <Route element={<Layout />}>
           <Route index element={<OverviewPage />} />
           <Route path="clients" element={<ClientsPage />} />
+          <Route path="notes" element={<NotesPage />} />
           <Route path="models" element={<ModelsPage />} />
           <Route path="routers" element={<RoutersPage />} />
           <Route path="deployments" element={<DeploymentsPage />} />

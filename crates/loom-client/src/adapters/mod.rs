@@ -101,6 +101,16 @@ pub trait BackendAdapter: Send + Sync {
         cancel: CancellationToken,
     ) -> Result<BackendResponse, AdapterError>;
 
+    /// Unload a model from backend memory (pressure offload). Default:
+    /// unsupported — remote APIs and backends without unload semantics simply
+    /// keep the model; the tier-2 gate still protects local resources.
+    async fn unload(&self, model: &str) -> Result<(), AdapterError> {
+        let _ = model;
+        Err(AdapterError::Protocol(
+            "unload not supported by this backend".into(),
+        ))
+    }
+
     /// Forward a raw multipart body (audio transcriptions/translations). The
     /// `model` form field is rewritten to the deployment's physical model.
     /// Default: unsupported — most backends serve no multipart endpoints.

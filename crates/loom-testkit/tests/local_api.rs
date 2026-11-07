@@ -67,6 +67,9 @@ async fn spawn_client_api(cfg: ClientConfig) -> String {
         requests: Arc::new(std::sync::RwLock::new(Default::default())),
         history: Arc::new(std::sync::RwLock::new(Default::default())),
         sessions: Default::default(),
+        notes: Default::default(),
+        notes_path: std::env::temp_dir().join("loom-testkit-notes.json"),
+        sys_stats: Default::default(),
     };
     let app = local_api::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

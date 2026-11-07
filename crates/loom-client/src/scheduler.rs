@@ -440,8 +440,40 @@ impl LocalScheduler {
                         && d.limits.tier2_gate_closed.load(Ordering::SeqCst) == 0
                         && d.limits.health_ok.load(Ordering::SeqCst) == 1
                         && d.limits.model_ready.load(Ordering::SeqCst) == 1,
+                    pressure_gated: d.limits.tier2_gate_closed.load(Ordering::SeqCst) == 1,
                 }
             })
+            .collect()
+    }
+
+    /// Close (or reopen) the tier-2 gate on every non-private deployment.
+    /// Returns true when any gate state actually changed (→ push capacity).
+    pub fn apply_pressure_gate(&self, closed: bool) -> bool {
+        let map = self.inner.deployments.read().unwrap();
+        let mut changed = false;
+        for d in map.values() {
+            if *d.limits.sharing_mode.read().unwrap() == SharingMode::Private {
+                continue;
+            }
+            let prev = d
+                .limits
+                .tier2_gate_closed
+                .swap(closed as u32, Ordering::SeqCst);
+            changed |= prev != closed as u32;
+        }
+        changed
+    }
+
+    /// Deployments with zero in-flight requests — safe to unload without
+    /// disrupting either local or tier-2 work.
+    pub fn idle_deployments(&self) -> Vec<String> {
+        let map = self.inner.deployments.read().unwrap();
+        map.values()
+            .filter(|d| {
+                d.counters.local_active.load(Ordering::SeqCst) == 0
+                    && d.counters.tier2_active.load(Ordering::SeqCst) == 0
+            })
+            .map(|d| d.id.clone())
             .collect()
     }
 
@@ -456,6 +488,14 @@ impl LocalScheduler {
         let prev_h = d.limits.health_ok.swap(h, Ordering::SeqCst);
         let prev_m = d.limits.model_ready.swap(m, Ordering::SeqCst);
         prev_h != h || prev_m != m
+    }
+
+    /// Whether the tier-2 gate is currently closed for a deployment.
+    pub fn tier2_gated(&self, dep_id: &str) -> bool {
+        let map = self.inner.deployments.read().unwrap();
+        map.get(dep_id)
+            .map(|d| d.limits.tier2_gate_closed.load(Ordering::SeqCst) == 1)
+            .unwrap_or(false)
     }
 
     /// Open/close the tier-2 admission gate for a deployment (dynamic stop).
@@ -494,6 +534,8 @@ pub struct DeploymentCapacityInfo {
     pub health_ok: bool,
     pub model_ready: bool,
     pub accepting: bool,
+    /// Closed by the system-pressure monitor (cpu/ram over configured limits).
+    pub pressure_gated: bool,
 }
 
 #[cfg(test)]
@@ -553,5 +595,54 @@ mod tests {
         // local requests are never gated by backend health
         assert!(s.set_dep_ready("d1", false, false));
         assert!(s.try_admit("d1", RequestClass::Local, "r3").is_ok());
+    }
+
+    #[test]
+    fn pressure_gate_closes_t2_never_local_and_idle_detection() {
+        let s = LocalScheduler::new(true);
+        let mut priv_cfg = dep("priv");
+        priv_cfg.sharing_mode = SharingMode::Private;
+        s.sync_deployments(&[dep("d1"), priv_cfg]);
+
+        // gate closes only shared deployments, never private or local class
+        assert!(s.apply_pressure_gate(true));
+        assert!(matches!(
+            s.try_admit("d1", RequestClass::Tier2, "r1"),
+            Err(RejectReason::AdmissionClosed)
+        ));
+        let snap = s.capacity_snapshot();
+        assert!(
+            snap.iter()
+                .find(|c| c.deployment_id == "d1")
+                .unwrap()
+                .pressure_gated
+        );
+        assert!(
+            !snap
+                .iter()
+                .find(|c| c.deployment_id == "priv")
+                .unwrap()
+                .pressure_gated
+        );
+        assert!(s.try_admit("d1", RequestClass::Local, "r2").is_ok());
+        s.finish_request("r2");
+
+        // in-flight local request keeps the deployment off the idle list
+        let _held = s.try_admit("d1", RequestClass::Local, "r3").unwrap();
+        assert!(!s.idle_deployments().contains(&"d1".to_string()));
+        drop(_held);
+
+        // no change when state already reached; reopen restores admission
+        assert!(!s.apply_pressure_gate(true));
+        assert!(s.apply_pressure_gate(false));
+        assert!(s.try_admit("d1", RequestClass::Tier2, "r4").is_ok());
+        let snap = s.capacity_snapshot();
+        assert!(
+            !snap
+                .iter()
+                .find(|c| c.deployment_id == "d1")
+                .unwrap()
+                .pressure_gated
+        );
     }
 }

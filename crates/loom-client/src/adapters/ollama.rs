@@ -186,6 +186,29 @@ impl BackendAdapter for OllamaAdapter {
         }
     }
 
+    /// Ollama: keep_alive:0 evicts the model from memory immediately.
+    async fn unload(&self, model: &str) -> Result<(), AdapterError> {
+        let url = format!("{}/api/generate", self.endpoint());
+        let mut req = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({
+                "model": model, "prompt": "", "keep_alive": 0, "stream": false
+            }))
+            .timeout(std::time::Duration::from_secs(30));
+        if !self.cfg.api_key.is_empty() {
+            req = req.bearer_auth(&self.cfg.api_key);
+        }
+        match req.send().await {
+            Ok(r) if r.status().is_success() => Ok(()),
+            Ok(r) => Err(AdapterError::Upstream {
+                status: r.status().as_u16(),
+                message: "unload failed".into(),
+            }),
+            Err(e) => Err(AdapterError::Connect(e.to_string())),
+        }
+    }
+
     async fn forward(
         &self,
         api: ApiType,

@@ -103,6 +103,14 @@ pub mod server_msgs {
         }
     }
 
+    /// Full authoritative notes set for one client (broadcast notes included
+    /// by the caller). Replaces whatever the client currently holds.
+    pub fn notes_sync(notes: Vec<ClientNote>) -> ServerEnvelope {
+        ServerEnvelope {
+            msg: Some(server_envelope::Msg::NotesSync(NotesSync { notes })),
+        }
+    }
+
     pub fn ping() -> ServerEnvelope {
         ServerEnvelope {
             msg: Some(server_envelope::Msg::Ping(Ping {

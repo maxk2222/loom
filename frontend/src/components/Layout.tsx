@@ -8,6 +8,7 @@ import {
   Key,
   Layers,
   LogOut,
+  Megaphone,
   MonitorCog,
   UserCog,
   ScrollText,
@@ -31,6 +32,7 @@ interface NavItem {
 const SERVER_NAV: NavItem[] = [
   { to: "/", label: "Overview", icon: <Home size={16} /> },
   { to: "/clients", label: "Clients", icon: <Cpu size={16} /> },
+  { to: "/notes", label: "Notices", icon: <Megaphone size={16} /> },
   { to: "/models", label: "Models", icon: <Boxes size={16} /> },
   { to: "/routers", label: "Auto Router", icon: <RouteIcon size={16} /> },
   { to: "/deployments", label: "Deployments", icon: <Layers size={16} /> },

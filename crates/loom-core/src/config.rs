@@ -47,6 +47,11 @@ pub struct ClientConfig {
     #[serde(default)]
     pub sharing_enabled: bool,
 
+    /// Local resource pressure limits: when system CPU/RAM exceed these,
+    /// tier-2 admission gates close so local work always wins.
+    #[serde(default)]
+    pub pressure: PressureConfig,
+
     /// Updater.
     #[serde(default)]
     pub updater: UpdaterConfig,
@@ -79,6 +84,7 @@ impl Default for ClientConfig {
             backends: Vec::new(),
             connector: ConnectorConfig::default(),
             sharing_enabled: false,
+            pressure: PressureConfig::default(),
             updater: UpdaterConfig::default(),
             tray: TrayConfig::default(),
             config_version: 0,
@@ -167,6 +173,46 @@ pub enum TlsMode {
     Require,
     /// Plaintext (dev/lab only).
     Off,
+}
+
+/// Local resource pressure thresholds. Disabled when `enabled` is false or
+/// both percentages are 0. When breached, every non-private deployment's
+/// tier-2 gate closes (`accepting` flips off so the server drains away) and
+/// — with `unload_models` — idle deployments also unload their model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PressureConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// System CPU usage % that triggers the gate (0 = ignore CPU).
+    #[serde(default)]
+    pub cpu_pct: u8,
+    /// System RAM usage % that triggers the gate (0 = ignore RAM).
+    #[serde(default)]
+    pub ram_pct: u8,
+    /// Also unload models on idle deployments while the gate is closed.
+    /// auto_load deployments re-warm automatically once pressure clears.
+    #[serde(default)]
+    pub unload_models: bool,
+    /// Seconds pressure must stay below limits before gates reopen
+    /// (hysteresis so the gate does not flap on noisy load).
+    #[serde(default = "default_pressure_cooldown")]
+    pub cooldown_secs: u64,
+}
+
+fn default_pressure_cooldown() -> u64 {
+    30
+}
+
+impl Default for PressureConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cpu_pct: 0,
+            ram_pct: 0,
+            unload_models: false,
+            cooldown_secs: default_pressure_cooldown(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -13,6 +13,7 @@ pub mod grpc_service;
 pub mod lua;
 pub mod metrics;
 pub mod model_registry;
+pub mod notes;
 pub mod redisx;
 pub mod router;
 pub mod router_engine;

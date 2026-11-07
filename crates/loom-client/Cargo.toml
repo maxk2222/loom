@@ -49,6 +49,7 @@ http = "1"
 
 tray-icon = { version = "0.26", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+sysinfo = "0.33"
 
 [target."cfg(target_os = \"macos\")".dependencies]
 core-foundation = { version = "0.10", optional = true }

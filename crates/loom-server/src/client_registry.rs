@@ -210,6 +210,8 @@ impl ClientRegistry {
                 .arg(&cap.sharing_mode)
                 .arg("state")
                 .arg(state)
+                .arg("pressure_gated")
+                .arg(cap.pressure_gated as u32)
                 .arg("last_report")
                 .arg(now_ms())
                 .query_async(&mut c)
@@ -278,6 +280,7 @@ impl ClientRegistry {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
             client_id: m.get("client_id").cloned().unwrap_or_default(),
+            pressure_gated: m.get("pressure_gated").map(|v| v == "1").unwrap_or(false),
         }))
     }
 
@@ -338,6 +341,8 @@ pub struct DepRuntime {
     pub tier2_free: u32,
     pub tier2_total: u32,
     pub client_id: String,
+    /// Closed by the client's local pressure monitor (cpu/ram over limits).
+    pub pressure_gated: bool,
 }
 
 async fn upsert_deployment(db: &PgPool, client_id: &str, d: &DeploymentReport) -> Result<()> {

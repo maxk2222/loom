@@ -41,7 +41,7 @@ export interface DeploymentRow {
   model_name: string;
   enabled: boolean;
   capabilities?: Record<string, unknown> | null;
-  runtime?: { state: string; tier2_free: number; tier2_total: number } | null;
+  runtime?: { state: string; tier2_free: number; tier2_total: number; pressure_gated?: boolean } | null;
 }
 
 export interface VirtualModel {
@@ -133,6 +133,30 @@ export interface ClientStatus {
   server_url: string;
   sharing_enabled: boolean;
   capacities: CapacityInfo[];
+  system?: SystemStats;
+}
+
+export interface SystemStats {
+  cpu_pct: number;
+  ram_pct: number;
+  ram_used_bytes: number;
+  ram_total_bytes: number;
+  pressure: boolean;
+  cooldown: boolean;
+  cpu_limit_pct: number;
+  ram_limit_pct: number;
+  enabled: boolean;
+}
+
+export interface ClientNote {
+  id: string;
+  title: string;
+  body: string;
+  severity: string;
+  persistent: boolean;
+  created_at_unix: number;
+  expires_at_unix: number;
+  dismissed: boolean;
 }
 
 export interface CapacityInfo {
@@ -143,6 +167,7 @@ export interface CapacityInfo {
   inflight_tier2: number;
   sharing_mode: string;
   accepting: boolean;
+  pressure_gated?: boolean;
 }
 
 export interface LocalDeployment {

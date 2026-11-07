@@ -102,6 +102,8 @@ impl Agent for AgentSvc {
                 .set_online(&client_id, &session_id, &hello.client_version)
                 .await;
             this.sessions.register(&client_id, out_tx.clone()).await;
+            // Current notes/briefings for this client (broadcast + scoped).
+            crate::notes::push_to(&this.sessions, &this.registry.db, &client_id).await;
             if let Some(inv) = &hello.inventory {
                 let _ = this.registry.apply_inventory(&client_id, inv).await;
             }

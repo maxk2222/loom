@@ -13,7 +13,7 @@ use axum::{
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use loom_core::ids::{opaque_token, sha256_hex};
@@ -86,6 +86,9 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/clients/{id}/update", post(push_client_update))
         .route("/api/server/update", post(server_update))
         .route("/api/enroll-tokens", post(issue_enroll_token))
+        // client notices (notes/briefings pushed to client dashboards)
+        .route("/api/notes", get(list_notes).post(create_note))
+        .route("/api/notes/{id}", delete(delete_note))
         // deployments
         .route("/api/deployments", get(list_deployments))
         // virtual models
@@ -698,6 +701,133 @@ async fn issue_enroll_token(State(s): State<AdminState>, req: Request) -> Respon
     }
 }
 
+// ---------------- client notices (notes/briefings) ----------------
+
+async fn list_notes(State(s): State<AdminState>) -> Json<Value> {
+    type Row = (
+        uuid::Uuid,
+        Option<uuid::Uuid>,
+        Option<String>,
+        String,
+        String,
+        String,
+        bool,
+        Option<chrono::DateTime<chrono::Utc>>,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT n.id, n.client_id, c.name AS client_name, n.title, n.body,
+                n.severity, n.persistent, n.expires_at, n.created_at
+         FROM client_notes n LEFT JOIN clients c ON c.id = n.client_id
+         ORDER BY n.created_at DESC LIMIT 200",
+    )
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default();
+    Json(json!({
+        "notes": rows.iter().map(|(id,cid,cn,t,b,sev,p,exp,ca)| json!({
+            "id": id, "client_id": cid, "client_name": cn,
+            "title": t, "body": b, "severity": sev, "persistent": p,
+            "expires_at": exp, "created_at": ca,
+        })).collect::<Vec<_>>()
+    }))
+}
+
+async fn create_note(State(s): State<AdminState>, req: Request) -> Response {
+    let user = req.extensions().get::<UserCtx>().cloned();
+    let body = axum::body::to_bytes(req.into_body(), 64 * 1024)
+        .await
+        .unwrap_or_default();
+    let b: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let title = b["title"].as_str().unwrap_or("").trim().to_string();
+    if title.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"title required"})),
+        )
+            .into_response();
+    }
+    let severity = match b["severity"].as_str().unwrap_or("info") {
+        "warning" => "warning",
+        "critical" => "critical",
+        _ => "info",
+    };
+    // Empty/absent client_id → broadcast (NULL).
+    let client_id = b["client_id"].as_str().unwrap_or("").trim().to_string();
+    if !client_id.is_empty() {
+        if uuid::Uuid::parse_str(&client_id).is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"invalid client_id"})),
+            )
+                .into_response();
+        }
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM clients WHERE id=$1::uuid)")
+                .bind(&client_id)
+                .fetch_one(&s.db)
+                .await
+                .unwrap_or(false);
+        if !exists {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error":"client not found"})),
+            )
+                .into_response();
+        }
+    }
+    let res = sqlx::query(
+        "INSERT INTO client_notes (client_id,title,body,severity,persistent,expires_at,created_by)
+         VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,
+                 CASE WHEN $6 > 0 THEN now() + ($6 || ' hours')::interval END,
+                 $7) RETURNING id::text",
+    )
+    .bind(&client_id)
+    .bind(&title)
+    .bind(b["body"].as_str().unwrap_or(""))
+    .bind(severity)
+    .bind(b["persistent"].as_bool().unwrap_or(false))
+    .bind(b["expires_hours"].as_i64().unwrap_or(0))
+    .bind(user.map(|u| u.email).unwrap_or_else(|| "admin".into()))
+    .fetch_one(&s.db)
+    .await;
+    match res {
+        Ok(row) => {
+            use sqlx::Row;
+            let id: String = row.get(0);
+            audit(&s.db, "note", "create", &id).await;
+            crate::notes::push_all(&s.sessions, &s.db).await;
+            Json(json!({"ok":true,"id":id})).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "note create failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn delete_note(
+    State(s): State<AdminState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if uuid::Uuid::parse_str(&id).is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let res = sqlx::query("DELETE FROM client_notes WHERE id=$1::uuid")
+        .bind(&id)
+        .execute(&s.db)
+        .await;
+    match res {
+        Ok(r) if r.rows_affected() > 0 => {
+            audit(&s.db, "note", "delete", &id).await;
+            crate::notes::push_all(&s.sessions, &s.db).await;
+            Json(json!({"ok":true})).into_response()
+        }
+        Ok(_) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 // ---------------- deployments / virtual models ----------------
 
 async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
@@ -724,7 +854,7 @@ async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
         let rt = s.registry.dep_runtime(&id.to_string()).await.ok().flatten();
         out.push(json!({"id":id,"client_id":cid,"client_name":cn,"name":n,"backend_type":bt,"model_name":mn,"enabled":en,
             "capabilities": caps,
-            "runtime": rt.map(|r| json!({"state":r.state,"tier2_free":r.tier2_free,"tier2_total":r.tier2_total}))}));
+            "runtime": rt.map(|r| json!({"state":r.state,"tier2_free":r.tier2_free,"tier2_total":r.tier2_total,"pressure_gated":r.pressure_gated}))}));
     }
     Json(json!({"deployments": out}))
 }

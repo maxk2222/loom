@@ -75,6 +75,20 @@ async fn async_main() -> anyhow::Result<()> {
     let connector = Connector::new(cfg_store.clone(), backends.clone(), scheduler.clone());
     backends.spawn_health_loop(scheduler.clone(), connector.state().capacity_notify.clone());
 
+    // Pressure monitor: samples cpu/ram, closes tier-2 gates under load and
+    // optionally unloads idle models. Stats feed the dashboard.
+    let sys_stats = loom_client::sysmon::spawn(
+        cfg_store.clone(),
+        scheduler.clone(),
+        backends.clone(),
+        connector.state().capacity_notify.clone(),
+    );
+
+    // Admin notes pushed by the server; persisted next to the config.
+    let notes_path = config_path.with_file_name("notes.json");
+    let notes = loom_client::notes::load_notes(&notes_path);
+    connector.set_notes(notes.clone(), notes_path.clone());
+
     // Shared history ring: the connector appends tier-2 finishes, the local
     // API appends local finishes; both surface in /local/api/history.
     // Persisted to history.json next to the config so charts survive restarts.
@@ -104,6 +118,9 @@ async fn async_main() -> anyhow::Result<()> {
         requests: Default::default(),
         history,
         sessions: Default::default(),
+        notes,
+        notes_path,
+        sys_stats,
     };
 
     // Auto-updater: periodic manifest check when enabled. Manual/admin

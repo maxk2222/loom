@@ -43,6 +43,11 @@ pub struct AppState {
     /// Local UI sessions: sha256(token) -> expiry (unix ms). In-memory only —
     /// a restart simply means logging in again.
     pub sessions: Arc<RwLock<HashMap<String, i64>>>,
+    /// Admin notices pushed by the server (+ persistence path).
+    pub notes: crate::notes::SharedNotes,
+    pub notes_path: std::path::PathBuf,
+    /// Live host metrics from the pressure monitor.
+    pub sys_stats: crate::sysmon::SharedStats,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -169,6 +174,8 @@ pub fn router(state: AppState) -> Router {
             get(admin_connection).put(admin_put_connection),
         )
         .route("/local/api/metrics", get(admin_metrics))
+        .route("/local/api/notes", get(admin_notes))
+        .route("/local/api/notes/{id}/dismiss", post(admin_dismiss_note))
         .route("/local/api/update-check", get(admin_update_check))
         .route("/local/api/update", post(admin_update_apply))
         .route("/local/api/auth/status", get(auth_status))
@@ -607,6 +614,7 @@ async fn admin_status(State(s): State<AppState>) -> Json<Value> {
     let cfg = s.cfg.get().await;
     let caps = s.scheduler.capacity_snapshot();
     let uptime = s.started.elapsed().as_secs();
+    let sys = s.sys_stats.read().unwrap().clone();
     Json(json!({
         "name": cfg.name,
         "version": env!("CARGO_PKG_VERSION"),
@@ -615,6 +623,7 @@ async fn admin_status(State(s): State<AppState>) -> Json<Value> {
         "server_url": cfg.server_url,
         "sharing_enabled": cfg.sharing_enabled,
         "capacities": caps,
+        "system": sys,
     }))
 }
 
@@ -889,35 +898,55 @@ async fn admin_cancel_request(State(s): State<AppState>, Path(id): Path<String>)
     Json(json!({"cancelled": local || tier2}))
 }
 
-#[derive(Debug, Serialize)]
-struct SharingState {
-    sharing_enabled: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct SharingBody {
-    sharing_enabled: Option<bool>,
-}
-
-async fn admin_get_sharing(State(s): State<AppState>) -> Json<SharingState> {
+async fn admin_get_sharing(State(s): State<AppState>) -> Json<Value> {
     let cfg = s.cfg.get().await;
-    Json(SharingState {
-        sharing_enabled: cfg.sharing_enabled,
-    })
+    Json(json!({
+        "sharing_enabled": cfg.sharing_enabled,
+        "pressure": cfg.pressure,
+    }))
 }
 
-async fn admin_put_sharing(
-    State(s): State<AppState>,
-    Json(body): Json<SharingBody>,
-) -> Json<Value> {
-    if let Some(v) = body.sharing_enabled {
+async fn admin_put_sharing(State(s): State<AppState>, Json(body): Json<Value>) -> Json<Value> {
+    // Accept both "sharing_enabled" and the legacy UI field "enabled".
+    let sharing = body
+        .get("sharing_enabled")
+        .or_else(|| body.get("enabled"))
+        .and_then(|v| v.as_bool());
+    if let Some(v) = sharing {
         let _ = s.cfg.update(|c| c.sharing_enabled = v).await;
         s.scheduler.set_sharing_enabled(v);
         s.connector.notify_capacity();
         info!(sharing = v, "sharing toggled via local admin");
     }
+    if let Some(p) = body.get("pressure").and_then(|v| v.as_object()) {
+        let num = |k: &str| p.get(k).and_then(|v| v.as_u64());
+        let _ = s
+            .cfg
+            .update(|c| {
+                if let Some(v) = p.get("enabled").and_then(|v| v.as_bool()) {
+                    c.pressure.enabled = v;
+                }
+                if let Some(v) = num("cpu_pct") {
+                    c.pressure.cpu_pct = v.min(100) as u8;
+                }
+                if let Some(v) = num("ram_pct") {
+                    c.pressure.ram_pct = v.min(100) as u8;
+                }
+                if let Some(v) = p.get("unload_models").and_then(|v| v.as_bool()) {
+                    c.pressure.unload_models = v;
+                }
+                if let Some(v) = num("cooldown_secs") {
+                    c.pressure.cooldown_secs = v;
+                }
+            })
+            .await;
+        info!("pressure limits updated via local admin");
+    }
     let cfg = s.cfg.get().await;
-    Json(json!({"sharing_enabled": cfg.sharing_enabled}))
+    Json(json!({
+        "sharing_enabled": cfg.sharing_enabled,
+        "pressure": cfg.pressure,
+    }))
 }
 
 async fn admin_reprobe(State(s): State<AppState>) -> Json<Value> {
@@ -978,6 +1007,32 @@ async fn admin_put_connection(State(s): State<AppState>, Json(b): Json<Value>) -
 
 async fn admin_metrics(State(_s): State<AppState>) -> Json<Value> {
     Json(json!({"note": "prometheus metrics at the dedicated listener when configured"}))
+}
+
+/// Admin notices pushed by the server. Persistent briefings first, then
+/// newest. `undismissed` counts what the bell badge shows.
+async fn admin_notes(State(s): State<AppState>) -> Json<Value> {
+    let notes = s.notes.read().unwrap().clone();
+    let undismissed = notes.iter().filter(|n| !n.dismissed).count();
+    let mut ordered = notes;
+    ordered.sort_by(|a, b| {
+        b.persistent
+            .cmp(&a.persistent)
+            .then(b.created_at_unix.cmp(&a.created_at_unix))
+    });
+    Json(json!({"notes": ordered, "undismissed": undismissed}))
+}
+
+/// Client-local dismissal. Persistent briefings cannot be dismissed.
+async fn admin_dismiss_note(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<Value> {
+    let ok = crate::notes::dismiss(&s.notes, &id);
+    if ok {
+        crate::notes::save_notes(&s.notes_path, &s.notes);
+    }
+    Json(json!({"ok": ok}))
 }
 
 pub(crate) fn now_ms() -> i64 {

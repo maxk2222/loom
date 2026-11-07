@@ -218,6 +218,10 @@ impl BackendManager {
                     *w = None;
                 } else if de.cfg.auto_load
                     && de.cfg.enabled
+                    // While the tier-2 gate is closed (local pressure), a
+                    // pressure-offloaded model must stay unloaded — the local
+                    // path still loads it JIT on demand.
+                    && !sched.tier2_gated(&did)
                     // Re-warm on the 4-min keep-alive cadence OR immediately
                     // when the model was just evicted (ready flipped false).
                     && (!loaded_ok
@@ -377,6 +381,26 @@ impl BackendManager {
             return Err(AdapterError::Connect("backend disabled".into()));
         }
         be.adapter.forward(api, &model, body, cancel).await
+    }
+
+    /// Unload a deployment's model from backend memory (pressure offload).
+    pub async fn unload(&self, dep_id: &str) -> Result<(), AdapterError> {
+        let (backend_id, model) = {
+            let deps = self.inner.deployments.read().await;
+            let Some(d) = deps.get(dep_id) else {
+                return Err(AdapterError::Protocol(format!(
+                    "unknown deployment {dep_id}"
+                )));
+            };
+            (d.backend_id.clone(), d.cfg.model_name.clone())
+        };
+        let backends = self.inner.backends.read().await;
+        let Some(be) = backends.get(&backend_id) else {
+            return Err(AdapterError::Connect(format!(
+                "missing backend {backend_id}"
+            )));
+        };
+        be.adapter.unload(&model).await
     }
 
     /// Raw multipart forward (audio transcription/translation). The adapter
