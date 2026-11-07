@@ -6,6 +6,7 @@ const outDir = variant === "client" ? "dist-client" : "dist";
 const proxyTarget = process.env.LOOM_DEV_API ?? "http://localhost:8080";
 
 export default defineConfig({
+  base: "/ui/",
   plugins: [react()],
   define: {
     __VARIANT__: JSON.stringify(variant),

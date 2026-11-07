@@ -685,7 +685,12 @@ async fn run_request(
                     .await;
             }
             (
-                if e == "cancelled" { "cancelled" } else { "failed" }.to_string(),
+                if e == "cancelled" {
+                    "cancelled"
+                } else {
+                    "failed"
+                }
+                .to_string(),
                 Some(e),
                 loom_core::openai::Usage::default(),
                 0,

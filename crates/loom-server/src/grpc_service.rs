@@ -300,7 +300,8 @@ impl Agent for AgentSvc {
                     .map(|c| {
                         (
                             c.config_version.max(0) as u64,
-                            serde_json::to_vec(&c.desired_config).unwrap_or_else(|_| b"{}".to_vec()),
+                            serde_json::to_vec(&c.desired_config)
+                                .unwrap_or_else(|_| b"{}".to_vec()),
                         )
                     })
                     .unwrap_or((0, b"{}".to_vec()));

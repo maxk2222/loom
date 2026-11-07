@@ -508,11 +508,14 @@ impl Scheduler {
                 Ok(outcome) => {
                     trace["deployment_id"] = json!(member.deployment_id);
                     trace["client_id"] = json!(member.client_id);
-                    return Ok(RequestOutcome { routing_trace: trace, ..outcome });
+                    return Ok(RequestOutcome {
+                        routing_trace: trace,
+                        ..outcome
+                    });
                 }
-                Err(e @ (SchedErr::NoCapacity
-                | SchedErr::Rejected(_)
-                | SchedErr::ClientOffline)) => {
+                Err(
+                    e @ (SchedErr::NoCapacity | SchedErr::Rejected(_) | SchedErr::ClientOffline),
+                ) => {
                     tracing::debug!(req = %req.request_id, dep = %member.deployment_id, err = %e, "candidate failed, trying next");
                     continue;
                 }

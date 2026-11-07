@@ -58,7 +58,7 @@ function ClientRoutes() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename="/ui">
       {APP_VARIANT === "client" ? <ClientRoutes /> : <ServerRoutes />}
     </BrowserRouter>
   );
