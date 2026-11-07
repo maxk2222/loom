@@ -44,6 +44,8 @@ export default function ModelsPage() {
   const qc = useQueryClient();
   const vms = useQuery({ queryKey: ["vms"], queryFn: () => api.get<{ models: VirtualModel[] }>("/api/models") });
   const deps = useQuery({ queryKey: ["deployments"], queryFn: () => api.get<{ deployments: DeploymentRow[] }>("/api/deployments") });
+  const clis = useQuery({ queryKey: ["clients"], queryFn: () => api.get<{ clients: any[] }>("/api/clients") });
+  const cname = (id: string) => clis.data?.clients.find((c: any) => c.id === id)?.name ?? id.slice(0, 8);
   const [open, setOpen] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [f, setF] = useState<FormState>(EMPTY);

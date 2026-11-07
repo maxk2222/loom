@@ -3,9 +3,9 @@
 @tailwind utilities;
 
 :root {
-  --accent: #6b8fc7;
-  --accent-glow: rgba(107, 143, 199, 0.22);
-  --grad: linear-gradient(120deg, #4d7ec4, #6b8fc7 50%, #8b7ec7);
+  --accent: #3d6fae;
+  --accent-glow: rgba(61, 111, 174, 0.30);
+  --grad: linear-gradient(120deg, #2e598c, #3d6fae 55%, #5b7eae);
 }
 
 html, body {
@@ -45,10 +45,15 @@ html, body {
 }
 .btn-primary {
   @apply btn text-white;
-  background: var(--grad);
-  box-shadow: 0 4px 18px -6px var(--accent-glow);
+  background: var(--accent);
+  box-shadow: 0 4px 14px -8px var(--accent-glow);
 }
-.btn-primary:hover { filter: brightness(1.12); }
+.btn-primary:hover {
+  filter: brightness(1.15);
+  box-shadow: 0 6px 22px -6px var(--accent-glow), 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.card { transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
+.card:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); box-shadow: 0 8px 28px -14px var(--accent-glow); }
 .btn-ghost { @apply btn text-muted hover:text-text hover:bg-panel2; }
 .btn-danger { @apply btn bg-err/10 text-err hover:bg-err/20; }
 .btn-outline { @apply btn border border-border text-text hover:bg-panel2 hover:border-muted/40; }
