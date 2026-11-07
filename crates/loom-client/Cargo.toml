@@ -45,6 +45,9 @@ clap.workspace = true
 minisign-verify.workspace = true
 http = "1"
 
+tray-icon = "0.26"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [dev-dependencies]
 loom-testkit.workspace = true
 

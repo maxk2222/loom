@@ -8,4 +8,5 @@ pub mod local_api;
 pub mod local_ui;
 pub mod scheduler;
 pub mod telemetry;
+pub mod tray;
 pub mod updater;

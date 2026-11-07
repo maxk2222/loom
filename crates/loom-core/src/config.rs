@@ -46,6 +46,10 @@ pub struct ClientConfig {
     #[serde(default)]
     pub updater: UpdaterConfig,
 
+    /// Desktop tray icon settings.
+    #[serde(default)]
+    pub tray: TrayConfig,
+
     /// Optional remote-config overrides pushed by the server (desired state).
     #[serde(default)]
     pub config_version: u64,
@@ -70,6 +74,7 @@ impl Default for ClientConfig {
             connector: ConnectorConfig::default(),
             sharing_enabled: false,
             updater: UpdaterConfig::default(),
+            tray: TrayConfig::default(),
             config_version: 0,
         }
     }
@@ -412,4 +417,12 @@ impl Default for SchedulerConfig {
             request_deadline_secs: default_request_deadline(),
         }
     }
+}
+
+/// Desktop tray icon settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TrayConfig {
+    /// Show a system-tray icon (requires a desktop session).
+    #[serde(default)]
+    pub enabled: bool,
 }

@@ -1,0 +1,77 @@
+//! Optional system-tray icon for the client daemon (macOS/Windows/Linux).
+//!
+//! Runs on the main thread on macOS (AppKit requirement) — call `run()`
+//! from `main` AFTER the tokio runtime has been moved to a worker thread.
+
+use anyhow::{Context, Result};
+
+const ICON_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
+const UI_URL: &str = "http://127.0.0.1:8391/ui/";
+
+fn load_icon() -> Result<tray_icon::Icon> {
+    let img = image::load_from_memory_with_format(ICON_PNG, image::ImageFormat::Png)
+        .context("decode tray png")?
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    tray_icon::Icon::from_rgba(img.into_raw(), w, h).context("tray icon")
+}
+
+/// Open the local admin UI in the default browser (platform-specific).
+fn open_ui() {
+    let url = std::env::var("LOOM_UI_URL").unwrap_or_else(|_| UI_URL.into());
+    let _ = std::process::Command::new(if cfg!(target_os = "windows") {
+        "cmd"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    })
+    .args(if cfg!(target_os = "windows") {
+        vec!["/c", "start", "", url.as_str()]
+    } else {
+        vec![url.as_str()]
+    })
+    .spawn();
+}
+
+/// Blocking tray event loop — must run on the main thread (macOS).
+/// Returns when the user picks Quit.
+pub fn run() -> Result<()> {
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::{TrayIconBuilder, TrayIconEvent};
+
+    let icon = load_icon()?;
+    let open_item = MenuItem::new("Open LOOM UI", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
+    let menu = Menu::with_items(&[&open_item as &dyn tray_icon::menu::IsMenuItem, &quit_item])?;
+    let open_id = open_item.id().clone();
+    let quit_id = quit_item.id().clone();
+    drop(open_item);
+    drop(quit_item);
+
+    let _tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip("LOOM Client")
+        .with_icon(icon)
+        .build()
+        .context("build tray")?;
+
+    let menu_rx = MenuEvent::receiver();
+    let tray_rx = TrayIconEvent::receiver();
+    loop {
+        // Double-click / click on the icon also opens the UI.
+        if let Ok(ev) = tray_rx.try_recv() {
+            if matches!(ev, TrayIconEvent::DoubleClick { .. }) {
+                open_ui();
+            }
+        }
+        if let Ok(ev) = menu_rx.try_recv() {
+            if ev.id == open_id {
+                open_ui();
+            } else if ev.id == quit_id {
+                std::process::exit(0);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
