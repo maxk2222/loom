@@ -43,7 +43,7 @@ struct DeploymentEntry {
     backend_id: String,
     caps: Arc<RwLock<Option<Capabilities>>>,
     health: Arc<RwLock<Health>>,
-    warmed: Arc<RwLock<bool>>,
+    warmed_at: Arc<RwLock<Option<std::time::Instant>>>,
 }
 
 impl Default for BackendManager {
@@ -108,7 +108,7 @@ impl BackendManager {
                 next_deployments.insert(
                     d.id.clone(),
                     DeploymentEntry {
-                        warmed: Arc::new(RwLock::new(false)),
+                        warmed_at: Arc::new(RwLock::new(None)),
                         cfg: d.clone(),
                         backend_id: b.id.clone(),
                         caps,
@@ -169,11 +169,16 @@ impl BackendManager {
                 *de.health.write().await = adapter_health;
                 // Auto-load: warm the model once when the backend is healthy
                 // and the deployment is enabled+idle (re-warms after recovery).
-                let mut w = de.warmed.write().await;
+                // Keep-alive warm: JIT backends (LM Studio) evict idle models,
+                // so re-warm every ~4 min while healthy rather than once.
+                let mut w = de.warmed_at.write().await;
                 if adapter_health != Health::Healthy {
-                    *w = false;
-                } else if de.cfg.auto_load && de.cfg.enabled && !*w {
-                    *w = true;
+                    *w = None;
+                } else if de.cfg.auto_load
+                    && de.cfg.enabled
+                    && w.map(|t| t.elapsed().as_secs() >= 240).unwrap_or(true)
+                {
+                    *w = Some(std::time::Instant::now());
                     let inner = self.inner.clone();
                     let (bid2, model) = (bid.clone(), de.cfg.model_name.clone());
                     tokio::spawn(async move {
