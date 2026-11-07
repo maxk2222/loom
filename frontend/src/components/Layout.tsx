@@ -17,7 +17,8 @@ import {
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { api, APP_VARIANT } from "../lib/api";
 import { useBranding } from "../lib/branding";
-import { Logo } from "./ui";
+import { useQuery } from "@tanstack/react-query";
+import { Badge, Logo } from "./ui";
 
 interface NavItem {
   to: string;
@@ -45,6 +46,32 @@ const CLIENT_NAV: NavItem[] = [
   { to: "/requests", label: "Requests", icon: <MonitorCog size={16} /> },
   { to: "/connection", label: "Connection", icon: <Gauge size={16} /> },
 ];
+
+function StatusBar() {
+  const isClient = APP_VARIANT === "client";
+  const q = useQuery({
+    queryKey: ["statusbar"],
+    queryFn: () =>
+      api.get<any>(isClient ? "/local/api/status" : "/api/overview"),
+    refetchInterval: 8000,
+  });
+  const d = q.data ?? {};
+  const connected = isClient ? d.server_connected : true;
+  return (
+    <header className="sticky top-0 z-20 flex h-11 items-center gap-2 border-b border-border bg-bg/80 px-5 backdrop-blur">
+      <Badge tone={connected ? "ok" : "err"} dot>
+        {isClient ? (connected ? "server connected" : "server offline") : "server live"}
+      </Badge>
+      {isClient ? (
+        <Badge tone="muted">local {d.inflight_local ?? 0} · tier2 {d.inflight_tier2 ?? 0}</Badge>
+      ) : (
+        <Badge tone="muted">{d.clients_online ?? 0}/{d.clients_total ?? 0} clients</Badge>
+      )}
+      <span className="flex-1" />
+      <span className="text-[11px] text-muted/60">LOOM {isClient ? "client" : "control"}</span>
+    </header>
+  );
+}
 
 export default function Layout() {
   const brand = useBranding();
@@ -119,11 +146,14 @@ export default function Layout() {
           </div>
         </div>
       </aside>
-      <main className="min-w-0 flex-1 p-6 lg:p-8">
-        <div className="page-enter mx-auto max-w-6xl">
+      <div className="flex min-w-0 flex-1 flex-col">
+        <StatusBar />
+        <main className="min-w-0 flex-1 p-6 lg:p-8">
+        <div className="page-enter mx-auto w-full max-w-6xl">
           <Outlet />
         </div>
-      </main>
+        </main>
+      </div>
     </div>
   );
 }

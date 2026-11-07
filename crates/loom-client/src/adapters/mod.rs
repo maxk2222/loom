@@ -75,6 +75,13 @@ pub trait BackendAdapter: Send + Sync {
     /// Health check of the backend endpoint.
     async fn health(&self) -> Health;
 
+    /// Warm up / load a model into memory (JIT engines). No-op default:
+    /// a 1-token chat request triggers load on OpenAI-compatible backends.
+    async fn warm_up(&self, model: &str) -> Result<(), AdapterError> {
+        let _ = model;
+        Ok(())
+    }
+
     /// Forward an OpenAI request body to the backend; returns the raw response.
     async fn forward(
         &self,

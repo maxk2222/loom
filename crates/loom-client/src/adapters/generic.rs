@@ -81,6 +81,30 @@ impl BackendAdapter for GenericAdapter {
         }
     }
 
+    /// Generic OpenAI: a 1-token chat request triggers JIT model load.
+    async fn warm_up(&self, model: &str) -> Result<(), AdapterError> {
+        let url = format!("{}/v1/chat/completions", self.endpoint());
+        let mut req = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({
+                "model": model,
+                "messages": [{"role":"user","content":"hi"}],
+                "max_tokens": 1,
+                "stream": false
+            }))
+            .timeout(Duration::from_secs(120));
+        if !self.cfg.api_key.is_empty() {
+            req = req.bearer_auth(&self.cfg.api_key);
+        }
+        match req.send().await {
+            // Any response means the backend was reached and the JIT load was
+            // triggered — a validation 4xx after load-start is fine.
+            Ok(_) => Ok(()),
+            Err(e) => Err(AdapterError::Connect(e.to_string())),
+        }
+    }
+
     async fn forward(
         &self,
         api: ApiType,

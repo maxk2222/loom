@@ -43,6 +43,7 @@ struct DeploymentEntry {
     backend_id: String,
     caps: Arc<RwLock<Option<Capabilities>>>,
     health: Arc<RwLock<Health>>,
+    warmed: Arc<RwLock<bool>>,
 }
 
 impl Default for BackendManager {
@@ -107,6 +108,7 @@ impl BackendManager {
                 next_deployments.insert(
                     d.id.clone(),
                     DeploymentEntry {
+                        warmed: Arc::new(RwLock::new(false)),
                         cfg: d.clone(),
                         backend_id: b.id.clone(),
                         caps,
@@ -165,6 +167,28 @@ impl BackendManager {
                 let deps = self.inner.deployments.read().await;
                 let Some(de) = deps.get(&did) else { continue };
                 *de.health.write().await = adapter_health;
+                // Auto-load: warm the model once when the backend is healthy
+                // and the deployment is enabled+idle (re-warms after recovery).
+                let mut w = de.warmed.write().await;
+                if adapter_health != Health::Healthy {
+                    *w = false;
+                } else if de.cfg.auto_load && de.cfg.enabled && !*w {
+                    *w = true;
+                    let inner = self.inner.clone();
+                    let (bid2, model) = (bid.clone(), de.cfg.model_name.clone());
+                    tokio::spawn(async move {
+                        let backends = inner.backends.read().await;
+                        if let Some(be) = backends.get(&bid2) {
+                            match be.adapter.warm_up(&model).await {
+                                Ok(_) => info!(deployment = %model, "model warmed"),
+                                Err(e) => {
+                                    warn!(deployment = %model, error = %e, "auto-load failed")
+                                }
+                            }
+                        }
+                    });
+                }
+                drop(w);
                 // Probe capabilities once (or when empty) unless overridden.
                 let needs_probe = !de.cfg.capability_overrides
                     && de.caps.read().await.is_none()

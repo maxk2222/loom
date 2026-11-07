@@ -230,6 +230,10 @@ pub struct DeploymentConfig {
     /// Sharing mode toward the cluster.
     #[serde(default)]
     pub sharing_mode: SharingMode,
+    /// Proactively load the model when the backend is healthy and the
+    /// deployment is idle (JIT engines like Ollama/LM Studio).
+    #[serde(default)]
+    pub auto_load: bool,
     /// Enabled toggle.
     #[serde(default = "default_true")]
     pub enabled: bool,

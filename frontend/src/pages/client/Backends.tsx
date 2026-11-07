@@ -5,6 +5,7 @@ import { api } from "../../lib/api";
 import { Badge, Card, Empty, Field, Modal, PageHeader, Select, Spinner, Toggle } from "../../components/ui";
 
 interface DepForm {
+  auto_load?: boolean;
   id: string;
   name: string;
   model_name: string;
@@ -36,6 +37,7 @@ const EMPTY_DEP: DepForm = {
   tier2_max: 2,
   sharing_mode: "shared",
   enabled: true,
+  auto_load: false,
 };
 
 const EMPTY_BACKEND: BackendForm = {
@@ -171,7 +173,7 @@ export default function BackendsPage() {
                         max {d.max_concurrent} · res {d.local_reserve} · t2 {d.tier2_max}
                       </td>
                       <td className="td text-xs text-muted">{d.sharing_mode}</td>
-                      <td className="td">{d.enabled ? <Badge tone="ok">on</Badge> : <Badge tone="err">off</Badge>}</td>
+                      <td className="td">{d.enabled ? <Badge tone="ok">on</Badge> : <Badge tone="err">off</Badge>}{d.auto_load && <Badge tone="muted"> · autoload</Badge>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -254,7 +256,10 @@ export default function BackendsPage() {
                     </Field>
                   </div>
                   <div className="flex items-center justify-between">
-                    <Toggle checked={d.enabled} onChange={(v) => updDep(editing, i, { enabled: v })} label="enabled" />
+                    <div className="flex items-center gap-4">
+                      <Toggle checked={d.enabled} onChange={(v) => updDep(editing, i, { enabled: v })} label="enabled" />
+                      <Toggle checked={!!d.auto_load} onChange={(v) => updDep(editing, i, { auto_load: v })} label="auto-load" />
+                    </div>
                     {editing.deployments.length > 1 && (
                       <button
                         className="btn-ghost px-2 py-1 text-xs text-err"
