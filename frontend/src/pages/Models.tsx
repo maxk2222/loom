@@ -181,8 +181,8 @@ export default function ModelsPage() {
                   <select className="input flex-1" value={m.deployment_id}
                     onChange={(e) => { const ms = [...f.members]; ms[i] = { ...m, deployment_id: e.target.value }; setF({ ...f, members: ms }); }}>
                     <option value="">— deployment —</option>
-                    {(deps.data?.deployments ?? []).map((d) => (
-                      <option key={d.id} value={d.id}>{d.name} · {d.model_name}</option>
+                    {(deps.data?.deployments ?? []).filter((d: any) => d.enabled !== false).map((d: any) => (
+                      <option key={d.id} value={d.id}>{cname(d.client_id)} · {d.model_name}</option>
                     ))}
                   </select>
                   <input className="input w-20" type="number" title="priority" value={m.priority}

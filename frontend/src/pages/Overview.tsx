@@ -9,10 +9,10 @@ import type { ClientRow, Overview } from "../lib/types";
 export default function OverviewPage() {
   const ov = useQuery({ queryKey: ["overview"], queryFn: () => api.get<Overview>("/api/overview"), refetchInterval: 5000 });
   const clients = useQuery({ queryKey: ["clients"], queryFn: () => api.get<{ clients: ClientRow[] }>("/api/clients"), refetchInterval: 5000 });
-  const hist = useQuery({ queryKey: ["ov-hist"], queryFn: () => api.get<{ history: any[] }>("/api/history?limit=200"), refetchInterval: 10000 });
+  const hist = useQuery({ queryKey: ["ov-hist"], queryFn: () => api.get<{ requests: any[] }>("/api/history?limit=200"), refetchInterval: 10000 });
   const chart = (() => {
     const buckets = new Map<string, { t: string; n: number; ok: number }>();
-    for (const h of [...(hist.data?.history ?? [])].reverse()) {
+    for (const h of [...(hist.data?.requests ?? [])].reverse()) {
       const t = new Date(h.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       const b = buckets.get(t) ?? { t, n: 0, ok: 0 };
       b.n++; if (h.status === "done") b.ok++;
