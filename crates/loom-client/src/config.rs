@@ -46,18 +46,6 @@ impl ConfigStore {
         self.persist_locked(&guard)
     }
 
-    /// Ensure `local_api.api_key` is set: generate and persist a random key on
-    /// first run so the local admin API is never left wide open on loopback.
-    /// The UI prompts for the key once; it is readable in the config file.
-    pub async fn ensure_local_api_key(&self) -> Result<()> {
-        self.update(|c| {
-            if c.local_api.api_key.is_empty() {
-                c.local_api.api_key = loom_core::ids::opaque_token(24);
-            }
-        })
-        .await
-    }
-
     fn persist_locked(&self, cfg: &ClientConfig) -> Result<()> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).ok();

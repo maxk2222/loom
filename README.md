@@ -251,8 +251,9 @@ went where it went.
   (`admin` / `operator` / `viewer`), failed-login lockout with exponential
   backoff, and `Secure` cookies when served over HTTPS
   (`LOOM_SECURE_COOKIES=1` or `X-Forwarded-Proto: https`)
-- The workstation admin API (`:8391`) requires a Bearer key generated into
-  `config.toml` (`0600`) on first run — the local UI prompts for it once
+- The workstation admin API (`:8391`) is loopback-only; set
+  `local_api.api_key` in `config.toml` (written `0600`) to require a Bearer
+  key — the local UI prompts for it once
 - **Prompts and responses are never persisted** — not in Postgres, Redis,
   logs, or metrics
 - gRPC fencing tokens make stale assignments harmless after reconnects

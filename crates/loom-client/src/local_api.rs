@@ -41,7 +41,7 @@ pub struct AppState {
     pub history: Arc<RwLock<VecDeque<FinReq>>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct FinReq {
     pub class: String,
     pub api: String,
@@ -52,6 +52,30 @@ pub struct FinReq {
     pub completion_tokens: u32,
     pub status: String,
     pub ended_unix_ms: i64,
+}
+
+/// Load a persisted history snapshot (best-effort; keeps the newest 300).
+pub fn load_history_file(path: &std::path::Path) -> VecDeque<FinReq> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return VecDeque::new();
+    };
+    let mut items: Vec<FinReq> = serde_json::from_slice(&bytes).unwrap_or_default();
+    if items.len() > 300 {
+        items.drain(..items.len() - 300);
+    }
+    items.into_iter().collect()
+}
+
+/// Persist the history ring (atomic via tmp+rename).
+pub fn save_history_file(path: &std::path::Path, ring: &RwLock<VecDeque<FinReq>>) {
+    let items: Vec<FinReq> = ring.read().unwrap().iter().cloned().collect();
+    let Ok(json) = serde_json::to_vec(&items) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &json).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
 }
 
 /// Remove an active request and append it to the history ring.
