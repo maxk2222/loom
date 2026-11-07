@@ -1,6 +1,7 @@
 import { clsx } from "clsx";
 import { Inbox, X } from "lucide-react";
 import { useEffect, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 /* ---------- layout primitives ---------- */
 
@@ -119,7 +120,9 @@ export function Modal({
     return () => window.removeEventListener("keydown", h);
   }, [open, onClose]);
   if (!open) return null;
-  return (
+  // Portal to body: page-enter's persisted transform would otherwise make
+  // this `fixed` overlay position relative to the content container.
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
       onMouseDown={(e) => e.target === ref.current && onClose()}
@@ -139,7 +142,8 @@ export function Modal({
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

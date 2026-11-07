@@ -1991,6 +1991,7 @@ name = "loom-client"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "async-stream",
  "async-trait",
  "axum 0.8.9",

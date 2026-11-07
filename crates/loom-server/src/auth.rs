@@ -117,14 +117,14 @@ impl Auth {
     }
 
     /// Model access: [] = project grants via project_models, ["*"] = all.
+    /// Entries may be virtual-model ids (UUIDs, as stored by the admin UI) or
+    /// api_names — both are accepted.
     pub async fn model_allowed(&self, ctx: &ApiKeyCtx, vm_api_name: &str) -> Result<bool> {
         if ctx.allowed_models.iter().any(|m| m == "*") {
             return Ok(true);
         }
-        if !ctx.allowed_models.is_empty() {
-            return Ok(ctx.allowed_models.iter().any(|m| m == vm_api_name));
-        }
-        // project grant check
+        // Resolve once: needed for id-entries in allowed_models and for the
+        // project-grant fallback.
         let vm_id: Option<String> = sqlx::query_scalar(
             "SELECT id::text FROM virtual_models WHERE api_name = $1 AND enabled = true",
         )
@@ -132,6 +132,13 @@ impl Auth {
         .fetch_optional(&self.db)
         .await?;
         let Some(vm_id) = vm_id else { return Ok(false) };
+        if !ctx.allowed_models.is_empty() {
+            return Ok(ctx
+                .allowed_models
+                .iter()
+                .any(|m| m == vm_api_name || m == &vm_id));
+        }
+        // project grant check
         let n: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM project_models WHERE project_id = $1::uuid AND virtual_model_id = $2::uuid",
         )

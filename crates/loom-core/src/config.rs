@@ -16,7 +16,7 @@ pub struct ClientConfig {
     #[serde(default = "default_client_name")]
     pub name: String,
 
-    /// Server base URL for the gRPC channel, e.g. https://ccl.example.org:50051
+    /// Server base URL for the gRPC channel, e.g. https://loom.example.org:50051
     #[serde(default)]
     pub server_url: String,
 
@@ -88,6 +88,17 @@ pub struct LocalApiConfig {
     /// Optional bearer token required on local API (empty = open on loopback).
     #[serde(default)]
     pub api_key: String,
+    /// Optional local UI user (first-run setup wizard). Argon2 hash, not
+    /// plaintext — when set, the UI signs in with username+password and gets
+    /// a session cookie instead of needing the raw api_key.
+    #[serde(default)]
+    pub user_name: String,
+    #[serde(default)]
+    pub user_hash: String,
+    /// Set once the first-run auth wizard was completed or skipped — keeps it
+    /// from showing on every start while the API stays open.
+    #[serde(default)]
+    pub setup_done: bool,
     /// Serve the embedded minimal UI at /ui.
     #[serde(default = "default_true")]
     pub serve_ui: bool,
@@ -105,6 +116,9 @@ impl Default for LocalApiConfig {
         Self {
             bind: default_local_bind(),
             api_key: String::new(),
+            user_name: String::new(),
+            user_hash: String::new(),
+            setup_done: false,
             serve_ui: true,
         }
     }
@@ -335,7 +349,7 @@ fn default_grpc_bind() -> String {
     "0.0.0.0:50051".into()
 }
 fn default_database_url() -> String {
-    "postgres://ccl:ccl@localhost:5432/ccl".into()
+    "postgres://loom:loom@localhost:5432/loom".into()
 }
 fn default_redis_url() -> String {
     "redis://localhost:6379/0".into()

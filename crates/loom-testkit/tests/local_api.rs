@@ -66,6 +66,7 @@ async fn spawn_client_api(cfg: ClientConfig) -> String {
         started: Instant::now(),
         requests: Arc::new(std::sync::RwLock::new(Default::default())),
         history: Arc::new(std::sync::RwLock::new(Default::default())),
+        sessions: Default::default(),
     };
     let app = local_api::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -233,4 +234,142 @@ async fn local_api_requires_bearer_when_configured() {
 fn redis_url_helper() {
     // sanity: harness reads env; not fatal when unset
     let _ = test_redis_url();
+}
+
+#[tokio::test]
+async fn local_api_setup_wizard_and_session_auth() {
+    let cfg = ClientConfig {
+        name: "auth-test".into(),
+        ..Default::default()
+    };
+    let base = spawn_client_api(cfg).await;
+    let client = reqwest::Client::new();
+
+    // fresh install → setup mode; API itself is still open until configured
+    let v: serde_json::Value = client
+        .get(format!("{base}/local/api/auth/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["mode"], "setup");
+
+    // setup rejects weak input
+    let r = client
+        .post(format!("{base}/local/api/auth/setup"))
+        .json(&serde_json::json!({"username":"u","password":"short"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 400);
+
+    // create the first user → session cookie
+    let r = client
+        .post(format!("{base}/local/api/auth/setup"))
+        .json(&serde_json::json!({"username":"admin","password":"correct-horse"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let cookie = r
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(cookie.starts_with("loom_local_session="));
+
+    // second setup is blocked
+    let r = client
+        .post(format!("{base}/local/api/auth/setup"))
+        .json(&serde_json::json!({"username":"other","password":"correct-horse"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 409);
+
+    // protected endpoint: no auth → 401, session cookie → 200
+    let r = client
+        .get(format!("{base}/local/api/status"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    let r = client
+        .get(format!("{base}/local/api/status"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+
+    // bad credentials → 401; good → new session
+    let r = client
+        .post(format!("{base}/local/api/auth/login"))
+        .json(&serde_json::json!({"username":"admin","password":"nope-nope-nope"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    let r = client
+        .post(format!("{base}/local/api/auth/login"))
+        .json(&serde_json::json!({"username":"admin","password":"correct-horse"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+
+    // logout invalidates the original session
+    let r = client
+        .post(format!("{base}/local/api/auth/logout"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let r = client
+        .get(format!("{base}/local/api/status"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+}
+
+#[tokio::test]
+async fn local_api_skip_keeps_open_mode() {
+    let cfg = ClientConfig::default();
+    let base = spawn_client_api(cfg).await;
+    let client = reqwest::Client::new();
+
+    let r = client
+        .post(format!("{base}/local/api/auth/skip"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+
+    let v: serde_json::Value = client
+        .get(format!("{base}/local/api/auth/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["mode"], "open");
+
+    // still open without any credentials
+    let r = client
+        .get(format!("{base}/local/api/status"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
 }

@@ -9,7 +9,7 @@ import KeysPage from "./pages/Keys";
 import ModelsPage from "./pages/Models";
 import MonitoringPage from "./pages/Monitoring";
 import OverviewPage from "./pages/Overview";
-import ProjectsPage from "./pages/Projects";
+import ApiUsersPage from "./pages/ApiUsers";
 import SchedulerPage from "./pages/Scheduler";
 import SettingsPage from "./pages/Settings";
 import UsersPage from "./pages/Users";
@@ -30,7 +30,7 @@ function ServerRoutes() {
           <Route path="models" element={<ModelsPage />} />
           <Route path="deployments" element={<DeploymentsPage />} />
           <Route path="scheduler" element={<SchedulerPage />} />
-          <Route path="projects" element={<ProjectsPage />} />
+          <Route path="api-users" element={<ApiUsersPage />} />
           <Route path="keys" element={<KeysPage />} />
           <Route path="users" element={<UsersPage />} />
           <Route path="monitoring" element={<MonitoringPage />} />

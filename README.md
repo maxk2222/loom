@@ -246,14 +246,18 @@ went where it went.
 - Enrollment tokens are **one-time, short-lived** — exchanged for a rotatable
   device credential on first contact
 - API keys SHA-256 hashed, scoped per endpoint family, with
-  RPM/concurrency ceilings and project-level model grants
+  RPM/TPM/concurrency ceilings and per-user model grants — managed under
+  **API Users** in the dashboard (one key per user, auto-generated, shown
+  once; grants, scopes and limits editable at any time)
 - Dashboard users get Argon2 + HttpOnly session cookies + roles
   (`admin` / `operator` / `viewer`), failed-login lockout with exponential
   backoff, and `Secure` cookies when served over HTTPS
   (`LOOM_SECURE_COOKIES=1` or `X-Forwarded-Proto: https`)
-- The workstation admin API (`:8391`) is loopback-only; set
-  `local_api.api_key` in `config.toml` (written `0600`) to require a Bearer
-  key — the local UI prompts for it once
+- The workstation admin API (`:8391`) is loopback-only. On first start the
+  local UI offers a **setup wizard** to create a local admin user
+  (Argon2 + HttpOnly session cookie) — or to keep the API open for local use.
+  Alternatively set `local_api.api_key` in `config.toml` (written `0600`) to
+  require a Bearer key; both auth paths are optional
 - **Prompts and responses are never persisted** — not in Postgres, Redis,
   logs, or metrics
 - gRPC fencing tokens make stale assignments harmless after reconnects

@@ -58,9 +58,13 @@ pub fn router(s: AdminState) -> Router {
             "/api/projects/{id}",
             put(update_project).delete(delete_project),
         )
-        .route("/api/projects/{id}/models", put(set_project_models))
+        .route(
+            "/api/projects/{id}/models",
+            get(get_project_models).put(set_project_models),
+        )
         // api keys
         .route("/api/keys", get(list_keys).post(create_key))
+        .route("/api/keys/{id}", put(update_key))
         .route("/api/keys/{id}/revoke", post(revoke_key))
         // clients
         .route("/api/clients", get(list_clients))
@@ -436,6 +440,16 @@ async fn delete_project(State(s): State<AdminState>, Path(id): Path<String>) -> 
     Json(json!({"ok":true})).into_response()
 }
 
+async fn get_project_models(State(s): State<AdminState>, Path(id): Path<String>) -> Json<Value> {
+    let ids: Vec<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT virtual_model_id FROM project_models WHERE project_id=$1::uuid")
+            .bind(&id)
+            .fetch_all(&s.db)
+            .await
+            .unwrap_or_default();
+    Json(json!({"virtual_model_ids": ids.iter().map(|(i,)| i.to_string()).collect::<Vec<_>>()}))
+}
+
 async fn set_project_models(
     State(s): State<AdminState>,
     Path(id): Path<String>,
@@ -474,12 +488,23 @@ async fn set_project_models(
 // ---------------- api keys ----------------
 
 async fn list_keys(State(s): State<AdminState>) -> Json<Value> {
-    type KeyRow = (uuid::Uuid, uuid::Uuid, String, String, i32, i32, i32, bool);
+    type KeyRow = (
+        uuid::Uuid,
+        uuid::Uuid,
+        String,
+        String,
+        i32,
+        i32,
+        i32,
+        bool,
+        serde_json::Value,
+        serde_json::Value,
+    );
     let rows: Vec<KeyRow> = sqlx::query_as(
-        "SELECT id, project_id, name, prefix, rpm_limit, tpm_limit, max_concurrent, (revoked_at IS NULL) AS active FROM api_keys ORDER BY created_at DESC",
+        "SELECT id, project_id, name, prefix, rpm_limit, tpm_limit, max_concurrent, (revoked_at IS NULL) AS active, scopes, allowed_models FROM api_keys ORDER BY created_at DESC",
     ).fetch_all(&s.db).await.unwrap_or_default();
     Json(
-        json!({"keys": rows.iter().map(|(id,p,n,pre,rpm,tpm,mc,act)| json!({"id":id,"project_id":p,"name":n,"prefix":pre,"rpm_limit":rpm,"tpm_limit":tpm,"max_concurrent":mc,"active":act})).collect::<Vec<_>>()}),
+        json!({"keys": rows.iter().map(|(id,p,n,pre,rpm,tpm,mc,act,sc,am)| json!({"id":id,"project_id":p,"name":n,"prefix":pre,"rpm_limit":rpm,"tpm_limit":tpm,"max_concurrent":mc,"active":act,"scopes":sc,"allowed_models":am})).collect::<Vec<_>>()}),
     )
 }
 
@@ -529,6 +554,58 @@ async fn revoke_key(State(s): State<AdminState>, Path(id): Path<String>) -> Resp
         .await;
     audit(&s.db, "api_key", "revoke", &id).await;
     Json(json!({"ok":true})).into_response()
+}
+
+/// Update a key's label, scopes, rate/token/concurrency limits and per-key
+/// model allowlist (allowed_models [] = inherit project grants, ["*"] = all).
+async fn update_key(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Response {
+    // Partial update: only fields present in the body change; the rest keep
+    // their stored values (avoids clobbering limits/models on renames etc).
+    let cur: Option<Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object('name',name,'rpm_limit',rpm_limit,'tpm_limit',tpm_limit,
+                'max_concurrent',max_concurrent,'scopes',scopes,'allowed_models',allowed_models)
+         FROM api_keys WHERE id=$1::uuid AND revoked_at IS NULL",
+    )
+    .bind(&id)
+    .fetch_optional(&s.db)
+    .await
+    .unwrap_or(None);
+    let Some(cur) = cur else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"key not found"})),
+        )
+            .into_response();
+    };
+    let get = |k: &str| b.get(k).cloned().unwrap_or_else(|| cur[k].clone());
+    let r = sqlx::query(
+        "UPDATE api_keys SET name=$2, rpm_limit=$3, tpm_limit=$4, max_concurrent=$5,
+                scopes=$6, allowed_models=$7 WHERE id=$1::uuid AND revoked_at IS NULL",
+    )
+    .bind(&id)
+    .bind(get("name").as_str().unwrap_or_default().to_string())
+    .bind(get("rpm_limit").as_i64().unwrap_or(60) as i32)
+    .bind(get("tpm_limit").as_i64().unwrap_or(100000) as i32)
+    .bind(get("max_concurrent").as_i64().unwrap_or(4) as i32)
+    .bind(get("scopes"))
+    .bind(get("allowed_models"))
+    .execute(&s.db)
+    .await;
+    match r {
+        Ok(res) if res.rows_affected() > 0 => {
+            audit(&s.db, "api_key", "update", &id).await;
+            Json(json!({"ok":true})).into_response()
+        }
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"key not found"})),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------- clients ----------------

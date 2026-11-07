@@ -6,6 +6,7 @@ use crate::config::ConfigStore;
 use crate::connector::Connector;
 use crate::scheduler::{LocalScheduler, RequestClass};
 use crate::telemetry;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -39,6 +40,9 @@ pub struct AppState {
     pub requests: Arc<RwLock<HashMap<String, RequestInfo>>>,
     /// Finished-request ring buffer (charts).
     pub history: Arc<RwLock<VecDeque<FinReq>>>,
+    /// Local UI sessions: sha256(token) -> expiry (unix ms). In-memory only —
+    /// a restart simply means logging in again.
+    pub sessions: Arc<RwLock<HashMap<String, i64>>>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -150,6 +154,11 @@ pub fn router(state: AppState) -> Router {
         .route("/local/api/connection", get(admin_connection))
         .route("/local/api/metrics", get(admin_metrics))
         .route("/local/api/update-check", get(admin_update_check))
+        .route("/local/api/auth/status", get(auth_status))
+        .route("/local/api/auth/setup", post(local_setup))
+        .route("/local/api/auth/skip", post(local_skip))
+        .route("/local/api/auth/login", post(local_login))
+        .route("/local/api/auth/logout", post(local_logout))
         .route("/healthz", get(|| async { "ok" }));
 
     let api = if state.cfg_blocking().local_api.serve_ui {
@@ -176,38 +185,64 @@ impl AppState {
     }
 }
 
-/// Local API key check. A key is generated on first run (see
-/// `ConfigStore::ensure_local_api_key`); if somehow empty the API stays open
-/// on loopback — the key's purpose is stopping browser/other-process access.
-/// Static UI assets and liveness stay reachable so the key prompt can load.
+/// Local API auth: passes when nothing is configured (open loopback, the
+/// historical default), or with a valid Bearer api_key, or a session cookie
+/// issued by the first-run setup wizard / login endpoint. Static UI assets,
+/// liveness and the auth endpoints themselves stay reachable.
 async fn auth_middleware(
     State(state): State<AppState>,
     req: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path();
-    if req.method() == axum::http::Method::GET
-        && (path == "/healthz" || path == "/" || path.starts_with("/ui"))
+    if path.starts_with("/local/api/auth/")
+        || (req.method() == axum::http::Method::GET
+            && (path == "/healthz" || path == "/" || path.starts_with("/ui")))
     {
         return Ok(next.run(req).await);
     }
     let cfg = state.cfg.get().await;
-    let key = &cfg.local_api.api_key;
-    if key.is_empty() {
+    let protected = !cfg.local_api.api_key.is_empty() || !cfg.local_api.user_hash.is_empty();
+    if !protected {
         return Ok(next.run(req).await);
     }
-    let ok = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|v| v == key.as_str())
-        .unwrap_or(false);
-    if ok {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    // Bearer api_key path.
+    let key = &cfg.local_api.api_key;
+    if !key.is_empty() {
+        let ok = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|v| v == key.as_str())
+            .unwrap_or(false);
+        if ok {
+            return Ok(next.run(req).await);
+        }
     }
+    // Session-cookie path (setup wizard / login).
+    if let Some(tok) = req
+        .headers()
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|c| {
+            c.split(';')
+                .filter_map(|p| p.trim().strip_prefix("loom_local_session="))
+                .next()
+        })
+    {
+        let th = loom_core::ids::sha256_hex(tok);
+        let valid = state
+            .sessions
+            .read()
+            .unwrap()
+            .get(&th)
+            .is_some_and(|exp| *exp > now_ms());
+        if valid {
+            return Ok(next.run(req).await);
+        }
+    }
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 // ---------------------------------------------------------------------------
@@ -788,4 +823,154 @@ pub(crate) async fn fetch_latest_release() -> Option<(String, String)> {
 async fn admin_history(State(s): State<AppState>) -> Json<Value> {
     let h: Vec<FinReq> = s.history.read().unwrap().iter().cloned().collect();
     Json(json!({ "history": h }))
+}
+
+// ---------------- local UI auth (first-run wizard) ----------------
+
+const LOCAL_SESSION_COOKIE: &str = "loom_local_session";
+const SESSION_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
+
+fn issue_session(s: &AppState) -> String {
+    let token = loom_core::ids::opaque_token(32);
+    s.sessions.write().unwrap().insert(
+        loom_core::ids::sha256_hex(&token),
+        now_ms() + SESSION_TTL_MS,
+    );
+    token
+}
+
+fn session_cookie(token: &str) -> String {
+    format!("{LOCAL_SESSION_COOKIE}={token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=604800")
+}
+
+/// Auth surface for the local UI: "open" (nothing configured), "setup"
+/// (no user yet — show the first-run wizard), "login" (user exists).
+async fn auth_status(State(s): State<AppState>) -> Json<Value> {
+    let cfg = s.cfg.get().await;
+    let user_set = !cfg.local_api.user_hash.is_empty();
+    let key_set = !cfg.local_api.api_key.is_empty();
+    let mode = if user_set {
+        "login"
+    } else if !cfg.local_api.setup_done {
+        "setup"
+    } else if !key_set {
+        "open"
+    } else {
+        "login"
+    };
+    Json(json!({"mode": mode, "user": cfg.local_api.user_name}))
+}
+
+/// First-run wizard: create the local UI user. Only usable while no user
+/// exists — afterwards it is closed permanently.
+async fn local_setup(State(s): State<AppState>, Json(b): Json<Value>) -> Response {
+    let name = b["username"].as_str().unwrap_or("").trim().to_string();
+    let pw = b["password"].as_str().unwrap_or("").to_string();
+    if name.is_empty() || pw.len() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"username required, password ≥ 8 chars"})),
+        )
+            .into_response();
+    }
+    let already = !s.cfg.get().await.local_api.user_hash.is_empty();
+    if already {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"user already configured"})),
+        )
+            .into_response();
+    }
+    let hash = match argon2::Argon2::default().hash_password(
+        pw.as_bytes(),
+        &argon2::password_hash::SaltString::generate(&mut argon2::password_hash::rand_core::OsRng),
+    ) {
+        Ok(h) => h.to_string(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let name2 = name.clone();
+    if s.cfg
+        .update(|c| {
+            c.local_api.user_name = name;
+            c.local_api.user_hash = hash;
+            c.local_api.setup_done = true;
+        })
+        .await
+        .is_err()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    let token = issue_session(&s);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::SET_COOKIE, session_cookie(&token))
+        .body(Body::from(
+            serde_json::to_string(&json!({"ok":true,"user":name2})).unwrap(),
+        ))
+        .unwrap()
+}
+
+/// Sign in: `{username,password}` against the stored user, or `{api_key}`
+/// matching the configured bearer key — both mint the same session cookie.
+async fn local_login(State(s): State<AppState>, Json(b): Json<Value>) -> Response {
+    let cfg = s.cfg.get().await;
+    let ok = if let Some(k) = b["api_key"].as_str() {
+        !cfg.local_api.api_key.is_empty() && k == cfg.local_api.api_key
+    } else {
+        let name_ok = b["username"].as_str().unwrap_or("") == cfg.local_api.user_name;
+        let pw = b["password"].as_str().unwrap_or("");
+        name_ok
+            && !cfg.local_api.user_hash.is_empty()
+            && argon2::password_hash::PasswordHash::new(&cfg.local_api.user_hash)
+                .map(|h| {
+                    argon2::Argon2::default()
+                        .verify_password(pw.as_bytes(), &h)
+                        .is_ok()
+                })
+                .unwrap_or(false)
+    };
+    if !ok {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let token = issue_session(&s);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::SET_COOKIE, session_cookie(&token))
+        .body(Body::from(
+            serde_json::to_string(&json!({"ok":true})).unwrap(),
+        ))
+        .unwrap()
+}
+
+async fn local_logout(State(s): State<AppState>, req: axum::extract::Request) -> Response {
+    if let Some(tok) = req
+        .headers()
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|c| {
+            c.split(';')
+                .filter_map(|p| p.trim().strip_prefix("loom_local_session="))
+                .next()
+        })
+    {
+        s.sessions
+            .write()
+            .unwrap()
+            .remove(&loom_core::ids::sha256_hex(tok));
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            axum::http::header::SET_COOKIE,
+            "loom_local_session=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0",
+        )
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Dismiss the first-run wizard permanently without creating a user —
+/// the API stays open on loopback (or stays protected by api_key if set).
+async fn local_skip(State(s): State<AppState>) -> Response {
+    let _ = s.cfg.update(|c| c.local_api.setup_done = true).await;
+    Json(json!({"ok":true})).into_response()
 }

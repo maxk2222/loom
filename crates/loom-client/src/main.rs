@@ -103,6 +103,7 @@ async fn async_main() -> anyhow::Result<()> {
         started: Instant::now(),
         requests: Default::default(),
         history,
+        sessions: Default::default(),
     };
 
     // Metrics listener (optional).
