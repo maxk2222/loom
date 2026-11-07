@@ -1,0 +1,247 @@
+syntax = "proto3";
+
+package loom.agent.v1;
+
+// Agent service: the client initiates ALL connections to the server.
+// Connect: long-lived bidirectional control stream (small control messages only).
+// RequestData: one dedicated bidirectional stream per accepted inference request.
+// GetConfig: full configuration snapshot pull (reconnect / version-gap recovery).
+service Agent {
+  rpc Control(stream ClientEnvelope) returns (stream ServerEnvelope);
+  rpc RequestData(stream DataFrame) returns (stream DataFrame);
+  rpc GetConfig(ConfigRequest) returns (ConfigSnapshot);
+}
+
+// ---------------------------------------------------------------------------
+// Envelopes (control stream)
+// ---------------------------------------------------------------------------
+
+message ClientEnvelope {
+  oneof msg {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    CapacityReport capacity_report = 3;
+    InventoryReport inventory_report = 4;
+    ConfigAck config_ack = 5;
+    AssignAck assign_ack = 6;
+    RequestEnd request_end = 7;
+    ErrorReport error_report = 8;
+    Pong pong = 9;
+  }
+}
+
+message ServerEnvelope {
+  oneof msg {
+    HelloAck hello_ack = 1;
+    ConfigPush config_push = 2;
+    AssignRequest assign_request = 3;
+    CancelRequest cancel_request = 4;
+    Ping ping = 5;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Registration / session
+// ---------------------------------------------------------------------------
+
+message Hello {
+  uint32 protocol_version = 1;
+  uint32 protocol_version_min = 2;   // lowest version the client can speak
+  string client_id = 3;              // uuid assigned at enrollment (empty on first enroll)
+  string credential = 4;             // enroll token or device credential
+  string client_name = 5;            // human label
+  string client_version = 6;         // semver of loom-client binary
+  string session_resume_id = 7;      // previous session id, if any
+  uint64 last_config_version = 8;
+  InventoryReport inventory = 9;     // full inventory snapshot at connect time
+  string platform = 10;              // e.g. "linux-x86_64"
+}
+
+message HelloAck {
+  bool accepted = 1;
+  string reject_reason = 2;
+  string session_id = 3;
+  string client_id = 4;              // canonical id (assigned on first enroll)
+  string device_credential = 5;      // issued once on enrollment, then empty
+  uint64 config_version = 6;
+  uint32 heartbeat_interval_secs = 7;
+}
+
+message Heartbeat {
+  string session_id = 1;
+  int64 sent_at_unix_ms = 2;
+  uint32 inflight_local = 3;
+  uint32 inflight_tier2 = 4;
+  double load_1m = 5;
+}
+
+message Ping { int64 sent_at_unix_ms = 1; }
+message Pong { int64 ping_sent_at_unix_ms = 1; }
+
+// ---------------------------------------------------------------------------
+// Inventory / capacity
+// ---------------------------------------------------------------------------
+
+message DeploymentReport {
+  string deployment_id = 1;          // stable id (client-generated uuid, registered server-side)
+  string name = 2;
+  string backend_type = 3;           // "vllm" | "ollama" | "generic_openai"
+  string endpoint_url = 4;           // metadata only — server never connects
+  string model_name = 5;             // physical model served by backend
+  Capabilities capabilities = 6;
+  bool enabled = 7;
+  string health = 8;                 // "healthy" | "degraded" | "down" | "unknown"
+}
+
+message Capabilities {
+  bool chat = 1;
+  bool completions = 2;
+  bool embeddings = 3;
+  bool tools = 4;
+  bool vision = 5;
+  bool json_mode = 6;
+  bool streaming = 7;
+  uint32 context_length = 8;
+  repeated string modalities = 9;    // "text","image","audio",...
+}
+
+message DeploymentCapacity {
+  string deployment_id = 1;
+  uint32 tier2_total = 2;
+  uint32 tier2_free = 3;
+  uint32 inflight_local = 4;
+  uint32 inflight_tier2 = 5;
+  string sharing_mode = 6;           // "private" | "opportunistic" | "shared"
+  bool accepting = 7;                // admission gate currently open for tier2
+}
+
+message InventoryReport {
+  repeated DeploymentReport deployments = 1;
+  repeated DeploymentCapacity capacities = 2;
+  uint64 reported_at_unix_ms = 3;
+}
+
+message CapacityReport {
+  repeated DeploymentCapacity capacities = 1;
+  uint64 reported_at_unix_ms = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Config sync
+// ---------------------------------------------------------------------------
+
+message ConfigPush {
+  uint64 config_version = 1;
+  bytes desired_config_json = 2;     // client-relevant desired state
+  bool full_replace = 3;
+}
+
+message ConfigAck {
+  uint64 config_version = 1;
+  bool applied = 2;
+  string error = 3;
+}
+
+message ConfigRequest {
+  string client_id = 1;
+  string credential = 2;
+  uint64 last_config_version = 3;
+}
+
+message ConfigSnapshot {
+  uint64 config_version = 1;
+  bytes desired_config_json = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Request assignment lifecycle
+// ---------------------------------------------------------------------------
+
+message AssignRequest {
+  string request_id = 1;
+  string lease_id = 2;
+  uint64 fencing_token = 3;
+  int64 deadline_unix_ms = 4;
+  string api_type = 5;               // "chat" | "completions" | "embeddings"
+  RequiredCaps required_caps = 6;
+  uint32 payload_bytes = 7;          // expected size of request body on data stream
+  string virtual_model = 8;
+  string deployment_id = 9;          // the leased deployment the client must use
+}
+
+message RequiredCaps {
+  bool tools = 1;
+  bool vision = 2;
+  bool streaming = 3;
+  bool json_mode = 4;
+}
+
+message AssignAck {
+  string request_id = 1;
+  string lease_id = 2;
+  uint64 fencing_token = 3;
+  oneof result {
+    bool accepted = 4;               // true; data stream will be opened by client
+    Reject reject = 5;
+  }
+}
+
+message Reject {
+  string reason = 1;                 // "no_capacity" | "admission_closed" | "no_deployment" | ...
+  bool retryable = 2;
+}
+
+message CancelRequest {
+  string request_id = 1;
+  uint64 fencing_token = 2;
+  string reason = 3;
+}
+
+message RequestEnd {
+  string request_id = 1;
+  string lease_id = 2;
+  string status = 3;                 // "done" | "failed" | "cancelled"
+  string error_code = 4;
+  uint32 prompt_tokens = 5;
+  uint32 completion_tokens = 6;
+  int64 ttft_ms = 7;
+  int64 duration_ms = 8;
+}
+
+message ErrorReport {
+  string request_id = 1;             // may be empty for non-request errors
+  string code = 2;
+  string message = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Data stream frames
+// ---------------------------------------------------------------------------
+
+message DataFrame {
+  oneof frame {
+    FrameHead head = 1;              // MUST be first frame (both directions use same stream)
+    bytes request_json = 2;          // server -> client: OpenAI request body chunk
+    bytes response_chunk = 3;        // client -> server: upstream response bytes (SSE chunk)
+    End end = 4;
+    FrameError error = 5;
+  }
+}
+
+message FrameHead {
+  string request_id = 1;
+  string lease_id = 2;
+  uint64 fencing_token = 3;
+  string role = 4;                   // "client" (opener). server replies only frames.
+}
+
+message End {
+  bool cancelled = 1;
+  string finish_reason = 2;          // mirror of upstream finish reason if known
+}
+
+message FrameError {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+}

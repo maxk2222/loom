@@ -1,0 +1,85 @@
+# LOOM — deployment stack.
+# Dev: docker compose up -d postgres redis
+# Prod: docker compose --profile full up -d
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ccl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ccl}
+      POSTGRES_DB: ${POSTGRES_DB:-ccl}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory ${REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy noeviction
+      --appendonly no
+      --save ''
+    volumes:
+      - redisdata:/data
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  server:
+    profiles: ["full"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      LOOM_DATABASE_URL: postgres://${POSTGRES_USER:-ccl}:${POSTGRES_PASSWORD:-ccl}@postgres:5432/${POSTGRES_DB:-ccl}
+      LOOM_REDIS_URL: redis://default:${REDIS_PASSWORD:-}@redis:6379/0
+      LOOM_REDIS_PREFIX: ${LOOM_REDIS_PREFIX:-loom:prod:}
+      LOOM_HTTP_BIND: 0.0.0.0:8080
+      LOOM_GRPC_BIND: 0.0.0.0:50051
+      LOOM_DATA_DIR: /data
+      RUST_LOG: ${RUST_LOG:-info,loom_server=debug}
+    volumes:
+      - serverdata:/data
+    ports:
+      - "127.0.0.1:50051:50051"
+
+  caddy:
+    profiles: ["full"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+
+volumes:
+  pgdata:
+  redisdata:
+  serverdata:
+  caddydata:
+  caddyconfig:

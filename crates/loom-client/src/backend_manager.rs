@@ -1,0 +1,395 @@
+//! Backend manager: owns adapters, runs health checks + capability probing,
+//! resolves deployments to backends, exposes inventory for reports.
+
+use crate::adapters::{make_adapter, AdapterError, BackendAdapter, Health};
+use loom_core::capability::{ApiType, BackendType, Capabilities};
+use loom_core::config::{BackendConfig, ClientConfig, DeploymentConfig};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
+
+pub struct DeploymentInfo {
+    pub cfg: DeploymentConfig,
+    pub backend_id: String,
+    pub capabilities: Capabilities,
+    pub health: Health,
+}
+
+#[derive(Clone)]
+pub struct BackendManager {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    http: reqwest::Client,
+    backends: RwLock<HashMap<String, BackendEntry>>,
+    deployments: RwLock<HashMap<String, DeploymentEntry>>,
+    cancel: CancellationToken,
+}
+
+struct BackendEntry {
+    cfg: BackendConfig,
+    adapter: Box<dyn BackendAdapter>,
+    health: Arc<RwLock<Health>>,
+    models: Arc<RwLock<Vec<String>>>,
+}
+
+struct DeploymentEntry {
+    cfg: DeploymentConfig,
+    backend_id: String,
+    caps: Arc<RwLock<Capabilities>>,
+    health: Arc<RwLock<Health>>,
+}
+
+impl BackendManager {
+    pub fn new() -> Self {
+        let http = reqwest::Client::builder()
+            .pool_max_idle_per_host(8)
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .expect("reqwest client");
+        Self {
+            inner: Arc::new(Inner {
+                http,
+                backends: RwLock::new(HashMap::new()),
+                deployments: RwLock::new(HashMap::new()),
+                cancel: CancellationToken::new(),
+            }),
+        }
+    }
+
+    /// Rebuild backend/deployment registry from config. Preserves probed
+    /// capabilities for unchanged deployments.
+    pub async fn sync_from_config(&self, cfg: &ClientConfig) {
+        let mut backends = self.inner.backends.write().await;
+        let mut deployments = self.inner.deployments.write().await;
+
+        let mut next_backends: HashMap<String, BackendEntry> = HashMap::new();
+        let mut next_deployments: HashMap<String, DeploymentEntry> = HashMap::new();
+
+        for b in &cfg.backends {
+            let adapter = if let Some(existing) = backends.remove(&b.id) {
+                if existing.cfg == *b {
+                    existing.adapter
+                } else {
+                    make_adapter(b, self.inner.http.clone())
+                }
+            } else {
+                make_adapter(b, self.inner.http.clone())
+            };
+            let health = Arc::new(RwLock::new(Health::Unknown));
+            let models = Arc::new(RwLock::new(Vec::new()));
+            next_backends.insert(
+                b.id.clone(),
+                BackendEntry {
+                    cfg: b.clone(),
+                    adapter,
+                    health,
+                    models,
+                },
+            );
+
+            for d in &b.deployments {
+                let caps = deployments
+                    .remove(&d.id)
+                    .map(|e| e.caps)
+                    .unwrap_or_else(|| Arc::new(RwLock::new(Capabilities::default())));
+                next_deployments.insert(
+                    d.id.clone(),
+                    DeploymentEntry {
+                        cfg: d.clone(),
+                        backend_id: b.id.clone(),
+                        caps,
+                        health: Arc::new(RwLock::new(Health::Unknown)),
+                    },
+                );
+            }
+        }
+        *backends = next_backends;
+        *deployments = next_deployments;
+    }
+
+    /// Start periodic health checks + capability probing for all backends.
+    pub fn spawn_health_loop(&self) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                tokio::select! {
+                    _ = this.inner.cancel.cancelled() => break,
+                    _ = tick.tick() => {
+                        this.health_pass().await;
+                    }
+                }
+            }
+        });
+    }
+
+    async fn health_pass(&self) {
+        // Probe each backend; mark deployments accordingly.
+        let backend_ids: Vec<String> = self.inner.backends.read().await.keys().cloned().collect();
+        for bid in backend_ids {
+            let adapter_health = {
+                let backends = self.inner.backends.read().await;
+                let Some(be) = backends.get(&bid) else { continue };
+                if !be.cfg.enabled {
+                    continue;
+                }
+                let h = be.adapter.health().await;
+                *be.health.write().await = h;
+                let models = be.adapter.list_models().await.unwrap_or_default();
+                *be.models.write().await = models;
+                h
+            };
+
+            let dep_ids: Vec<String> = {
+                let deps = self.inner.deployments.read().await;
+                deps.iter()
+                    .filter(|(_, d)| d.backend_id == bid)
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            };
+            for did in dep_ids {
+                let deps = self.inner.deployments.read().await;
+                let Some(de) = deps.get(&did) else { continue };
+                *de.health.write().await = adapter_health;
+                // Probe capabilities once (or when empty) unless overridden.
+                let needs_probe = !de.cfg.capability_overrides
+                    && de.caps.read().await.context_length == 0
+                    && adapter_health != Health::Down;
+                if needs_probe {
+                    let backends = self.inner.backends.read().await;
+                    if let Some(be) = backends.get(&bid) {
+                        match be.adapter.probe_capabilities(&de.cfg.model_name).await {
+                            Ok(mut probed) => {
+                                // Manual capability fields from config merge in.
+                                merge_overrides(&mut probed, &de.cfg.capabilities);
+                                *de.caps.write().await = probed;
+                            }
+                            Err(e) => {
+                                warn!(deployment = %did, error = %e, "capability probe failed");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Force re-probe all deployments of a backend.
+    pub async fn reprobe(&self) {
+        let dep_ids: Vec<String> = self.inner.deployments.read().await.keys().cloned().collect();
+        for did in dep_ids {
+            let (backend_id, model) = {
+                let deps = self.inner.deployments.read().await;
+                let Some(d) = deps.get(&did) else { continue };
+                (d.backend_id.clone(), d.cfg.model_name.clone())
+            };
+            let backends = self.inner.backends.read().await;
+            if let Some(be) = backends.get(&backend_id) {
+                if let Ok(mut probed) = be.adapter.probe_capabilities(&model).await {
+                    let deps = self.inner.deployments.read().await;
+                    if let Some(de) = deps.get(&did) {
+                        if de.cfg.capability_overrides {
+                            merge_overrides(&mut probed, &de.cfg.capabilities);
+                        }
+                        *de.caps.write().await = probed;
+                        info!(deployment = %did, "re-probed capabilities");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Deployment lookup.
+    pub async fn deployment(&self, id: &str) -> Option<DeploymentInfo> {
+        let (cfg, backend_id, caps, health) = {
+            let deps = self.inner.deployments.read().await;
+            let d = deps.get(id)?;
+            (
+                d.cfg.clone(),
+                d.backend_id.clone(),
+                d.caps.clone(),
+                d.health.clone(),
+            )
+        };
+        let capabilities = caps.read().await.clone();
+        let health = *health.read().await;
+        Some(DeploymentInfo {
+            cfg,
+            backend_id,
+            capabilities,
+            health,
+        })
+    }
+
+    /// Resolve `model` (deployment name, deployment id, or physical model name)
+    /// to a deployment id. Prefer enabled deployments.
+    pub async fn resolve_model(&self, model: &str) -> Option<String> {
+        let deps = self.inner.deployments.read().await;
+        // 1) exact deployment id
+        if deps.contains_key(model) {
+            return Some(model.to_string());
+        }
+        // 2) deployment name
+        for (id, d) in deps.iter() {
+            if d.cfg.name == model && d.cfg.enabled {
+                return Some(id.clone());
+            }
+        }
+        // 3) physical model name (first enabled match)
+        for (id, d) in deps.iter() {
+            if d.cfg.model_name == model && d.cfg.enabled {
+                return Some(id.clone());
+            }
+        }
+        None
+    }
+
+    /// Forward a request to the backend owning the deployment.
+    pub async fn forward(
+        &self,
+        dep_id: &str,
+        api: ApiType,
+        body: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<crate::adapters::BackendResponse, AdapterError> {
+        let (backend_id, model) = {
+            let deps = self.inner.deployments.read().await;
+            let Some(d) = deps.get(dep_id) else {
+                return Err(AdapterError::Protocol(format!("unknown deployment {dep_id}")));
+            };
+            (d.backend_id.clone(), d.cfg.model_name.clone())
+        };
+        let backends = self.inner.backends.read().await;
+        let Some(be) = backends.get(&backend_id) else {
+            return Err(AdapterError::Connect(format!("missing backend {backend_id}")));
+        };
+        if !be.cfg.enabled {
+            return Err(AdapterError::Connect("backend disabled".into()));
+        }
+        be.adapter.forward(api, &model, body, cancel).await
+    }
+
+    /// Full inventory for server reports.
+    pub async fn inventory(&self) -> Vec<loom_protocol::pb::DeploymentReport> {
+        let deps = self.inner.deployments.read().await;
+        let backends = self.inner.backends.read().await;
+        let mut out = Vec::new();
+        for (id, d) in deps.iter() {
+            let bt = backends
+                .get(&d.backend_id)
+                .map(|b| b.cfg.backend_type)
+                .unwrap_or(BackendType::GenericOpenAi);
+            let caps = d.caps.read().await.clone();
+            let health = *d.health.read().await;
+            out.push(loom_protocol::pb::DeploymentReport {
+                deployment_id: id.clone(),
+                name: d.cfg.name.clone(),
+                backend_type: bt.as_str().into(),
+                endpoint_url: backends
+                    .get(&d.backend_id)
+                    .map(|b| b.cfg.endpoint.clone())
+                    .unwrap_or_default(),
+                model_name: d.cfg.model_name.clone(),
+                capabilities: Some(caps_to_pb(&caps)),
+                enabled: d.cfg.enabled,
+                health: health.as_str().into(),
+            });
+        }
+        out
+    }
+
+    /// List exposed model names for the local OpenAI API (deployment names).
+    pub async fn local_models(&self) -> Vec<String> {
+        let deps = self.inner.deployments.read().await;
+        deps.values()
+            .filter(|d| d.cfg.enabled)
+            .map(|d| d.cfg.name.clone())
+            .collect()
+    }
+
+    /// Capability of a deployment for local API checks.
+    pub async fn capabilities(&self, dep_id: &str) -> Option<Capabilities> {
+        let caps = {
+            let deps = self.inner.deployments.read().await;
+            deps.get(dep_id)?.caps.clone()
+        };
+        let v = caps.read().await.clone();
+        Some(v)
+    }
+
+    /// Health of a deployment.
+    pub async fn health_of(&self, dep_id: &str) -> Option<Health> {
+        let health = {
+            let deps = self.inner.deployments.read().await;
+            deps.get(dep_id)?.health.clone()
+        };
+        let v = *health.read().await;
+        Some(v)
+    }
+
+    /// Backend type for a deployment (for reports/UI).
+    pub async fn backend_type_of(&self, dep_id: &str) -> Option<BackendType> {
+        let backend_id = {
+            let deps = self.inner.deployments.read().await;
+            deps.get(dep_id)?.backend_id.clone()
+        };
+        let backends = self.inner.backends.read().await;
+        backends.get(&backend_id).map(|b| b.cfg.backend_type)
+    }
+
+    pub fn shutdown(&self) {
+        self.inner.cancel.cancel();
+    }
+}
+
+fn merge_overrides(probed: &mut Capabilities, overrides: &Capabilities) {
+    // Overrides are only meaningful where they differ from defaults; simplest
+    // robust rule: OR-enable boolean caps, take context_length if set, union
+    // modalities.
+    probed.chat |= overrides.chat;
+    probed.completions |= overrides.completions;
+    probed.embeddings |= overrides.embeddings;
+    probed.tools |= overrides.tools;
+    probed.vision |= overrides.vision;
+    probed.json_mode |= overrides.json_mode;
+    probed.streaming |= overrides.streaming;
+    if overrides.context_length > 0 {
+        probed.context_length = overrides.context_length;
+    }
+    for m in &overrides.modalities {
+        probed.modalities.insert(m.clone());
+    }
+}
+
+pub fn caps_to_pb(c: &Capabilities) -> loom_protocol::pb::Capabilities {
+    loom_protocol::pb::Capabilities {
+        chat: c.chat,
+        completions: c.completions,
+        embeddings: c.embeddings,
+        tools: c.tools,
+        vision: c.vision,
+        json_mode: c.json_mode,
+        streaming: c.streaming,
+        context_length: c.context_length,
+        modalities: c.modalities.iter().cloned().collect(),
+    }
+}
+
+pub fn caps_from_pb(c: &loom_protocol::pb::Capabilities) -> Capabilities {
+    Capabilities {
+        chat: c.chat,
+        completions: c.completions,
+        embeddings: c.embeddings,
+        tools: c.tools,
+        vision: c.vision,
+        json_mode: c.json_mode,
+        streaming: c.streaming,
+        context_length: c.context_length,
+        modalities: c.modalities.iter().cloned().collect(),
+    }
+}

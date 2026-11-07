@@ -1,0 +1,277 @@
+//! OpenAI-compatible gateway: /v1/* endpoints, SSE bridging, error taxonomy.
+
+use crate::auth::{ApiKeyCtx, Auth};
+use crate::scheduler::{EndMeta, SchedErr, Scheduler, PendingRequest};
+use axum::{
+    body::Body,
+    extract::{Request, State},
+    http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use bytes::Bytes;
+use loom_core::capability::ApiType;
+use loom_core::error::{ApiError, ErrorCode};
+use loom_core::openai::{
+    request_model, request_stream, required_caps_from_request, ModelList, SSE_DONE,
+};
+use loom_core::ids::RequestId;
+use serde_json::{json, Value};
+use std::sync::Arc;
+use std::time::Instant;
+use tracing::{info, warn};
+
+#[derive(Clone)]
+pub struct GatewayState {
+    pub auth: Arc<Auth>,
+    pub scheduler: Scheduler,
+    pub models: crate::model_registry::ModelRegistry,
+    pub usage: crate::usage::UsageWriter,
+}
+
+pub fn router(state: GatewayState) -> Router {
+    Router::new()
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/completions", post(completions))
+        .route("/v1/embeddings", post(embeddings))
+        .route("/v1/models", get(models))
+        .layer(middleware::from_fn_with_state(state.clone(), apikey_mw))
+        .with_state(state)
+}
+
+/// Extract Bearer API key → ApiKeyCtx, enforced per-request.
+async fn apikey_mw(
+    State(s): State<GatewayState>,
+    mut req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let token = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
+    match s.auth.check_api_key(&token).await {
+        Ok(Some(ctx)) => {
+            req.extensions_mut().insert(ctx);
+            Ok(next.run(req).await)
+        }
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+fn ctx(req: &Request) -> ApiKeyCtx {
+    req.extensions().get::<ApiKeyCtx>().cloned().unwrap()
+}
+
+async fn chat_completions(State(s): State<GatewayState>, req: Request) -> Response {
+    infer(s, ApiType::Chat, req).await
+}
+async fn completions(State(s): State<GatewayState>, req: Request) -> Response {
+    infer(s, ApiType::Completions, req).await
+}
+async fn embeddings(State(s): State<GatewayState>, req: Request) -> Response {
+    infer(s, ApiType::Embeddings, req).await
+}
+
+async fn models(State(s): State<GatewayState>, req: Request) -> Response {
+    let c = ctx(&req);
+    let all = s.models.list().await;
+    let mut allowed = Vec::new();
+    for m in all {
+        if s.auth.model_allowed(&c, &m).await.unwrap_or(false) {
+            allowed.push(m);
+        }
+    }
+    Json(json!(ModelList::of(allowed, "loom"))).into_response()
+}
+
+async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
+    let c = ctx(&req);
+    let request_id = RequestId::new().to_string();
+
+    // Body (bounded)
+    let body_bytes = match axum::body::to_bytes(req.into_body(), 4 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            return err(ErrorCode::PayloadTooLarge, "request too large", &request_id)
+        }
+    };
+    let body: Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => return err(ErrorCode::InvalidRequest, e.to_string(), &request_id),
+    };
+    let model = match request_model(&body) {
+        Some(m) => m.to_string(),
+        None => return err(ErrorCode::InvalidRequest, "missing model", &request_id),
+    };
+
+    // Scope + model permission
+    if !c.scopes.iter().any(|s| s == api.as_str() || s == "*") {
+        return err(ErrorCode::PermissionDenied, "scope not permitted", &request_id);
+    }
+    match s.auth.model_allowed(&c, &model).await {
+        Ok(true) => {}
+        Ok(false) => return err(ErrorCode::ModelNotFound, "no such model", &request_id),
+        Err(_) => return err(ErrorCode::Internal, "acl check", &request_id),
+    }
+
+    // Rate limits
+    if let Err(e) = s.auth.rl_check(&c, &request_id).await {
+        let code = if e == "concurrency_exceeded" {
+            ErrorCode::ConcurrencyExceeded
+        } else {
+            ErrorCode::RateLimited
+        };
+        return err(code, e, &request_id);
+    }
+
+    let required = required_caps_from_request(&body);
+    let streaming = request_stream(&body);
+    let now = crate::client_registry::now_ms();
+    let pending = PendingRequest {
+        request_id: RequestId::parse(&request_id).unwrap_or_default(),
+        api,
+        model: model.clone(),
+        body: body_bytes.to_vec(),
+        required,
+        project_id: c.project_id.clone(),
+        prio: c.priority_class,
+        enqueue_ts: now,
+        deadline_ts: now + 600_000,
+    };
+
+    let started = Instant::now();
+    let outcome = match s.scheduler.submit(pending).await {
+        Ok(o) => o,
+        Err(e) => {
+            s.auth.rl_release(&c.api_key_id).await;
+            return sched_err(e, &request_id);
+        }
+    };
+
+    let RequestOutcomeParts { rx, end_rx, trace, dep, client, lease, cancel } = split(outcome);
+    let rid = request_id.clone();
+    let auth2 = s.auth.clone();
+    let key_id = c.api_key_id.clone();
+    let usage = s.usage.clone();
+    let started2 = started;
+    let is_sse = streaming;
+
+    let stream = async_stream::stream! {
+        let mut rx = rx;
+        let mut first = true;
+        let mut end_meta: Option<EndMeta> = None;
+        loop {
+            match rx.recv().await {
+                Some(Ok(b)) => {
+                    if first {
+                        first = false;
+                        crate::metrics::ttft(started2.elapsed().as_secs_f64());
+                    }
+                    yield Ok::<Bytes, std::io::Error>(b);
+                }
+                Some(Err(e)) => {
+                    let env = ApiError::new(ErrorCode::UpstreamError, e.to_string())
+                        .with_request_id(&rid)
+                        .envelope();
+                    let line = if is_sse {
+                        format!("data: {}\n\n", serde_json::to_string(&env).unwrap_or_default())
+                    } else {
+                        serde_json::to_string(&env).unwrap_or_default()
+                    };
+                    yield Ok(Bytes::from(line));
+                    break;
+                }
+                None => break,
+            }
+        }
+        if is_sse {
+            yield Ok(Bytes::from(SSE_DONE));
+        }
+        // finalize
+        if let Ok(m) = end_rx.await { end_meta = Some(m); }
+        let meta = end_meta.unwrap_or_default();
+        usage.record(crate::usage::UsageRecord {
+            request_id: rid.clone(),
+            api_key_id: key_id.clone(),
+            project_id: String::new(),
+            virtual_model_id: String::new(),
+            deployment_id: dep,
+            client_id: client,
+            status: meta.status.clone(),
+            queue_wait_ms: 0,
+            ttft_ms: meta.ttft_ms,
+            duration_ms: started2.elapsed().as_millis() as i64,
+            prompt_tokens: meta.prompt_tokens,
+            completion_tokens: meta.completion_tokens,
+            error_code: meta.error_code.clone(),
+            routing_trace: trace,
+        }).await;
+        auth2.rl_release(&key_id).await;
+        let _ = lease;
+        let _ = cancel;
+    };
+
+    let content_type = if is_sse { "text/event-stream" } else { "application/json" };
+    info!(req = %request_id, model = %model, streaming = is_sse, "request dispatched");
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", content_type)
+        .header("x-request-id", &request_id)
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| err(ErrorCode::Internal, "response build", &request_id))
+}
+
+struct RequestOutcomeParts {
+    rx: tokio::sync::mpsc::Receiver<Result<Bytes, SchedErr>>,
+    end_rx: tokio::sync::oneshot::Receiver<EndMeta>,
+    trace: serde_json::Value,
+    dep: String,
+    client: String,
+    lease: String,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+fn split(o: crate::scheduler::RequestOutcome) -> RequestOutcomeParts {
+    RequestOutcomeParts {
+        rx: o.response_rx,
+        end_rx: o.end_rx,
+        trace: o.routing_trace,
+        dep: o.deployment_id,
+        client: o.client_id,
+        lease: o.lease_id,
+        cancel: o.cancel,
+    }
+}
+
+fn sched_err(e: SchedErr, rid: &str) -> Response {
+    let (code, msg): (ErrorCode, String) = match e {
+        SchedErr::QueueFull => (ErrorCode::Overloaded, "queue full".into()),
+        SchedErr::NoCapacity => (ErrorCode::Overloaded, "no capacity".into()),
+        SchedErr::NoCandidates => (ErrorCode::Unavailable, "no deployment available".into()),
+        SchedErr::ClientOffline => (ErrorCode::Unavailable, "client offline".into()),
+        SchedErr::Rejected(r) => (ErrorCode::Unavailable, r),
+        SchedErr::Timeout => (ErrorCode::RequestTimeout, "request timeout".into()),
+        SchedErr::Cancelled => (ErrorCode::Cancelled, "cancelled".into()),
+        SchedErr::Backend(m) => (ErrorCode::UpstreamError, m),
+    };
+    err(code, msg, rid)
+}
+
+fn err(code: ErrorCode, msg: impl Into<String>, rid: &str) -> Response {
+    let env = ApiError::new(code, msg).with_request_id(rid).envelope();
+    (
+        StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        Json(env),
+    )
+        .into_response()
+}
+
+// header passthrough marker (kept minimal)
+fn _unused(_h: &HeaderMap) {
+    warn!("unused")
+}

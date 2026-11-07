@@ -1,0 +1,140 @@
+//! loom-client daemon entrypoint.
+
+use loom_client::backend_manager::BackendManager;
+use loom_client::config::{default_config_path, ConfigStore};
+use loom_client::connector::Connector;
+use loom_client::local_api::{self, AppState};
+use loom_client::scheduler::LocalScheduler;
+use clap::Parser;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Instant;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
+
+#[derive(Parser, Debug)]
+#[command(name = "loom-client", version, about = "LOOM workstation agent")]
+struct Args {
+    /// Config file path (default: platform path or $LOOM_CONFIG).
+    #[arg(long, env = "LOOM_CONFIG")]
+    config: Option<String>,
+
+    /// Metrics listener (prometheus). e.g. 127.0.0.1:9391
+    #[arg(long, env = "LOOM_METRICS_BIND")]
+    metrics_bind: Option<String>,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    init_tracing();
+    let args = Args::parse();
+    let config_path = args
+        .config
+        .map(Into::into)
+        .unwrap_or_else(default_config_path);
+    info!(path = %config_path.display(), "starting loom-client");
+
+    let cfg_store = Arc::new(ConfigStore::load(&config_path)?);
+    let cfg = cfg_store.get().await;
+
+    let backends = BackendManager::new();
+    backends.sync_from_config(&cfg).await;
+    backends.spawn_health_loop();
+
+    let dep_cfgs: Vec<_> = cfg
+        .backends
+        .iter()
+        .flat_map(|b| b.deployments.clone())
+        .collect();
+    let scheduler = LocalScheduler::new(cfg.sharing_enabled);
+    scheduler.sync_deployments(&dep_cfgs);
+
+    let connector = Connector::new(cfg_store.clone(), backends.clone(), scheduler.clone());
+
+    let state = AppState {
+        cfg: cfg_store.clone(),
+        backends: backends.clone(),
+        scheduler: scheduler.clone(),
+        connector: connector.clone(),
+        started: Instant::now(),
+        requests: Default::default(),
+    };
+
+    // Metrics listener (optional).
+    if let Some(bind) = args
+        .metrics_bind
+        .or_else(|| std::env::var("LOOM_METRICS_BIND").ok())
+    {
+        if let Ok(addr) = bind.parse::<SocketAddr>() {
+            match loom_client::telemetry::spawn_metrics_listener(addr).await {
+                Ok(_) => info!(%addr, "prometheus metrics listener started"),
+                Err(e) => error!(error = %e, "metrics listener failed"),
+            }
+        }
+    }
+
+    // Connector task.
+    let conn_task = {
+        let c = connector.clone();
+        tokio::spawn(async move { c.run().await })
+    };
+
+    // Local API listener.
+    let bind_addr: SocketAddr = cfg
+        .local_api
+        .bind
+        .parse()
+        .unwrap_or_else(|_| "127.0.0.1:8391".parse().unwrap());
+    let app = local_api::router(state);
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    info!(%bind_addr, "local API + UI listening");
+
+    let shutdown = connector.clone();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        shutdown.shutdown();
+    })
+    .await?;
+
+    conn_task.abort();
+    backends.shutdown();
+    info!("loom-client stopped");
+    Ok(())
+}
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,loom_client=debug"));
+    let json = std::env::var("LOOM_LOG_JSON").map(|v| v == "1" || v == "true").unwrap_or(false);
+    if json {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
+}
+
+async fn shutdown_signal() {
+    use tokio::signal;
+    let ctrl_c = async {
+        signal::ctrl_c().await.ok();
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut s) = signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            s.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}

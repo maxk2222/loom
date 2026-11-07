@@ -1,0 +1,647 @@
+//! Global tier-2 scheduler: metadata queue in Redis, atomic leases via Lua,
+//! dispatch over client sessions, no-bypass fairness, watchdogs.
+
+use crate::client_registry::ClientRegistry;
+use crate::model_registry::ModelRegistry;
+use crate::redisx::Rt;
+use crate::router::{Router, Strategy};
+use crate::session::SessionManager;
+use loom_core::capability::ApiType;
+use loom_core::config::SchedulerConfig;
+use loom_core::ids::{LeaseId, RequestId};
+use loom_core::RequiredCaps;
+use loom_protocol::{frames, server_msgs};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use thiserror::Error;
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, Error)]
+pub enum SchedErr {
+    #[error("queue full")] QueueFull,
+    #[error("no capacity")] NoCapacity,
+    #[error("no candidates")] NoCandidates,
+    #[error("client offline")] ClientOffline,
+    #[error("rejected: {0}")] Rejected(String),
+    #[error("timeout")] Timeout,
+    #[error("cancelled")] Cancelled,
+    #[error("backend: {0}")] Backend(String),
+}
+
+#[derive(Debug)]
+pub struct PendingRequest {
+    pub request_id: RequestId,
+    pub api: ApiType,
+    pub model: String,
+    pub body: Vec<u8>,
+    pub required: RequiredCaps,
+    pub project_id: String,
+    pub prio: u32,
+    pub enqueue_ts: i64,
+    pub deadline_ts: i64,
+}
+
+pub struct RequestOutcome {
+    pub response_rx: mpsc::Receiver<Result<bytes::Bytes, SchedErr>>,
+    pub end_rx: oneshot::Receiver<EndMeta>,
+    pub routing_trace: Value,
+    pub deployment_id: String,
+    pub client_id: String,
+    pub lease_id: String,
+    pub cancel: CancellationToken,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EndMeta {
+    pub status: String,
+    pub error_code: String,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub ttft_ms: i64,
+    pub duration_ms: i64,
+}
+
+struct PendingEntry {
+    req: PendingRequest,
+    done_tx: oneshot::Sender<Result<RequestOutcome, SchedErr>>,
+}
+
+#[derive(Clone)]
+pub struct Scheduler {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    rt: Rt,
+    cfg: SchedulerConfig,
+    sessions: Arc<SessionManager>,
+    registry: ClientRegistry,
+    models: ModelRegistry,
+    router: Mutex<Router>,
+    wake: Notify,
+    pending: Mutex<HashMap<String, PendingEntry>>,
+    /// request_id -> ack result channel (AssignAck from control stream).
+    acks: Mutex<HashMap<String, oneshot::Sender<(bool, String)>>>,
+    /// request_id -> RequestEnd channel.
+    ends: Mutex<HashMap<String, oneshot::Sender<EndMeta>>>,
+    /// request_id -> owning client + fencing (for cancel routing).
+    active: Mutex<HashMap<String, (String, u64)>>,
+}
+
+impl Scheduler {
+    pub fn new(
+        rt: Rt,
+        cfg: SchedulerConfig,
+        sessions: Arc<SessionManager>,
+        registry: ClientRegistry,
+        models: ModelRegistry,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                rt,
+                cfg,
+                sessions,
+                registry,
+                models,
+                router: Mutex::new(Router::new()),
+                wake: Notify::new(),
+                pending: Mutex::new(HashMap::new()),
+                acks: Mutex::new(HashMap::new()),
+                ends: Mutex::new(HashMap::new()),
+                active: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    pub fn wake(&self) {
+        self.inner.wake.notify_one();
+    }
+
+    /// Access the shared Redis runtime handle (dashboard views).
+    pub fn rt(&self) -> Rt {
+        self.inner.rt.clone()
+    }
+
+    // ---- control-stream event sinks (called by grpc_service) ----
+
+    pub async fn handle_assign_ack(&self, request_id: &str, accepted: bool, reason: &str) {
+        if let Some(tx) = self.inner.acks.lock().await.remove(request_id) {
+            let _ = tx.send((accepted, reason.to_string()));
+        }
+    }
+
+    pub async fn complete_end(&self, request_id: &str, meta: EndMeta) {
+        if let Some(tx) = self.inner.ends.lock().await.remove(request_id) {
+            let _ = tx.send(meta);
+        }
+        self.inner.active.lock().await.remove(request_id);
+        self.wake();
+    }
+
+    /// Deliver an incoming client RequestData stream to the waiting dispatcher.
+    pub async fn deliver_data(
+        &self,
+        request_id: &str,
+        stream: tonic::Streaming<loom_protocol::pb::DataFrame>,
+        outbound: mpsc::Sender<loom_protocol::pb::DataFrame>,
+    ) -> bool {
+        self.inner
+            .sessions
+            .deliver_data(request_id, stream, outbound)
+            .await
+    }
+
+    /// Admin/caller abort: cancel if active (send CancelRequest to client),
+    /// or drop from queue if still waiting.
+    pub async fn cancel(&self, request_id: &str) -> bool {
+        if let Some((client_id, fencing)) =
+            self.inner.active.lock().await.get(request_id).cloned()
+        {
+            let _ = self
+                .inner
+                .sessions
+                .send(&client_id, server_msgs::cancel(request_id, fencing, "aborted"))
+                .await;
+            let _ = self.finish_pending(request_id, Err(SchedErr::Cancelled)).await;
+            return true;
+        }
+        // queued?
+        let removed = self.queue_remove(request_id).await.unwrap_or(false);
+        if removed {
+            let _ = self.finish_pending(request_id, Err(SchedErr::Cancelled)).await;
+        }
+        removed
+    }
+
+    async fn finish_pending(
+        &self,
+        request_id: &str,
+        res: Result<RequestOutcome, SchedErr>,
+    ) -> Result<(), ()> {
+        if let Some(e) = self.inner.pending.lock().await.remove(request_id) {
+            let _ = e.done_tx.send(res);
+            return Ok(());
+        }
+        Err(())
+    }
+
+    async fn queue_remove(&self, request_id: &str) -> Result<bool, SchedErr> {
+        let mut c = self.inner.rt.conn.clone();
+        // prio unknown → try all class queues
+        for p in 0..self.inner.cfg.priority_classes.max(1) {
+            let res: String = redis::Script::new(crate::lua::QUEUE_REMOVE)
+                .key(self.inner.rt.k(&format!("queue:{p}")))
+                .key(self.inner.rt.k(&format!("req:{request_id}")))
+                .key(self.inner.rt.k("req:watchdog"))
+                .key(self.inner.rt.k("queue:count"))
+                .arg(request_id)
+                .invoke_async(&mut c)
+                .await
+                .map_err(|e| SchedErr::Backend(e.to_string()))?;
+            if res == "OK" {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    // ---- main submit path ----
+
+    pub async fn submit(&self, req: PendingRequest) -> Result<RequestOutcome, SchedErr> {
+        if self.class_queue_empty(req.prio).await {
+            match self.try_dispatch(&req).await {
+                Ok(o) => return Ok(o),
+                Err(SchedErr::NoCapacity) | Err(SchedErr::NoCandidates) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.enqueue_and_wait(req).await
+    }
+
+    async fn class_queue_empty(&self, prio: u32) -> bool {
+        let mut c = self.inner.rt.conn.clone();
+        let n: i64 = redis::cmd("ZCARD")
+            .arg(self.inner.rt.k(&format!("queue:{prio}")))
+            .query_async(&mut c)
+            .await
+            .unwrap_or(0);
+        n == 0
+    }
+
+    async fn enqueue_and_wait(&self, req: PendingRequest) -> Result<RequestOutcome, SchedErr> {
+        let rid = req.request_id.to_string();
+        let mut c = self.inner.rt.conn.clone();
+        let res: String = redis::Script::new(crate::lua::QUEUE_ENQUEUE)
+            .key(self.inner.rt.k(&format!("queue:{}", req.prio)))
+            .key(self.inner.rt.k(&format!("req:{rid}")))
+            .key(self.inner.rt.k("queue:count"))
+            .key(self.inner.rt.k("req:watchdog"))
+            .arg(&rid)
+            .arg(req.enqueue_ts)
+            .arg(self.inner.cfg.max_queue as i64)
+            .arg(&req.project_id)
+            .arg(&req.model)
+            .arg(req.prio)
+            .arg(req.deadline_ts)
+            .invoke_async(&mut c)
+            .await
+            .map_err(|e| SchedErr::Backend(e.to_string()))?;
+        if res != "OK" {
+            return Err(SchedErr::QueueFull);
+        }
+        let (done_tx, done_rx) = oneshot::channel();
+        self.inner
+            .pending
+            .lock()
+            .await
+            .insert(rid.clone(), PendingEntry { req, done_tx });
+        self.inner.wake.notify_one();
+        let wait = self.inner.cfg.queue_timeout_secs.max(5);
+        match tokio::time::timeout(Duration::from_secs(wait), done_rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err(SchedErr::Cancelled),
+            Err(_) => {
+                // queue timeout: pull out + mark cancelled
+                let _ = self.queue_remove(&rid).await;
+                let _ = self.finish_pending(&rid, Err(SchedErr::Timeout)).await;
+                Err(SchedErr::Timeout)
+            }
+        }
+    }
+
+    pub fn spawn_dispatch_loop(&self) {
+        let sched = self.clone();
+        tokio::spawn(async move {
+            loop {
+                sched.inner.wake.notified().await;
+                sched.dispatch_pending().await;
+            }
+        });
+    }
+
+    async fn dispatch_pending(&self) {
+        for _ in 0..128 {
+            let mut c = self.inner.rt.conn.clone();
+            let keys: Vec<String> = (0..self.inner.cfg.priority_classes.max(1))
+                .map(|p| self.inner.rt.k(&format!("queue:{p}")))
+                .collect();
+            let popped: Option<String> = redis::Script::new(crate::lua::QUEUE_POP)
+                .key(keys)
+                .invoke_async(&mut c)
+                .await
+                .unwrap_or(None);
+            let Some(rid) = popped else { return };
+            let _: () = redis::pipe()
+                .cmd("DECR").arg(self.inner.rt.k("queue:count")).ignore()
+                .cmd("ZREM").arg(self.inner.rt.k("req:watchdog")).arg(&rid).ignore()
+                .query_async(&mut c)
+                .await
+                .unwrap_or(());
+            let entry = self.inner.pending.lock().await.remove(&rid);
+            let Some(e) = entry else { continue };
+            match self.try_dispatch(&e.req).await {
+                Ok(outcome) => {
+                    let _ = e.done_tx.send(Ok(outcome));
+                }
+                Err(SchedErr::NoCapacity) | Err(SchedErr::NoCandidates) => {
+                    // requeue preserving FIFO position
+                    let PendingEntry { req, done_tx } = e;
+                    if let Err(err) = self.requeue(&req).await {
+                        let _ = done_tx.send(Err(err));
+                        continue;
+                    }
+                    self.inner.pending.lock().await.insert(
+                        rid.clone(),
+                        PendingEntry { req, done_tx },
+                    );
+                    return;
+                }
+                Err(err) => {
+                    let _ = e.done_tx.send(Err(err));
+                }
+            }
+        }
+    }
+
+    async fn requeue(&self, req: &PendingRequest) -> Result<(), SchedErr> {
+        let rid = req.request_id.to_string();
+        let mut c = self.inner.rt.conn.clone();
+        let attempts: u32 = redis::cmd("HINCRBY")
+            .arg(self.inner.rt.k(&format!("req:{rid}")))
+            .arg("attempts")
+            .arg(1)
+            .query_async(&mut c)
+            .await
+            .unwrap_or(0);
+        if attempts >= self.inner.cfg.max_attempts {
+            return Err(SchedErr::NoCapacity);
+        }
+        let _: String = redis::Script::new(crate::lua::QUEUE_ENQUEUE)
+            .key(self.inner.rt.k(&format!("queue:{}", req.prio)))
+            .key(self.inner.rt.k(&format!("req:{rid}")))
+            .key(self.inner.rt.k("queue:count"))
+            .key(self.inner.rt.k("req:watchdog"))
+            .arg(&rid)
+            .arg(req.enqueue_ts) // original ts → FIFO preserved
+            .arg(self.inner.cfg.max_queue as i64)
+            .arg(&req.project_id)
+            .arg(&req.model)
+            .arg(req.prio)
+            .arg(req.deadline_ts)
+            .invoke_async(&mut c)
+            .await
+            .unwrap_or_else(|_| "ERR".into());
+        Ok(())
+    }
+
+    async fn try_dispatch(&self, req: &PendingRequest) -> Result<RequestOutcome, SchedErr> {
+        let Some(vm) = self.inner.models.resolve(&req.model).await else {
+            return Err(SchedErr::NoCandidates);
+        };
+        let mut candidates = self
+            .inner
+            .models
+            .candidates(&vm, req.api, &req.required)
+            .await;
+        let mut vm_name = vm.api_name.clone();
+        if candidates.is_empty() {
+            if let Some(fb) = self.inner.models.fallback(&vm).await {
+                candidates = self.inner.models.candidates(&fb, req.api, &req.required).await;
+                vm_name = fb.api_name;
+            }
+        }
+        if candidates.is_empty() {
+            return Err(SchedErr::NoCandidates);
+        }
+        let strategy = Strategy::parse(
+            &self.inner.models.resolve(&vm_name).await.map(|v| v.routing_strategy).unwrap_or_default(),
+        );
+        let runtime = self.runtime_view(&candidates).await;
+        let decision = {
+            let mut r = self.inner.router.lock().await;
+            r.route(&vm_name, strategy, candidates, &runtime, &req.required)
+        };
+        let mut trace = decision.trace;
+        for member in decision.ranked {
+            match self.lease_and_assign(req, &member).await {
+                Ok(outcome) => {
+                    trace["deployment_id"] = json!(member.deployment_id);
+                    trace["client_id"] = json!(member.client_id);
+                    return Ok(RequestOutcome { routing_trace: trace, ..outcome });
+                }
+                Err(SchedErr::NoCapacity)
+                | Err(SchedErr::Rejected(_))
+                | Err(SchedErr::ClientOffline) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(SchedErr::NoCapacity)
+    }
+
+    async fn runtime_view(
+        &self,
+        candidates: &[crate::model_registry::Member],
+    ) -> HashMap<String, (u32, String)> {
+        let mut out = HashMap::new();
+        for m in candidates {
+            if let Ok(Some(rt)) = self.inner.registry.dep_runtime(&m.deployment_id).await {
+                out.insert(m.deployment_id.clone(), (rt.tier2_free, rt.state));
+            }
+        }
+        out
+    }
+
+    async fn lease_and_assign(
+        &self,
+        req: &PendingRequest,
+        member: &crate::model_registry::Member,
+    ) -> Result<RequestOutcome, SchedErr> {
+        let rid = req.request_id.to_string();
+        let lease_id = LeaseId::new().to_string();
+        let dep_id = member.deployment_id.clone();
+        let client_id = member.client_id.clone();
+        let mut c = self.inner.rt.conn.clone();
+
+        let res: redis::Value = redis::Script::new(crate::lua::LEASE_ACQUIRE)
+            .key(self.inner.rt.k(&format!("dep:{dep_id}")))
+            .key(self.inner.rt.k(&format!("dep:{dep_id}:leases")))
+            .key(self.inner.rt.k(&format!("lease:{lease_id}")))
+            .key(self.inner.rt.k("cap:fencing"))
+            .arg(&rid)
+            .arg(&client_id)
+            .arg(&dep_id)
+            .arg(self.inner.cfg.lease_ttl_secs as i64 * 1000)
+            .arg(crate::client_registry::now_ms())
+            .arg(0)
+            .invoke_async(&mut c)
+            .await
+            .map_err(|e| SchedErr::Backend(e.to_string()))?;
+        let fencing = match &res {
+            redis::Value::Array(v) => match v.first() {
+                Some(redis::Value::Int(i)) => *i as u64,
+                _ => 0,
+            },
+            redis::Value::SimpleString(s) if s == "NO_CAPACITY" => return Err(SchedErr::NoCapacity),
+            redis::Value::SimpleString(s) if s == "UNAVAILABLE" => return Err(SchedErr::ClientOffline),
+            _ => 0,
+        };
+        if fencing == 0 {
+            return Err(SchedErr::NoCapacity);
+        }
+
+        // Expectations BEFORE AssignRequest (race-free).
+        let data_rx = self.inner.sessions.expect_data(&rid).await;
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.inner.acks.lock().await.insert(rid.clone(), ack_tx);
+        let end_rx = {
+            let (tx, rx) = oneshot::channel();
+            self.inner.ends.lock().await.insert(rid.clone(), tx);
+            rx
+        };
+
+        let assign = server_msgs::assign(
+            &rid,
+            &lease_id,
+            fencing,
+            req.deadline_ts,
+            req.api.as_str(),
+            loom_protocol::pb::RequiredCaps {
+                tools: req.required.tools,
+                vision: req.required.vision,
+                streaming: req.required.streaming,
+                json_mode: req.required.json_mode,
+            },
+            req.body.len() as u32,
+            &req.model,
+            &dep_id,
+        );
+        if self.inner.sessions.send(&client_id, assign).await.is_err() {
+            self.cleanup_assign(&rid, &lease_id, fencing, &dep_id).await;
+            return Err(SchedErr::ClientOffline);
+        }
+
+        // Await AssignAck (bounded).
+        let ack = tokio::time::timeout(
+            Duration::from_millis(self.inner.cfg.assign_ack_timeout_ms),
+            ack_rx,
+        )
+        .await;
+        match ack {
+            Ok(Ok((true, _))) => {}
+            Ok(Ok((false, reason))) => {
+                self.cleanup_assign(&rid, &lease_id, fencing, &dep_id).await;
+                return Err(SchedErr::Rejected(reason));
+            }
+            _ => {
+                self.cleanup_assign(&rid, &lease_id, fencing, &dep_id).await;
+                return Err(SchedErr::ClientOffline);
+            }
+        }
+
+        // Confirm lease → then await client data stream.
+        let _: String = redis::Script::new(crate::lua::LEASE_CONFIRM)
+            .key(self.inner.rt.k(&format!("lease:{lease_id}")))
+            .key(self.inner.rt.k(&format!("dep:{dep_id}")))
+            .arg(fencing)
+            .invoke_async(&mut c)
+            .await
+            .unwrap_or_default();
+
+        // activate lease state
+        let _: String = redis::Script::new(crate::lua::LEASE_ACTIVATE)
+            .key(self.inner.rt.k(&format!("lease:{lease_id}")))
+            .arg(fencing)
+            .invoke_async(&mut c)
+            .await
+            .unwrap_or_default();
+
+        let (mut inbound, outbound) =
+            match tokio::time::timeout(Duration::from_secs(10), data_rx).await {
+                Ok(Ok(pair)) => pair,
+                _ => {
+                    self.cleanup_assign(&rid, &lease_id, fencing, &dep_id).await;
+                    return Err(SchedErr::ClientOffline);
+                }
+            };
+
+        self.inner
+            .active
+            .lock()
+            .await
+            .insert(rid.clone(), (client_id.clone(), fencing));
+
+        // Bridge task: send request payload via outbound frames, read
+        // response_chunk frames from inbound into resp channel.
+        let (resp_tx, resp_rx) = mpsc::channel::<Result<bytes::Bytes, SchedErr>>(32);
+        let cancel = CancellationToken::new();
+        {
+            let body = req.body.clone();
+            let cancel2 = cancel.clone();
+            let rt = self.inner.rt.clone();
+            let lease2 = lease_id.clone();
+            let dep2 = dep_id.clone();
+            let rid_for_release = rid.clone();
+            tokio::spawn(async move {
+                use futures_util::StreamExt;
+                // 1) deliver payload to client (chunked)
+                for chunk in body.chunks(256 * 1024) {
+                    if outbound
+                        .send(frames::request_json(chunk.to_vec()))
+                        .await
+                        .is_err()
+                    {
+                        let _ = resp_tx
+                            .send(Err(SchedErr::Backend("data stream closed".into())))
+                            .await;
+                        return;
+                    }
+                }
+                // 2) forward client response chunks until End/Error/cancel
+                loop {
+                    let next = tokio::select! {
+                        _ = cancel2.cancelled() => break,
+                        v = inbound.next() => v,
+                    };
+                    match next {
+                        Some(Ok(loom_protocol::pb::DataFrame {
+                            frame: Some(loom_protocol::pb::data_frame::Frame::ResponseChunk(b)),
+                        })) => {
+                            if resp_tx.send(Ok(b.into())).await.is_err() {
+                                // caller gone: cancel upstream by closing outbound
+                                break;
+                            }
+                        }
+                        Some(Ok(loom_protocol::pb::DataFrame {
+                            frame: Some(loom_protocol::pb::data_frame::Frame::Error(e)),
+                        })) => {
+                            let _ = resp_tx
+                                .send(Err(SchedErr::Backend(e.message)))
+                                .await;
+                            break;
+                        }
+                        Some(Ok(loom_protocol::pb::DataFrame {
+                            frame: Some(loom_protocol::pb::data_frame::Frame::End(_)),
+                        })) => break,
+                        Some(Ok(_)) => continue,
+                        Some(Err(e)) => {
+                            let _ = resp_tx
+                                .send(Err(SchedErr::Backend(e.to_string())))
+                                .await;
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                // Release the lease — slot freed exactly once, idempotent.
+                let mut c = rt.conn.clone();
+                let _: String = redis::Script::new(crate::lua::LEASE_RELEASE)
+                    .key(rt.k(&format!("lease:{lease2}")))
+                    .key(rt.k(&format!("dep:{dep2}")))
+                    .key(rt.k(&format!("dep:{dep2}:leases")))
+                    .arg(fencing)
+                    .arg(&rid_for_release)
+                    .invoke_async(&mut c)
+                    .await
+                    .unwrap_or_default();
+            });
+        }
+        Ok(RequestOutcome {
+            response_rx: resp_rx,
+            end_rx,
+            routing_trace: json!({}),
+            deployment_id: dep_id,
+            client_id,
+            lease_id,
+            cancel,
+        })
+    }
+
+    async fn cleanup_assign(&self, rid: &str, lease_id: &str, fencing: u64, dep_id: &str) {
+        self.inner.sessions.drop_expectation(rid).await;
+        self.inner.acks.lock().await.remove(rid);
+        self.inner.ends.lock().await.remove(rid);
+        let mut c = self.inner.rt.conn.clone();
+        let _: String = redis::Script::new(crate::lua::LEASE_RELEASE)
+            .key(self.inner.rt.k(&format!("lease:{lease_id}")))
+            .key(self.inner.rt.k(&format!("dep:{dep_id}")))
+            .key(self.inner.rt.k(&format!("dep:{dep_id}:leases")))
+            .arg(fencing)
+            .arg(rid)
+            .invoke_async(&mut c)
+            .await
+            .unwrap_or_default();
+    }
+
+    /// Register the outbound half of a RequestData stream (grpc_service side).
+    /// The bridge task uses it to send request_json frames to the client.
+    pub async fn attach_data_outbound(
+        &self,
+        _rid: &str,
+        _tx: mpsc::Sender<Result<loom_protocol::pb::DataFrame, tonic::Status>>,
+    ) {
+    }
+}
+

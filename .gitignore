@@ -1,0 +1,15 @@
+/target
+**/target
+Cargo.lock
+node_modules/
+dist/
+.env
+*.local
+.DS_Store
+data/
+*.pem
+*.key
+coverage/
+.profraw
+frontend/dist
+frontend/node_modules

@@ -1,0 +1,53 @@
+[package]
+name = "loom-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+loom-core.workspace = true
+loom-protocol.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-stream.workspace = true
+futures = "0.3"
+futures-util.workspace = true
+async-trait.workspace = true
+pin-project-lite.workspace = true
+async-stream.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+reqwest.workspace = true
+eventsource-stream.workspace = true
+tonic.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+semver.workspace = true
+bytes.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+base64.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+rust-embed.workspace = true
+rustls.workspace = true
+url.workspace = true
+clap.workspace = true
+minisign-verify.workspace = true
+http = "1"
+
+[dev-dependencies]
+loom-testkit.workspace = true
+
+[[bin]]
+name = "loom-client"
+path = "src/main.rs"
