@@ -100,9 +100,11 @@ async fn main() -> anyhow::Result<()> {
     let auth = Arc::new(auth::Auth {
         db: pool.clone(),
         rt: rt.clone(),
+        login_throttle: Default::default(),
     });
     let events = events::EventBus::new();
     let settings = settings::Settings {
+        database_url: cfg.database_url.clone(),
         db: pool.clone(),
         data_dir: cfg.data_dir.clone(),
     };

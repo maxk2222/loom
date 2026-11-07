@@ -1,14 +1,27 @@
 const VARIANT: string = (import.meta as any).env?.VITE_APP_VARIANT ?? (globalThis as any).__VARIANT__ ?? "server";
 export const APP_VARIANT: "server" | "client" = VARIANT === "client" ? "client" : "server";
 
+export const LOCAL_KEY_STORAGE = "loom_local_key";
+export const NEED_KEY_EVENT = "loom-need-key";
+
+export function localKey(): string {
+  return localStorage.getItem(LOCAL_KEY_STORAGE) ?? "";
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const auth: Record<string, string> =
+    APP_VARIANT === "client" && localKey()
+      ? { authorization: `Bearer ${localKey()}` }
+      : {};
   const res = await fetch(path, {
     credentials: "include",
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "content-type": "application/json", ...auth, ...(init?.headers ?? {}) },
     ...init,
   });
   if (res.status === 401) {
-    if (APP_VARIANT === "server" && !location.pathname.startsWith("/ui/login")) {
+    if (APP_VARIANT === "client") {
+      window.dispatchEvent(new Event(NEED_KEY_EVENT));
+    } else if (!location.pathname.startsWith("/ui/login")) {
       location.assign("/ui/login");
     }
     throw new Error("unauthorized");

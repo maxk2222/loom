@@ -9,7 +9,7 @@ use loom_client::scheduler::LocalScheduler;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -59,6 +59,10 @@ async fn async_main() -> anyhow::Result<()> {
     info!(path = %config_path.display(), "starting loom-client");
 
     let cfg_store = Arc::new(ConfigStore::load(&config_path)?);
+    // Generate a local admin API key on first run so :8391 is never unauthenticated.
+    if let Err(e) = cfg_store.ensure_local_api_key().await {
+        warn!("could not persist generated local api key: {e}");
+    }
     let cfg = cfg_store.get().await;
 
     let backends = BackendManager::new();

@@ -122,8 +122,22 @@ async fn session_mw(
     }
 }
 
-fn session_cookie(token: &str) -> String {
-    format!("loom_session={token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800")
+fn session_cookie(token: &str, secure: bool) -> String {
+    let sec = if secure { "; Secure" } else { "" };
+    format!("loom_session={token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800{sec}")
+}
+
+/// Whether the session cookie may carry the `Secure` flag: the request arrived
+/// over HTTPS (per proxy header) or the operator opted in via env — set
+/// LOOM_SECURE_COOKIES=1 when serving the admin API behind TLS.
+fn cookie_is_secure(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("https"))
+        || std::env::var("LOOM_SECURE_COOKIES")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
 }
 
 async fn login(
@@ -136,10 +150,11 @@ async fn login(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let secure = cookie_is_secure(&headers);
     match s.auth.login(&b.email, &b.password, &ip).await {
         Ok(Some((tok, u))) => Response::builder()
             .status(StatusCode::OK)
-            .header(header::SET_COOKIE, session_cookie(&tok))
+            .header(header::SET_COOKIE, session_cookie(&tok, secure))
             .body(Body::from(
                 serde_json::to_string(
                     &json!({"user": {"id": u.user_id, "role": u.role, "email": u.email}}),
@@ -165,7 +180,15 @@ async fn logout(State(s): State<AdminState>, req: Request) -> Response {
     {
         let _ = s.auth.logout(&t).await;
     }
-    StatusCode::OK.into_response()
+    // Also expire the cookie client-side so stale sessions cannot linger.
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            header::SET_COOKIE,
+            "loom_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0",
+        )
+        .body(Body::empty())
+        .unwrap()
 }
 
 async fn me(req: Request) -> Json<Value> {
@@ -917,22 +940,81 @@ async fn system_info(State(s): State<AdminState>) -> Json<Value> {
 }
 
 async fn trigger_backup(State(s): State<AdminState>) -> Response {
-    // Runs pg_dump against the configured DB via env var.
-    let out = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "pg_dump \"$LOOM_DATABASE_URL\" > {}/backup-$(date +%Y%m%d-%H%M%S).sql",
-            s.settings.data_dir
-        ))
-        .output()
+    // Runs pg_dump directly (no shell): the data_dir is never interpolated into
+    // a shell string and pg_dump gets the DB URL as a plain argv element.
+    let db_url = if s.settings.database_url.is_empty() {
+        std::env::var("LOOM_DATABASE_URL").unwrap_or_default()
+    } else {
+        s.settings.database_url.clone()
+    };
+    if db_url.is_empty() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"database url not configured"})),
+        )
+            .into_response();
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let name = format!("backup-{ts}.sql");
+    let dir = std::path::Path::new(&s.settings.data_dir);
+    let _ = tokio::fs::create_dir_all(dir).await;
+    let path = dir.join(&name);
+    // Plain std::fs::File (not tokio::fs::File::into_std): tokio keeps the fd
+    // O_NONBLOCK and a child writing to it fails with EAGAIN → empty dump.
+    let file = match std::fs::File::create(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("create backup file: {e}")})),
+            )
+                .into_response()
+        }
+    };
+    // pg_dump discovery: explicit override → well-known install dirs (keg-only
+    // libpq on macOS, postgresql client packages on Linux) → PATH fallback.
+    let bin = std::env::var("LOOM_PG_DUMP").ok().unwrap_or_else(|| {
+        [
+            "/opt/homebrew/opt/libpq/bin/pg_dump",
+            "/usr/local/opt/libpq/bin/pg_dump",
+            "/usr/lib/postgresql/17/bin/pg_dump",
+            "/usr/lib/postgresql/16/bin/pg_dump",
+        ]
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "pg_dump".to_string())
+    });
+    // .status(), not .output(): output() forcibly pipes stdout/stderr and
+    // would discard the dump instead of writing it to the file.
+    let out = tokio::process::Command::new(&bin)
+        .arg(&db_url)
+        .stdin(std::process::Stdio::null())
+        .stdout(file)
+        .stderr(std::process::Stdio::inherit())
+        .status()
         .await;
     match out {
-        Ok(o) if o.status.success() => Json(json!({"ok":true})).into_response(),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":"backup failed"})),
-        )
-            .into_response(),
+        Ok(o) if o.success() => Json(json!({"ok":true, "file": name})).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let _ = tokio::fs::remove_file(&path).await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error":"pg_dump not found — install postgresql client tools or set LOOM_PG_DUMP"})),
+            )
+                .into_response()
+        }
+        _ => {
+            let _ = tokio::fs::remove_file(&path).await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error":"backup failed"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -980,4 +1062,43 @@ async fn update_check() -> Json<Value> {
         "latest": latest.as_ref().and_then(|v| v["tag_name"].as_str().map(String::from)),
         "url": latest.as_ref().and_then(|v| v["html_url"].as_str().map(String::from)),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secure_cookie_only_over_https() {
+        let plain = axum::http::HeaderMap::new();
+        assert!(!cookie_is_secure(&plain));
+        let mut fwd = axum::http::HeaderMap::new();
+        fwd.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(cookie_is_secure(&fwd));
+        let mut http = axum::http::HeaderMap::new();
+        http.insert("x-forwarded-proto", "http".parse().unwrap());
+        assert!(!cookie_is_secure(&http));
+    }
+
+    #[test]
+    fn session_cookie_carries_flags() {
+        assert!(session_cookie("t", true).contains("; Secure"));
+        assert!(!session_cookie("t", false).contains("; Secure"));
+    }
+
+    #[tokio::test]
+    async fn child_stdout_redirects_to_file() {
+        let path = std::env::temp_dir().join("loom-redirect-test.txt");
+        let std_file = std::fs::File::create(&path).unwrap();
+        let out = tokio::process::Command::new("echo")
+            .arg("loom-backup-test")
+            .stdout(std_file)
+            .status()
+            .await
+            .unwrap();
+        assert!(out.success());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("loom-backup-test"), "got: {content:?}");
+        let _ = std::fs::remove_file(&path);
+    }
 }

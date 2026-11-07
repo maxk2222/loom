@@ -248,7 +248,11 @@ went where it went.
 - API keys SHA-256 hashed, scoped per endpoint family, with
   RPM/concurrency ceilings and project-level model grants
 - Dashboard users get Argon2 + HttpOnly session cookies + roles
-  (`admin` / `operator` / `viewer`)
+  (`admin` / `operator` / `viewer`), failed-login lockout with exponential
+  backoff, and `Secure` cookies when served over HTTPS
+  (`LOOM_SECURE_COOKIES=1` or `X-Forwarded-Proto: https`)
+- The workstation admin API (`:8391`) requires a Bearer key generated into
+  `config.toml` (`0600`) on first run — the local UI prompts for it once
 - **Prompts and responses are never persisted** — not in Postgres, Redis,
   logs, or metrics
 - gRPC fencing tokens make stale assignments harmless after reconnects

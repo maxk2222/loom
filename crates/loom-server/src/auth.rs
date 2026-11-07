@@ -7,11 +7,44 @@ use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use loom_core::ids::{opaque_token, sha256_hex};
 use serde::Deserialize;
 use sqlx::PgPool;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Failed-login throttle map: "ip|email" -> (failures, locked_until).
+type LoginThrottle = Arc<Mutex<HashMap<String, (u32, Option<Instant>)>>>;
+
+fn login_locked(m: &LoginThrottle, key: &str) -> bool {
+    let now = Instant::now();
+    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+    if g.len() > 10_000 {
+        g.retain(|_, (_, until)| until.is_some_and(|u| u > now));
+    }
+    matches!(g.get(key), Some((_, Some(until))) if *until > now)
+}
+
+fn record_login_failure(m: &LoginThrottle, key: &str) {
+    let now = Instant::now();
+    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+    if g.len() > 10_000 {
+        g.clear();
+    }
+    let fails = g.get(key).map(|(f, _)| *f).unwrap_or(0) + 1;
+    let lock = if fails >= 5 {
+        let secs = 30u64.saturating_mul(1u64 << (fails - 5).min(5)).min(900);
+        Some(now + Duration::from_secs(secs))
+    } else {
+        None
+    };
+    g.insert(key.to_string(), (fails, lock));
+}
 
 #[derive(Clone)]
 pub struct Auth {
     pub db: PgPool,
     pub rt: crate::redisx::Rt,
+    /// Shared across clones so the limit cannot be bypassed via a cloned handle.
+    pub login_throttle: LoginThrottle,
 }
 
 #[derive(Debug, Clone)]
@@ -171,13 +204,27 @@ impl Auth {
             .is_ok()
     }
 
+    fn login_locked(&self, key: &str) -> bool {
+        login_locked(&self.login_throttle, key)
+    }
+
+    fn record_login_failure(&self, key: &str) {
+        record_login_failure(&self.login_throttle, key)
+    }
+
     /// Login: check email/password → create session token.
+    /// Failed attempts are throttled per (ip, email): ≥5 failures trigger an
+    /// exponentially growing lockout (30s → 15min cap) to blunt brute force.
     pub async fn login(
         &self,
         email: &str,
         password: &str,
         ip: &str,
     ) -> Result<Option<(String, UserCtx)>> {
+        let throttle_key = format!("{ip}|{}", email.to_ascii_lowercase());
+        if self.login_locked(&throttle_key) {
+            return Ok(None);
+        }
         #[derive(sqlx::FromRow)]
         struct U {
             id: uuid::Uuid,
@@ -192,10 +239,18 @@ impl Auth {
         .bind(email)
         .fetch_optional(&self.db)
         .await?;
-        let Some(u) = u else { return Ok(None) };
+        let Some(u) = u else {
+            self.record_login_failure(&throttle_key);
+            return Ok(None);
+        };
         if u.disabled || !Self::verify_password(&u.password_hash, password) {
+            self.record_login_failure(&throttle_key);
             return Ok(None);
         }
+        self.login_throttle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&throttle_key);
         let token = opaque_token(32);
         let th = sha256_hex(&token);
         sqlx::query(
@@ -288,4 +343,42 @@ fn now_ms() -> i64 {
 pub struct LoginBody {
     pub email: String,
     pub password: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn throttle_locks_after_five_failures() {
+        let m: LoginThrottle = Default::default();
+        let key = "1.2.3.4|a@b.c";
+        for i in 1..=4 {
+            assert!(!login_locked(&m, key), "locked too early at {i}");
+            record_login_failure(&m, key);
+        }
+        assert!(!login_locked(&m, key));
+        record_login_failure(&m, key); // 5th failure → locked
+        assert!(login_locked(&m, key));
+        // Different key (other ip or email) unaffected.
+        assert!(!login_locked(&m, "5.6.7.8|a@b.c"));
+        assert!(!login_locked(&m, "1.2.3.4|x@y.z"));
+    }
+
+    #[test]
+    fn throttle_backoff_grows_and_caps() {
+        let m: LoginThrottle = Default::default();
+        let key = "k";
+        for _ in 0..5 {
+            record_login_failure(&m, key);
+        }
+        let until5 = m.lock().unwrap().get(key).unwrap().1.unwrap();
+        for _ in 0..20 {
+            record_login_failure(&m, key);
+        }
+        let until25 = m.lock().unwrap().get(key).unwrap().1.unwrap();
+        // 15min cap: even after many failures lock stays ≤ 15min out.
+        assert!(until25.duration_since(Instant::now()) <= Duration::from_secs(901));
+        assert!(until25 > until5);
+    }
 }

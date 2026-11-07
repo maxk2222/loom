@@ -9,6 +9,7 @@ use sqlx::PgPool;
 pub struct Settings {
     pub db: PgPool,
     pub data_dir: String,
+    pub database_url: String,
 }
 
 pub const KEY_BRANDING: &str = "branding";

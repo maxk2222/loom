@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
+import LocalKeyGate from "./components/LocalKeyGate";
 import { APP_VARIANT } from "./lib/api";
 import { Login, SetupGate } from "./pages/Auth";
 import ClientsPage from "./pages/Clients";
@@ -43,16 +44,18 @@ function ServerRoutes() {
 
 function ClientRoutes() {
   return (
-    <Routes>
-      <Route element={<Layout />}>
+    <LocalKeyGate>
+      <Routes>
+        <Route element={<Layout />}>
         <Route index element={<ClientStatusPage />} />
         <Route path="backends" element={<BackendsPage />} />
         <Route path="sharing" element={<SharingPage />} />
         <Route path="requests" element={<RequestsPage />} />
         <Route path="connection" element={<ConnectionPage />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </LocalKeyGate>
   );
 }
 

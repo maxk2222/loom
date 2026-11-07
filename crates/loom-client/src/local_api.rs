@@ -152,19 +152,26 @@ impl AppState {
     }
 }
 
-/// Optional local API key check (only when configured).
+/// Local API key check. A key is generated on first run (see
+/// `ConfigStore::ensure_local_api_key`); if somehow empty the API stays open
+/// on loopback — the key's purpose is stopping browser/other-process access.
+/// Static UI assets and liveness stay reachable so the key prompt can load.
 async fn auth_middleware(
     State(state): State<AppState>,
     req: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let path = req.uri().path();
+    if req.method() == axum::http::Method::GET
+        && (path == "/healthz" || path == "/" || path.starts_with("/ui"))
+    {
+        return Ok(next.run(req).await);
+    }
     let cfg = state.cfg.get().await;
     let key = &cfg.local_api.api_key;
     if key.is_empty() {
         return Ok(next.run(req).await);
     }
-    // admin UI asset GETs pass through unauthenticated? No — protect everything
-    // when a key is set; the UI itself prompts for the key.
     let ok = req
         .headers()
         .get("authorization")
