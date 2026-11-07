@@ -52,6 +52,20 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Boot-failure watchdog: count this start while an update is pending and
+    // auto-roll back to .prev after repeated crashes. Runs after Args::parse
+    // so --version/--help don't count as boots; before config load so an
+    // init crash still increments the counter.
+    loom_client::updater::boot_watchdog();
+    // A healthy boot is confirmed by server registration (connector) OR by
+    // plain uptime — the binary clearly works even when the server is down.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(
+            loom_client::updater::HEALTHY_SECS,
+        ))
+        .await;
+        loom_client::updater::confirm_boot();
+    });
     let config_path = args
         .config
         .map(Into::into)

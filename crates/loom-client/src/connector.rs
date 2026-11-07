@@ -292,6 +292,9 @@ impl Connector {
         *self.state.ctrl_tx.write().unwrap() = Some(ctrl_tx.clone());
         self.state.connected.store(true, Ordering::SeqCst);
         telemetry::server_connected(true);
+        // Successful registration proves this boot healthy → disarm the
+        // update watchdog (no-op when no update is pending).
+        crate::updater::confirm_boot();
 
         // Config sync: if server's version differs, pull full snapshot.
         let local_version = self.state.cfg_store.get().await.config_version;

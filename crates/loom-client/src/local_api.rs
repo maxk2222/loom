@@ -624,6 +624,7 @@ async fn admin_status(State(s): State<AppState>) -> Json<Value> {
         "sharing_enabled": cfg.sharing_enabled,
         "capacities": caps,
         "system": sys,
+        "update": crate::updater::watchdog_status(),
     }))
 }
 

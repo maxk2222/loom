@@ -360,9 +360,18 @@ x86-64 and ARM64 via `.github/workflows/release.yml`. Artifacts are
   the admin Clients page or `POST /local/api/update`. Roll-out is pushed
   live over the control stream (`ConfigPush` → `update_now`) and also lands
   via `GetConfig` on the next session.
-- **Apply**: download → sha256 + minisign verify → atomic binary swap
-  (`.prev` backup kept for manual rollback) → exit; systemd/launchd/docker
+- **Apply**: download → sha256 + minisign verify → staged `--version`
+  smoke test (rejects corrupt/wrong-arch artifacts pre-swap) → atomic
+  binary swap (`.prev` backup kept) → exit; systemd/launchd
   `Restart=always` brings the new version up.
+- **Boot watchdog**: after a swap the client boots under a
+  `.loom-update-pending` marker. A boot is confirmed by the first
+  successful server registration or by 120 s of uptime (covers offline
+  operation). If the marker survives more than 3 starts — the new binary
+  kept crashing — the watchdog restores `.prev` automatically and exits,
+  ending the crash loop. `last_rollback` details show up under
+  `update` in `/local/api/status`. Self-update is refused on Windows
+  and inside containers (pull a newer image there instead).
 - **Server**: `POST /api/server/update` runs the same verify+swap+exit on
   the server binary (not on Windows — replace the binary manually there).
 - Keys: the built-in release public key is embedded; pin your own via

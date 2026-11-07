@@ -6,7 +6,7 @@ use loom_core::config::UpdaterConfig;
 use serde::Deserialize;
 use sha2::Digest;
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Built-in LOOM release signing key (minisign public key, base64).
 /// Overridable per client via `updater.public_key` or `LOOM_UPDATE_PUBKEY`.
@@ -178,6 +178,169 @@ pub fn rollback_at(current: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+// ---------- boot-failure watchdog (auto-rollback) ----------
+//
+// After a binary swap the updater writes `.loom-update-pending` next to the
+// executable. Each process start while the marker exists counts one boot;
+// a boot is confirmed either by a successful server registration or by
+// `HEALTHY_SECS` of uptime (the binary works even when the server is down).
+// If the marker is still there after `MAX_FAILED_BOOTS` starts — the new
+// binary kept crashing — the watchdog restores `.prev` automatically and
+// exits so the supervisor restarts the old binary, ending the crash loop.
+
+/// Boots tolerated before the new binary is declared bricked.
+const MAX_FAILED_BOOTS: u32 = 3;
+/// Uptime that alone confirms a healthy boot (covers offline operation).
+pub const HEALTHY_SECS: u64 = 120;
+const PENDING_MARKER: &str = ".loom-update-pending";
+const ROLLBACK_RECORD: &str = ".loom-rollback.json";
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Default)]
+struct PendingBoot {
+    boots: u32,
+    version: String,
+    applied_at: i64,
+}
+
+fn binary_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Run at process start (before config load): bump the boot counter and, on
+/// exceeding the threshold, roll back and exit — split into a pure helper so
+/// tests can drive it without touching the real executable.
+pub fn boot_watchdog() {
+    let (Some(dir), Ok(current)) = (binary_dir(), std::env::current_exe()) else {
+        return;
+    };
+    match boot_check(&dir, &current) {
+        BootVerdict::RollBack => {
+            std::process::exit(0); // supervisor restarts the restored binary
+        }
+        BootVerdict::Pending { boots } => {
+            info!(boots, "update pending — boot counted");
+        }
+        BootVerdict::Clean => {}
+    }
+}
+
+enum BootVerdict {
+    Clean,
+    Pending { boots: u32 },
+    RollBack,
+}
+
+/// Read/increment the pending marker in `dir`; on threshold restore `.prev`
+/// over `current` right there (rename is synchronous and safe mid-boot).
+fn boot_check(dir: &std::path::Path, current: &std::path::Path) -> BootVerdict {
+    let marker = dir.join(PENDING_MARKER);
+    if !marker.exists() {
+        return BootVerdict::Clean;
+    }
+    let mut st: PendingBoot = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    st.boots += 1;
+    if st.boots <= MAX_FAILED_BOOTS {
+        if let Err(e) = std::fs::write(&marker, serde_json::to_string(&st).unwrap_or_default()) {
+            warn!(error = %e, "could not update boot marker");
+        }
+        return BootVerdict::Pending { boots: st.boots };
+    }
+    // Crash loop: restore .prev and record why.
+    let outcome = match rollback_at(current) {
+        Ok(()) => "restored .prev binary",
+        Err(e) => {
+            error!(error = %e, "auto-rollback failed — no .prev or rename error");
+            "rollback failed"
+        }
+    };
+    let record = serde_json::json!({
+        "rolled_back_at": now_unix(),
+        "failed_version": st.version,
+        "boots": st.boots,
+        "outcome": outcome,
+    });
+    let _ = std::fs::write(dir.join(ROLLBACK_RECORD), record.to_string());
+    let _ = std::fs::remove_file(&marker);
+    error!(boots = st.boots, version = %st.version,
+        "new binary failed to boot repeatedly — auto-rolled back to .prev");
+    BootVerdict::RollBack
+}
+
+/// Confirm the pending boot as healthy — removes the marker. Idempotent and
+/// best-effort; called after server registration and after HEALTHY_SECS of
+/// uptime.
+pub fn confirm_boot() {
+    let Some(dir) = binary_dir() else { return };
+    let marker = dir.join(PENDING_MARKER);
+    if marker.exists() {
+        let _ = std::fs::remove_file(&marker);
+        info!("update boot confirmed healthy — watchdog cleared");
+    }
+}
+
+/// Write the pending marker right after a successful swap.
+fn write_pending_boot(dir: &std::path::Path, version: &str) {
+    let st = PendingBoot {
+        boots: 0,
+        version: version.into(),
+        applied_at: now_unix(),
+    };
+    if let Err(e) = std::fs::write(
+        dir.join(PENDING_MARKER),
+        serde_json::to_string(&st).unwrap_or_default(),
+    ) {
+        warn!(error = %e, "could not write boot marker — watchdog disabled for this update");
+    }
+}
+
+/// Watchdog state for the local status API.
+pub fn watchdog_status() -> serde_json::Value {
+    let Some(dir) = binary_dir() else {
+        return serde_json::json!({"pending": null, "last_rollback": null});
+    };
+    let pending = std::fs::read_to_string(dir.join(PENDING_MARKER))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let last = std::fs::read_to_string(dir.join(ROLLBACK_RECORD))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    serde_json::json!({"pending": pending, "last_rollback": last})
+}
+
+/// Pre-swap smoke test: the staged binary must exec and exit 0 on
+/// `--version` within a few seconds. Catches corrupt artifacts, wrong-arch
+/// builds and missing runtime deps *before* touching the live binary —
+/// failures here leave the install untouched.
+async fn smoke_test(staged: &std::path::Path) -> Result<()> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(staged)
+            .arg("--version")
+            .output(),
+    )
+    .await
+    .context("staged binary --version timed out")?
+    .context("staged binary failed to execute")?;
+    if !out.status.success() {
+        bail!("staged binary --version exited {}", out.status);
+    }
+    let ver = String::from_utf8_lossy(&out.stdout);
+    debug!(out = %ver.trim(), "staged binary smoke test passed");
+    Ok(())
+}
+
 pub fn arch() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "linux-x86_64",
@@ -295,8 +458,17 @@ pub async fn run_once(
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| stage_dir.to_path_buf());
     let staged = download_and_stage(&mf, &public_key(cfg), &stage_dir).await?;
+    // Exec-validity check before the swap — a corrupt or wrong-arch artifact
+    // bails here with the live binary untouched.
+    if let Err(e) = smoke_test(&staged).await {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e.context("staged binary failed smoke test — aborting update"));
+    }
     info!(version = %mf.version, "update staged; swapping binary and restarting");
     apply_staged(&staged)?; // keeps a .prev backup for manual rollback
+                            // Arm the boot watchdog: next start(s) must prove healthy or the
+                            // watchdog restores .prev automatically after MAX_FAILED_BOOTS.
+    write_pending_boot(&stage_dir, &mf.version);
     std::process::exit(0);
 }
 
@@ -351,6 +523,84 @@ imqqDIPsV8ArLIM/Z0azYXQxuB1Hsrejc2NLm9d6DF1Uinc7ZBO9YC0AtUZV1kov9p1u7QEJmtgqHGEW
         assert!(!prev.exists());
         assert!(rollback_at(&current).is_err()); // nothing left to restore
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn watchdog_counts_boots_then_rolls_back() {
+        let dir = std::env::temp_dir().join(format!("loom-wd-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("loom-client");
+        std::fs::write(&current, b"new-binary").unwrap();
+        std::fs::write(current.with_extension("prev"), b"old-binary").unwrap();
+
+        // No marker → clean.
+        assert!(matches!(boot_check(&dir, &current), BootVerdict::Clean));
+
+        // Arm the watchdog as the swap path would.
+        write_pending_boot(&dir, "9.9.9");
+        for expected in 1..=MAX_FAILED_BOOTS {
+            match boot_check(&dir, &current) {
+                BootVerdict::Pending { boots } => assert_eq!(boots, expected),
+                _ => panic!("boot {expected} should be pending"),
+            }
+            // Still the new binary while pending.
+            assert_eq!(std::fs::read(&current).unwrap(), b"new-binary");
+        }
+        // One more start than allowed → rollback executes.
+        assert!(matches!(boot_check(&dir, &current), BootVerdict::RollBack));
+        assert_eq!(std::fs::read(&current).unwrap(), b"old-binary");
+        assert!(!dir.join(PENDING_MARKER).exists());
+        let rec: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(ROLLBACK_RECORD)).unwrap())
+                .unwrap();
+        assert_eq!(rec["failed_version"], "9.9.9");
+        assert_eq!(rec["outcome"], "restored .prev binary");
+        // After rollback the next start is clean.
+        assert!(matches!(boot_check(&dir, &current), BootVerdict::Clean));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn watchdog_healthy_boot_clears_pending() {
+        let dir = std::env::temp_dir().join(format!("loom-wd2-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("loom-client");
+        std::fs::write(&current, b"new-binary").unwrap();
+        write_pending_boot(&dir, "1.2.3");
+        assert!(matches!(
+            boot_check(&dir, &current),
+            BootVerdict::Pending { boots: 1 }
+        ));
+        // Healthy boot confirmed (registration or uptime) → marker gone.
+        let marker = dir.join(PENDING_MARKER);
+        std::fs::remove_file(&marker).unwrap();
+        assert!(matches!(boot_check(&dir, &current), BootVerdict::Clean));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn smoke_test_accepts_good_and_rejects_bad() {
+        let dir = std::env::temp_dir().join(format!("loom-smoke-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A real executable that exits 0 → pass; one exiting 1 → fail.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let good = dir.join("good");
+            std::fs::write(&good, "#!/bin/sh\necho v1\nexit 0\n").unwrap();
+            std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(smoke_test(&good).await.is_ok());
+            let bad = dir.join("bad");
+            std::fs::write(&bad, "#!/bin/sh\nexit 1\n").unwrap();
+            std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(smoke_test(&bad).await.is_err());
+        }
+        // Non-executable file → cannot exec → fail.
+        let junk = dir.join("junk");
+        std::fs::write(&junk, b"not a binary").unwrap();
+        assert!(smoke_test(&junk).await.is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
