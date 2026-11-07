@@ -29,6 +29,12 @@ pub enum SchedErr {
     NoCandidates,
     #[error("client offline")]
     ClientOffline,
+    /// Every candidate failed with an offline/unavailable state — structural,
+    /// unlike `NoCapacity` (members exist and are merely busy). Queued
+    /// requests in this state count against `max_attempts` so they cannot
+    /// head-of-line block their class queue forever.
+    #[error("all deployments unavailable")]
+    AllUnavailable,
     #[error("rejected: {0}")]
     Rejected(String),
     #[error("timeout")]
@@ -411,11 +417,19 @@ impl Scheduler {
                     let _ = e.done_tx.send(Ok(outcome));
                 }
                 Err(SchedErr::NoCapacity) => {
-                    // transient — all candidates busy/unavailable: requeue
-                    // preserving FIFO position (pending first, then enqueue).
-                    if self.requeue(e, &rid).await {
-                        return; // capacity exhausted → stop dispatching
+                    // members busy but reachable: requeue preserving FIFO and
+                    // stop — popping further entries would only churn.
+                    if self.requeue(e, &rid, false).await {
+                        return;
                     }
+                    continue;
+                }
+                Err(SchedErr::AllUnavailable) => {
+                    // no member reachable: counted requeue; the entry stays at
+                    // the head and burns its remaining attempts now, so a
+                    // structurally unservable request dies within this burst
+                    // instead of head-of-line blocking the class queue.
+                    let _ = self.requeue(e, &rid, true).await;
                     continue;
                 }
                 Err(err) => {
@@ -430,19 +444,26 @@ impl Scheduler {
 
     /// Requeue a popped entry back into its class queue. Returns true when the
     /// entry was requeued (stop dispatching — capacity exhausted); false when
-    /// the entry was finally failed (caller already notified).
-    async fn requeue(&self, e: PendingEntry, rid: &str) -> bool {
+    /// the entry was finally failed (caller already notified). `count` marks
+    /// the pop as a spent attempt — only structural shortages count, so a
+    /// request queued behind merely-busy members waits for its deadline
+    /// instead of dying after a few head visits.
+    async fn requeue(&self, e: PendingEntry, rid: &str, count: bool) -> bool {
         let PendingEntry { req, done_tx } = e;
         let mut c = self.inner.rt.conn.clone();
-        let attempts: u32 = redis::cmd("HINCRBY")
-            .arg(self.inner.rt.k(&format!("req:{rid}")))
-            .arg("attempts")
-            .arg(1)
-            .query_async(&mut c)
-            .await
-            .unwrap_or(0);
-        if attempts >= self.inner.cfg.max_attempts {
-            let _ = done_tx.send(Err(SchedErr::NoCapacity));
+        let attempts: u32 = if count {
+            redis::cmd("HINCRBY")
+                .arg(self.inner.rt.k(&format!("req:{rid}")))
+                .arg("attempts")
+                .arg(1)
+                .query_async(&mut c)
+                .await
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if count && attempts >= self.inner.cfg.max_attempts {
+            let _ = done_tx.send(Err(SchedErr::AllUnavailable));
             return false;
         }
         // pending entry back first, then enqueue (no drop race)
@@ -521,6 +542,10 @@ impl Scheduler {
             r.route(&vm_name, strategy, candidates, &runtime, &req.required)
         };
         let mut trace = decision.trace;
+        // `NoCapacity`/`Rejected` mean a member exists and could serve once it
+        // frees up — transient. `ClientOffline` means unavailable; only when
+        // every candidate is unreachable is the shortage structural.
+        let mut saw_transient = false;
         for member in decision.ranked {
             match self.lease_and_assign(req, &member).await {
                 Ok(outcome) => {
@@ -531,9 +556,12 @@ impl Scheduler {
                         ..outcome
                     });
                 }
-                Err(
-                    e @ (SchedErr::NoCapacity | SchedErr::Rejected(_) | SchedErr::ClientOffline),
-                ) => {
+                Err(e @ (SchedErr::NoCapacity | SchedErr::Rejected(_))) => {
+                    saw_transient = true;
+                    tracing::debug!(req = %req.request_id, dep = %member.deployment_id, err = %e, "candidate failed, trying next");
+                    continue;
+                }
+                Err(e @ SchedErr::ClientOffline) => {
                     tracing::debug!(req = %req.request_id, dep = %member.deployment_id, err = %e, "candidate failed, trying next");
                     continue;
                 }
@@ -543,7 +571,11 @@ impl Scheduler {
                 }
             }
         }
-        Err(SchedErr::NoCapacity)
+        Err(if saw_transient {
+            SchedErr::NoCapacity
+        } else {
+            SchedErr::AllUnavailable
+        })
     }
 
     async fn runtime_view(

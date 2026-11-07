@@ -21,8 +21,9 @@ redis.call('HSET', rkey,
   'vm_id', ARGV[5],
   'prio', ARGV[6],
   'enqueued_at', ARGV[2],
-  'deadline', ARGV[7],
-  'attempts', '0')
+  'deadline', ARGV[7])
+-- attempts must survive requeue (HSETNX) or max_attempts can never fire
+redis.call('HSETNX', rkey, 'attempts', '0')
 redis.call('EXPIRE', rkey, 7200)
 redis.call('ZADD', KEYS[4], tonumber(ARGV[7]), rqid)
 return 'OK'

@@ -887,6 +887,10 @@ async fn create_vm(State(s): State<AdminState>, Json(b): Json<Value>) -> Respons
         )
             .into_response();
     }
+    let mut tx = match s.db.begin().await {
+        Ok(t) => t,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
     let res = sqlx::query(
         "INSERT INTO virtual_models (api_name,description,api_type,routing_strategy,required_capabilities,allow_heterogeneous,fallback_virtual_model_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7::uuid) RETURNING id::text")
@@ -897,22 +901,52 @@ async fn create_vm(State(s): State<AdminState>, Json(b): Json<Value>) -> Respons
         .bind(b.get("required_capabilities").cloned().unwrap_or(json!({})))
         .bind(b["allow_heterogeneous"].as_bool().unwrap_or(false))
         .bind(b["fallback_virtual_model_id"].as_str())
-        .fetch_one(&s.db).await;
-    match res {
-        Ok(row) => {
-            use sqlx::Row;
-            let id: String = row.get(0);
-            let _ = s.models.reload().await;
-            bump_version(&s.db, "virtual_model", &id, &b).await;
-            audit(&s.db, "virtual_model", "create", &id).await;
-            Json(json!({"ok":true,"id":id})).into_response()
-        }
-        Err(_) => (
+        .fetch_one(&mut *tx).await;
+    let Ok(row) = res else {
+        return (
             StatusCode::CONFLICT,
             Json(json!({"error":"api_name exists or bad fallback"})),
         )
-            .into_response(),
+            .into_response();
+    };
+    use sqlx::Row;
+    let id: String = row.get(0);
+    // Members are accepted on create — silently dropping them produced VMs
+    // that route nowhere (observed: 200 create, later 503 no-deployment).
+    // FK violations roll the whole create back instead of half-applying.
+    if let Some(members) = b.get("members").and_then(|v| v.as_array()) {
+        for m in members {
+            let dep = m["deployment_id"].as_str().unwrap_or("");
+            if dep.is_empty() {
+                continue;
+            }
+            let r = sqlx::query(
+                "INSERT INTO virtual_model_members (virtual_model_id,deployment_id,priority,weight,manual_pinned,enabled)
+                 VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6)")
+                .bind(&id)
+                .bind(dep)
+                .bind(m["priority"].as_i64().unwrap_or(100) as i32)
+                .bind(m["weight"].as_i64().unwrap_or(1) as i32)
+                .bind(m["manual_pinned"].as_bool().unwrap_or(false))
+                .bind(m["enabled"].as_bool().unwrap_or(true))
+                .execute(&mut *tx)
+                .await;
+            if r.is_err() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"invalid member deployment_id"})),
+                )
+                    .into_response();
+            }
+        }
     }
+    if tx.commit().await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    let _ = s.models.reload().await;
+    bump_version(&s.db, "virtual_model", &id, &b).await;
+    audit(&s.db, "virtual_model", "create", &id).await;
+    Json(json!({"ok":true,"id":id})).into_response()
 }
 
 async fn vm_detail(State(s): State<AdminState>, Path(id): Path<String>) -> Json<Value> {

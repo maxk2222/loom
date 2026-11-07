@@ -10,7 +10,9 @@ RUN npm ci --no-audit --no-fund
 COPY frontend/ .
 RUN npm run build:client
 
-FROM rust:1.89-slim AS rust-build
+# Build on bookworm: the slim tag now tracks trixie (glibc 2.41) while the
+# runtime stage below is bookworm (glibc 2.36) — and so are deployed hosts.
+FROM rust:1.89-slim-bookworm AS rust-build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./

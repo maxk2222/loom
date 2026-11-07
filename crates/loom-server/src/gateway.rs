@@ -188,7 +188,20 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         } else {
             ErrorCode::RateLimited
         };
-        return err(code, e, &request_id);
+        let mut resp = err(code, e, &request_id);
+        // Clients deserve a retry hint: concurrency slots free when an
+        // in-flight request ends (~seconds), RPM is a 60s sliding window —
+        // the average slot interval (60s/limit) is the honest estimate.
+        let secs = if e == "concurrency_exceeded" {
+            1
+        } else {
+            (60 / c.rpm_limit.max(1)).max(1)
+        };
+        if let Ok(v) = secs.to_string().parse() {
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, v);
+        }
+        return resp;
     }
 
     // Auto-router: when the requested model is a `kind='router'` VM, classify
@@ -488,6 +501,7 @@ fn sched_err(e: SchedErr, rid: &str) -> Response {
         SchedErr::NoCapacity => (ErrorCode::Overloaded, "no capacity".into()),
         SchedErr::NoCandidates => (ErrorCode::Unavailable, "no deployment available".into()),
         SchedErr::ClientOffline => (ErrorCode::Unavailable, "client offline".into()),
+        SchedErr::AllUnavailable => (ErrorCode::Unavailable, "all deployments unavailable".into()),
         SchedErr::Rejected(r) => (ErrorCode::Unavailable, r),
         SchedErr::Timeout => (ErrorCode::RequestTimeout, "request timeout".into()),
         SchedErr::Cancelled => (ErrorCode::Cancelled, "cancelled".into()),
