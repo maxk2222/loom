@@ -333,6 +333,8 @@ docs/              ADRs, protocol spec, security model, runbooks
 - [x] Full admin dashboard + embedded client UI
 - [x] Atomic leases, fencing, watchdogs, heartbeat detection
 - [x] Backend management from the client UI (add/edit/delete + live probe)
+- [x] Model auto-load/keep-warm for JIT backends (Ollama, LM Studio)
+- [x] Update-check chip in both UIs (compares against latest release)
 - [x] Native client install: systemd (Linux), `.app` bundle + launchd + menu-bar tray (macOS)
 - [x] Installer + self-update pipeline
 - [ ] mTLS for agent channel (TLS + device credential today)
