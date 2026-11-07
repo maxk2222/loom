@@ -94,8 +94,7 @@ impl ModelRegistry {
 
         let mut by_member: HashMap<String, Vec<Member>> = HashMap::new();
         for m in members {
-            let caps: Capabilities =
-                serde_json::from_value(m.capabilities).unwrap_or_default();
+            let caps: Capabilities = serde_json::from_value(m.capabilities).unwrap_or_default();
             by_member
                 .entry(m.virtual_model_id.to_string())
                 .or_default()

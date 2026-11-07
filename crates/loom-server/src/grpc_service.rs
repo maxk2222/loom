@@ -49,15 +49,22 @@ impl Agent for AgentSvc {
             if !loom_protocol::version::compatible(
                 hello.protocol_version_min,
                 hello.protocol_version,
-            ) || hello.protocol_version > limits::PROTOCOL_VERSION {
+            ) || hello.protocol_version > limits::PROTOCOL_VERSION
+            {
                 let _ = out_tx
                     .send(server_msgs::hello_ack(
-                        false, "protocol_version_unsupported", "", "", "", 0, 10,
+                        false,
+                        "protocol_version_unsupported",
+                        "",
+                        "",
+                        "",
+                        0,
+                        10,
                     ))
                     .await;
                 return;
             }
-            let auth = match this
+            let auth = this
                 .registry
                 .authenticate(
                     &hello.client_id,
@@ -67,10 +74,7 @@ impl Agent for AgentSvc {
                     &hello.platform,
                 )
                 .await
-            {
-                Ok(v) => v,
-                Err(_) => None,
-            };
+                .unwrap_or_default();
             let Some((client_id, issued_cred)) = auth else {
                 let _ = out_tx
                     .send(server_msgs::hello_ack(false, "rejected", "", "", "", 0, 10))
@@ -80,7 +84,13 @@ impl Agent for AgentSvc {
             let session_id = uuid::Uuid::new_v4().to_string();
             if out_tx
                 .send(server_msgs::hello_ack(
-                    true, "", &session_id, &client_id, &issued_cred, 0, 10,
+                    true,
+                    "",
+                    &session_id,
+                    &client_id,
+                    &issued_cred,
+                    0,
+                    10,
                 ))
                 .await
                 .is_err()
@@ -122,7 +132,9 @@ impl Agent for AgentSvc {
                             Some(assign_ack::Result::Reject(r)) => (false, r.reason),
                             None => (false, "no_result".into()),
                         };
-                        this.scheduler.handle_assign_ack(&a.request_id, ok, &reason).await;
+                        this.scheduler
+                            .handle_assign_ack(&a.request_id, ok, &reason)
+                            .await;
                     }
                     client_envelope::Msg::RequestEnd(e) => {
                         this.scheduler
@@ -143,7 +155,11 @@ impl Agent for AgentSvc {
                         tracing::warn!(code = %e.code, req = %e.request_id, "client error report");
                     }
                     client_envelope::Msg::ConfigAck(a) => {
-                        tracing::debug!(version = a.config_version, applied = a.applied, "config ack");
+                        tracing::debug!(
+                            version = a.config_version,
+                            applied = a.applied,
+                            "config ack"
+                        );
                     }
                     client_envelope::Msg::Pong(_) => {}
                     client_envelope::Msg::Hello(_) => {}
@@ -234,9 +250,7 @@ impl Agent for AgentSvc {
             drop(tx);
             return Ok(Response::new(Box::pin(ReceiverStream::new(rx).map(Ok))));
         }
-        let delivered = sched
-            .deliver_data(&head.request_id, inbound, out_tx)
-            .await;
+        let delivered = sched.deliver_data(&head.request_id, inbound, out_tx).await;
         if !delivered {
             let (tx, rx) = mpsc::channel::<DataFrame>(1);
             let _ = tx
@@ -274,19 +288,6 @@ impl Agent for AgentSvc {
                 desired_config_json: b"{}".to_vec(),
             })),
             _ => Err(Status::unauthenticated("bad credential")),
-        }
-    }
-}
-
-impl Default for EndMeta {
-    fn default() -> Self {
-        Self {
-            status: String::new(),
-            error_code: String::new(),
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            ttft_ms: 0,
-            duration_ms: 0,
         }
     }
 }

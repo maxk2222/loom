@@ -37,8 +37,11 @@ pub fn server_connected(v: bool) {
 }
 
 pub fn backend_health(dep: &str, healthy: bool) {
-    gauge!("loom_client_backend_healthy", "deployment" => dep.to_string())
-        .set(if healthy { 1.0 } else { 0.0 });
+    gauge!("loom_client_backend_healthy", "deployment" => dep.to_string()).set(if healthy {
+        1.0
+    } else {
+        0.0
+    });
 }
 
 /// Install a Prometheus exporter bound to the given address (separate from the

@@ -4,9 +4,9 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::Stream;
 use loom_core::capability::{ApiType, BackendType, Capabilities};
 use loom_core::config::BackendConfig;
-use futures_util::Stream;
 use serde_json::Value;
 use std::pin::Pin;
 use thiserror::Error;
@@ -100,6 +100,7 @@ pub(crate) mod common {
     use futures_util::StreamExt;
 
     /// Forward `body` to `{endpoint}{api.path()}` and return the raw response.
+    #[allow(clippy::too_many_arguments)]
     pub async fn forward_openai(
         http: &reqwest::Client,
         endpoint: &str,

@@ -11,13 +11,13 @@ use crate::backend_manager::BackendManager;
 use crate::config::ConfigStore;
 use crate::scheduler::{LocalScheduler, RequestClass};
 use crate::telemetry;
+use futures_util::StreamExt;
 use loom_core::capability::ApiType;
 use loom_core::config::{ClientConfig, DesiredClientConfig, TlsMode};
 use loom_protocol::limits;
 use loom_protocol::pb::agent_client::AgentClient;
 use loom_protocol::pb::*;
 use loom_protocol::{client_msgs, frames, server_msgs};
-use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -94,13 +94,7 @@ impl Connector {
 
     /// Abort a tier-2 request by request_id (admin/local cancel).
     pub fn abort_request(&self, request_id: &str) -> bool {
-        if let Some(r) = self
-            .state
-            .active_requests
-            .read()
-            .unwrap()
-            .get(request_id)
-        {
+        if let Some(r) = self.state.active_requests.read().unwrap().get(request_id) {
             r.cancel.cancel();
             true
         } else {
@@ -257,7 +251,11 @@ impl Connector {
         // Config sync: if server's version differs, pull full snapshot.
         let local_version = self.state.cfg_store.get().await.config_version;
         if ack.config_version != local_version {
-            debug!(local = local_version, remote = ack.config_version, "config version gap, pulling snapshot");
+            debug!(
+                local = local_version,
+                remote = ack.config_version,
+                "config version gap, pulling snapshot"
+            );
             let cred = self.state.cfg_store.get().await.device_credential;
             let cid = self.state.cfg_store.get().await.client_id;
             match agent
@@ -314,9 +312,7 @@ impl Connector {
         });
 
         // Control message loop.
-        let res = self
-            .control_loop(&mut inbound, &ctrl_tx, &agent)
-            .await;
+        let res = self.control_loop(&mut inbound, &ctrl_tx, &agent).await;
         hb_task.abort();
         res
     }
@@ -372,7 +368,8 @@ impl Connector {
                 }
                 server_envelope::Msg::CancelRequest(c) => {
                     debug!(request = %c.request_id, "cancel from server");
-                    self.state.abort_request_fenced(&c.request_id, c.fencing_token);
+                    self.state
+                        .abort_request_fenced(&c.request_id, c.fencing_token);
                 }
                 server_envelope::Msg::ConfigPush(p) => {
                     let applied = self
@@ -456,9 +453,10 @@ impl Connector {
         tokio::spawn(async move {
             let request_id = a.request_id.clone();
             // Admission check.
-            let admit = state
-                .scheduler
-                .try_admit(&a.deployment_id, RequestClass::Tier2, &request_id);
+            let admit =
+                state
+                    .scheduler
+                    .try_admit(&a.deployment_id, RequestClass::Tier2, &request_id);
 
             match admit {
                 Ok(token) => {
@@ -580,8 +578,7 @@ async fn run_request(
 
         // Assemble request payload from request_json frames.
         let mut payload = Vec::with_capacity(a.payload_bytes as usize);
-        let payload_deadline =
-            tokio::time::Instant::now() + Duration::from_secs(30);
+        let payload_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         while (payload.len() as u32) < a.payload_bytes {
             let next = tokio::select! {
                 _ = cancel.cancelled() => return Err("cancelled".to_string()),
@@ -674,13 +671,22 @@ async fn run_request(
         Ok(v) => v,
         Err(e) => {
             if e == "cancelled" {
-                ("cancelled".to_string(), Some(e), loom_core::openai::Usage::default(), 0)
+                (
+                    "cancelled".to_string(),
+                    Some(e),
+                    loom_core::openai::Usage::default(),
+                    0,
+                )
             } else {
-                ("failed".to_string(), Some(e), loom_core::openai::Usage::default(), 0)
+                (
+                    "failed".to_string(),
+                    Some(e),
+                    loom_core::openai::Usage::default(),
+                    0,
+                )
             }
         }
     };
-
 
     let _ = ctrl_tx
         .send(client_msgs::request_end(
@@ -709,10 +715,14 @@ fn inspect_sse_tail(
     usage: &mut loom_core::openai::Usage,
     finish_reason: &mut String,
 ) {
-    let Ok(text) = std::str::from_utf8(bytes) else { return };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return;
+    };
     for line in text.split("\n\n") {
         let line = line.trim();
-        let Some(data) = line.strip_prefix("data:") else { continue };
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
         let data = data.trim();
         if data == "[DONE]" {
             continue;

@@ -45,10 +45,7 @@ pub fn opaque_token(bytes: usize) -> String {
     use rand::RngCore;
     let mut buf = vec![0u8; bytes];
     rand::rngs::OsRng.fill_bytes(&mut buf);
-    base64::Engine::encode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        buf,
-    )
+    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, buf)
 }
 
 /// sha256 hex digest — used for API keys, device credentials, session tokens.

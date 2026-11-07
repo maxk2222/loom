@@ -21,14 +21,22 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Error)]
 pub enum SchedErr {
-    #[error("queue full")] QueueFull,
-    #[error("no capacity")] NoCapacity,
-    #[error("no candidates")] NoCandidates,
-    #[error("client offline")] ClientOffline,
-    #[error("rejected: {0}")] Rejected(String),
-    #[error("timeout")] Timeout,
-    #[error("cancelled")] Cancelled,
-    #[error("backend: {0}")] Backend(String),
+    #[error("queue full")]
+    QueueFull,
+    #[error("no capacity")]
+    NoCapacity,
+    #[error("no candidates")]
+    NoCandidates,
+    #[error("client offline")]
+    ClientOffline,
+    #[error("rejected: {0}")]
+    Rejected(String),
+    #[error("timeout")]
+    Timeout,
+    #[error("cancelled")]
+    Cancelled,
+    #[error("backend: {0}")]
+    Backend(String),
 }
 
 #[derive(Debug)]
@@ -54,7 +62,7 @@ pub struct RequestOutcome {
     pub cancel: CancellationToken,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EndMeta {
     pub status: String,
     pub error_code: String,
@@ -163,21 +171,27 @@ impl Scheduler {
     /// Admin/caller abort: cancel if active (send CancelRequest to client),
     /// or drop from queue if still waiting.
     pub async fn cancel(&self, request_id: &str) -> bool {
-        if let Some((client_id, fencing)) =
-            self.inner.active.lock().await.get(request_id).cloned()
+        if let Some((client_id, fencing)) = self.inner.active.lock().await.get(request_id).cloned()
         {
             let _ = self
                 .inner
                 .sessions
-                .send(&client_id, server_msgs::cancel(request_id, fencing, "aborted"))
+                .send(
+                    &client_id,
+                    server_msgs::cancel(request_id, fencing, "aborted"),
+                )
                 .await;
-            let _ = self.finish_pending(request_id, Err(SchedErr::Cancelled)).await;
+            let _ = self
+                .finish_pending(request_id, Err(SchedErr::Cancelled))
+                .await;
             return true;
         }
         // queued?
         let removed = self.queue_remove(request_id).await.unwrap_or(false);
         if removed {
-            let _ = self.finish_pending(request_id, Err(SchedErr::Cancelled)).await;
+            let _ = self
+                .finish_pending(request_id, Err(SchedErr::Cancelled))
+                .await;
         }
         removed
     }
@@ -252,7 +266,13 @@ impl Scheduler {
         let (prio, ets, proj, model, dl) = {
             let p = self.inner.pending.lock().await;
             let r = &p.get(&rid).unwrap().req;
-            (r.prio, r.enqueue_ts, r.project_id.clone(), r.model.clone(), r.deadline_ts)
+            (
+                r.prio,
+                r.enqueue_ts,
+                r.project_id.clone(),
+                r.model.clone(),
+                r.deadline_ts,
+            )
         };
         let res: String = redis::Script::new(crate::lua::QUEUE_ENQUEUE)
             .key(self.inner.rt.k(&format!("queue:{prio}")))
@@ -322,18 +342,15 @@ impl Scheduler {
         for rid in expired {
             let removed = self.queue_remove(&rid).await.unwrap_or(false);
             if removed {
-                let _ = self
-                    .finish_pending(&rid, Err(SchedErr::Timeout))
-                    .await;
+                let _ = self.finish_pending(&rid, Err(SchedErr::Timeout)).await;
             }
         }
         // b) expired reserved leases on all known deployments
-        let dep_ids: Vec<String> = sqlx::query_scalar(
-            "SELECT id::text FROM deployments WHERE enabled = true",
-        )
-        .fetch_all(&self.inner.registry.db)
-        .await
-        .unwrap_or_default();
+        let dep_ids: Vec<String> =
+            sqlx::query_scalar("SELECT id::text FROM deployments WHERE enabled = true")
+                .fetch_all(&self.inner.registry.db)
+                .await
+                .unwrap_or_default();
         for dep in dep_ids {
             let swept: Vec<String> = redis::Script::new(crate::lua::LEASE_SWEEP)
                 .key(self.inner.rt.k(&format!("dep:{dep}")))
@@ -362,8 +379,13 @@ impl Scheduler {
                 .unwrap_or(None);
             let Some(rid) = popped else { return };
             let _: () = redis::pipe()
-                .cmd("DECR").arg(self.inner.rt.k("queue:count")).ignore()
-                .cmd("ZREM").arg(self.inner.rt.k("req:watchdog")).arg(&rid).ignore()
+                .cmd("DECR")
+                .arg(self.inner.rt.k("queue:count"))
+                .ignore()
+                .cmd("ZREM")
+                .arg(self.inner.rt.k("req:watchdog"))
+                .arg(&rid)
+                .ignore()
                 .query_async(&mut c)
                 .await
                 .unwrap_or(());
@@ -406,8 +428,13 @@ impl Scheduler {
             return false;
         }
         // pending entry back first, then enqueue (no drop race)
-        let (prio, ets, proj, model, dl) =
-            (req.prio, req.enqueue_ts, req.project_id.clone(), req.model.clone(), req.deadline_ts);
+        let (prio, ets, proj, model, dl) = (
+            req.prio,
+            req.enqueue_ts,
+            req.project_id.clone(),
+            req.model.clone(),
+            req.deadline_ts,
+        );
         self.inner
             .pending
             .lock()
@@ -450,7 +477,11 @@ impl Scheduler {
         let mut vm_name = vm.api_name.clone();
         if candidates.is_empty() {
             if let Some(fb) = self.inner.models.fallback(&vm).await {
-                candidates = self.inner.models.candidates(&fb, req.api, &req.required).await;
+                candidates = self
+                    .inner
+                    .models
+                    .candidates(&fb, req.api, &req.required)
+                    .await;
                 vm_name = fb.api_name;
             }
         }
@@ -458,7 +489,13 @@ impl Scheduler {
             return Err(SchedErr::NoCandidates);
         }
         let strategy = Strategy::parse(
-            &self.inner.models.resolve(&vm_name).await.map(|v| v.routing_strategy).unwrap_or_default(),
+            &self
+                .inner
+                .models
+                .resolve(&vm_name)
+                .await
+                .map(|v| v.routing_strategy)
+                .unwrap_or_default(),
         );
         let runtime = self.runtime_view(&candidates).await;
         let decision = {
@@ -471,7 +508,10 @@ impl Scheduler {
                 Ok(outcome) => {
                     trace["deployment_id"] = json!(member.deployment_id);
                     trace["client_id"] = json!(member.client_id);
-                    return Ok(RequestOutcome { routing_trace: trace, ..outcome });
+                    return Ok(RequestOutcome {
+                        routing_trace: trace,
+                        ..outcome
+                    });
                 }
                 Err(SchedErr::NoCapacity)
                 | Err(SchedErr::Rejected(_))
@@ -525,8 +565,12 @@ impl Scheduler {
                 Some(redis::Value::Int(i)) => *i as u64,
                 _ => 0,
             },
-            redis::Value::SimpleString(s) if s == "NO_CAPACITY" => return Err(SchedErr::NoCapacity),
-            redis::Value::SimpleString(s) if s == "UNAVAILABLE" => return Err(SchedErr::ClientOffline),
+            redis::Value::SimpleString(s) if s == "NO_CAPACITY" => {
+                return Err(SchedErr::NoCapacity)
+            }
+            redis::Value::SimpleString(s) if s == "UNAVAILABLE" => {
+                return Err(SchedErr::ClientOffline)
+            }
             _ => 0,
         };
         if fencing == 0 {
@@ -658,9 +702,7 @@ impl Scheduler {
                         Some(Ok(loom_protocol::pb::DataFrame {
                             frame: Some(loom_protocol::pb::data_frame::Frame::Error(e)),
                         })) => {
-                            let _ = resp_tx
-                                .send(Err(SchedErr::Backend(e.message)))
-                                .await;
+                            let _ = resp_tx.send(Err(SchedErr::Backend(e.message))).await;
                             break;
                         }
                         Some(Ok(loom_protocol::pb::DataFrame {
@@ -668,9 +710,7 @@ impl Scheduler {
                         })) => break,
                         Some(Ok(_)) => continue,
                         Some(Err(e)) => {
-                            let _ = resp_tx
-                                .send(Err(SchedErr::Backend(e.to_string())))
-                                .await;
+                            let _ = resp_tx.send(Err(SchedErr::Backend(e.to_string()))).await;
                             break;
                         }
                         None => break,
@@ -725,4 +765,3 @@ impl Scheduler {
     ) {
     }
 }
-

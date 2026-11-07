@@ -1,11 +1,11 @@
 //! loom-client daemon entrypoint.
 
+use clap::Parser;
 use loom_client::backend_manager::BackendManager;
 use loom_client::config::{default_config_path, ConfigStore};
 use loom_client::connector::Connector;
 use loom_client::local_api::{self, AppState};
 use loom_client::scheduler::LocalScheduler;
-use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -109,7 +109,9 @@ async fn main() -> anyhow::Result<()> {
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,loom_client=debug"));
-    let json = std::env::var("LOOM_LOG_JSON").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let json = std::env::var("LOOM_LOG_JSON")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
     if json {
         tracing_subscriber::fmt()
             .with_env_filter(filter)

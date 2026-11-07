@@ -69,8 +69,7 @@ pub fn default_config_path() -> PathBuf {
     }
     if cfg!(target_os = "macos") {
         if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home)
-                .join("Library/Application Support/loom-client/config.toml");
+            return PathBuf::from(home).join("Library/Application Support/loom-client/config.toml");
         }
     }
     PathBuf::from("/etc/loom-client/config.toml")

@@ -5,10 +5,8 @@ use loom_client::config::ConfigStore;
 use loom_client::connector::Connector;
 use loom_client::local_api::{self, AppState};
 use loom_client::scheduler::LocalScheduler;
-use loom_core::config::{
-    BackendConfig, BackendType, ClientConfig, DeploymentConfig, SharingMode,
-};
-use loom_testkit::harness::{wait_until, test_redis_url};
+use loom_core::config::{BackendConfig, BackendType, ClientConfig, DeploymentConfig, SharingMode};
+use loom_testkit::harness::{test_redis_url, wait_until};
 use loom_testkit::mock_backend::{MockBackend, MockBehavior};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -45,13 +43,15 @@ async fn spawn_client_api(cfg: ClientConfig) -> String {
     let dir = tempfile::tempdir().unwrap();
     let mut c = cfg;
     c.connector.tls = loom_core::config::TlsMode::Off;
-    let store = Arc::new(
-        ConfigStore::load(dir.path().join("config.toml")).unwrap(),
-    );
+    let store = Arc::new(ConfigStore::load(dir.path().join("config.toml")).unwrap());
     store.update(|s| *s = c.clone()).await.unwrap();
     let backends = BackendManager::new();
     backends.sync_from_config(&c).await;
-    let dep_cfgs: Vec<_> = c.backends.iter().flat_map(|b| b.deployments.clone()).collect();
+    let dep_cfgs: Vec<_> = c
+        .backends
+        .iter()
+        .flat_map(|b| b.deployments.clone())
+        .collect();
     let sched = LocalScheduler::new(true);
     sched.sync_deployments(&dep_cfgs);
     let connector = Connector::new(store.clone(), backends.clone(), sched.clone());
@@ -75,9 +75,15 @@ async fn spawn_client_api(cfg: ClientConfig) -> String {
 #[tokio::test]
 async fn local_api_models_and_chat_sse() {
     let (backend_url, _mb, _h) = MockBackend::spawn("mock-llama").await;
-    let mut cfg = ClientConfig::default();
-    cfg.name = "test-client".into();
-    cfg.backends = vec![backend("b1", &backend_url, vec![dep("d1", "mock-llama", 4, 2)])];
+    let cfg = ClientConfig {
+        name: "test-client".into(),
+        backends: vec![backend(
+            "b1",
+            &backend_url,
+            vec![dep("d1", "mock-llama", 4, 2)],
+        )],
+        ..Default::default()
+    };
     let base = spawn_client_api(cfg).await;
 
     // models list contains our deployment
@@ -93,7 +99,10 @@ async fn local_api_models_and_chat_sse() {
         .iter()
         .map(|m| m["id"].as_str().unwrap().to_string())
         .collect();
-    assert!(ids.iter().any(|i| i.contains("mock-llama")), "models: {ids:?}");
+    assert!(
+        ids.iter().any(|i| i.contains("mock-llama")),
+        "models: {ids:?}"
+    );
 
     // non-streaming chat
     let r = reqwest::Client::new()
@@ -114,7 +123,13 @@ async fn local_api_models_and_chat_sse() {
         .await
         .unwrap();
     assert!(r.status().is_success());
-    let ct = r.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+    let ct = r
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(ct.contains("text/event-stream"), "ct={ct}");
     let text = r.text().await.unwrap();
     assert!(text.contains("data:"), "no sse data: {text}");
@@ -127,8 +142,14 @@ async fn local_api_429_under_load_and_cancel() {
         ttft: Duration::from_millis(300),
         ..Default::default()
     });
-    let mut cfg = ClientConfig::default();
-    cfg.backends = vec![backend("b1", &backend_url, vec![dep("d1", "mock-llama", 1, 0)])];
+    let cfg = ClientConfig {
+        backends: vec![backend(
+            "b1",
+            &backend_url,
+            vec![dep("d1", "mock-llama", 1, 0)],
+        )],
+        ..Default::default()
+    };
     let base = spawn_client_api(cfg).await;
 
     // first request holds the only slot (don't await — let it run)
@@ -145,7 +166,12 @@ async fn local_api_429_under_load_and_cancel() {
         })
     };
     // wait until backend actually processing
-    let held = wait_until(|| async { mb.in_flight() > 0 }, Duration::from_secs(5), Duration::from_millis(10)).await;
+    let held = wait_until(
+        || async { mb.in_flight() > 0 },
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+    )
+    .await;
     assert!(held, "request never reached backend");
 
     // second request must be rejected 429 (max_concurrent=1, local class has priority but still bounded)
@@ -166,8 +192,14 @@ async fn local_api_429_under_load_and_cancel() {
 #[tokio::test]
 async fn local_api_requires_bearer_when_configured() {
     let (backend_url, _mb, _h) = MockBackend::spawn("mock-llama").await;
-    let mut cfg = ClientConfig::default();
-    cfg.backends = vec![backend("b1", &backend_url, vec![dep("d1", "mock-llama", 4, 0)])];
+    let mut cfg = ClientConfig {
+        backends: vec![backend(
+            "b1",
+            &backend_url,
+            vec![dep("d1", "mock-llama", 4, 0)],
+        )],
+        ..Default::default()
+    };
     cfg.local_api.api_key = "local-secret".into();
     let base = spawn_client_api(cfg).await;
 
@@ -184,7 +216,9 @@ async fn local_api_requires_bearer_when_configured() {
     let r = reqwest::Client::new()
         .post(format!("{base}/v1/chat/completions"))
         .bearer_auth("local-secret")
-        .json(&serde_json::json!({"model":"mock-llama","messages":[{"role":"user","content":"hi"}]}))
+        .json(
+            &serde_json::json!({"model":"mock-llama","messages":[{"role":"user","content":"hi"}]}),
+        )
         .send()
         .await
         .unwrap();

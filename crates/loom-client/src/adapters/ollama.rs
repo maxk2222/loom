@@ -52,7 +52,8 @@ impl BackendAdapter for OllamaAdapter {
     async fn list_models(&self) -> Result<Vec<String>, AdapterError> {
         // Native listing is authoritative for Ollama.
         let url = format!("{}/api/tags", self.endpoint());
-        let v = common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(10)).await?;
+        let v =
+            common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(10)).await?;
         let models = v
             .get("models")
             .and_then(|m| m.as_array())
@@ -195,11 +196,19 @@ impl OllamaAdapter {
         if status != 200 {
             return Err(AdapterError::Upstream {
                 status,
-                message: v.get("error").and_then(|e| e.as_str()).unwrap_or("ollama error").to_string(),
+                message: v
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("ollama error")
+                    .to_string(),
             });
         }
         // { "embeddings": [[..],[..]] } → OpenAI list shape
-        let embs = v.get("embeddings").and_then(|e| e.as_array()).cloned().unwrap_or_default();
+        let embs = v
+            .get("embeddings")
+            .and_then(|e| e.as_array())
+            .cloned()
+            .unwrap_or_default();
         let data: Vec<Value> = embs
             .into_iter()
             .enumerate()

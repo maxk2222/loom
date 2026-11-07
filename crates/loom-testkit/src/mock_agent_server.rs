@@ -1,10 +1,10 @@
 //! Mock Agent server implementing the `Agent` gRPC service — used to test the
 //! client before the real server exists (and for failure-injection tests).
 
+use futures_util::{Stream, StreamExt};
 use loom_protocol::pb::agent_server::{Agent, AgentServer};
 use loom_protocol::pb::*;
 use loom_protocol::{frames, server_msgs};
-use futures_util::{Stream, StreamExt};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,6 +53,12 @@ struct PendingData {
     done_tx: Option<oneshot::Sender<String>>,
     ready_tx: Option<oneshot::Sender<()>>,
     fencing: u64,
+}
+
+impl Default for MockAgentServer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockAgentServer {
@@ -134,16 +140,15 @@ impl MockAgentServer {
         drop(sessions);
 
         tokio::spawn(async move {
-            match tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx).await {
-                Ok(Ok(())) => {
-                    let _ = assigned_tx.send(AssignedRequest {
-                        request_id,
-                        lease_id,
-                        response_rx: resp_rx,
-                        done_rx,
-                    });
-                }
-                _ => {}
+            if let Ok(Ok(())) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx).await
+            {
+                let _ = assigned_tx.send(AssignedRequest {
+                    request_id,
+                    lease_id,
+                    response_rx: resp_rx,
+                    done_rx,
+                });
             }
         });
         Ok(assigned_rx)
@@ -181,9 +186,7 @@ impl MockAgentServer {
         let handle = tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(svc)
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
-                    listener,
-                ))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
                 .await
                 .ok();
         });
@@ -212,13 +215,17 @@ impl Agent for MockAgentServer {
                 return;
             };
 
-            if !crate::harness::proto_compatible(
-                hello.protocol_version_min,
-                hello.protocol_version,
-            ) {
+            if !crate::harness::proto_compatible(hello.protocol_version_min, hello.protocol_version)
+            {
                 let _ = out_tx
                     .send(server_msgs::hello_ack(
-                        false, "protocol_version_unsupported", "", "", "", 0, inner.hb_secs,
+                        false,
+                        "protocol_version_unsupported",
+                        "",
+                        "",
+                        "",
+                        0,
+                        inner.hb_secs,
                     ))
                     .await;
                 return;
@@ -241,13 +248,27 @@ impl Agent for MockAgentServer {
             };
             if !accept {
                 let _ = out_tx
-                    .send(server_msgs::hello_ack(false, "rejected", "", "", "", 0, inner.hb_secs))
+                    .send(server_msgs::hello_ack(
+                        false,
+                        "rejected",
+                        "",
+                        "",
+                        "",
+                        0,
+                        inner.hb_secs,
+                    ))
                     .await;
                 return;
             }
             if out_tx
                 .send(server_msgs::hello_ack(
-                    true, "", &session_id, &client_id, &issued_cred, 0, inner.hb_secs,
+                    true,
+                    "",
+                    &session_id,
+                    &client_id,
+                    &issued_cred,
+                    0,
+                    inner.hb_secs,
                 ))
                 .await
                 .is_err()
@@ -259,7 +280,11 @@ impl Agent for MockAgentServer {
                 .lock()
                 .await
                 .insert(client_id.clone(), out_tx.clone());
-            inner.captured.lock().await.push(format!("hello:{client_id}"));
+            inner
+                .captured
+                .lock()
+                .await
+                .push(format!("hello:{client_id}"));
 
             while let Some(msg) = inbound.next().await {
                 let Ok(env) = msg else { break };
@@ -276,8 +301,7 @@ impl Agent for MockAgentServer {
                         format!("config_ack:{}", a.config_version)
                     }
                     client_envelope::Msg::AssignAck(ack) => {
-                        let ok =
-                            matches!(ack.result, Some(assign_ack::Result::Accepted(true)));
+                        let ok = matches!(ack.result, Some(assign_ack::Result::Accepted(true)));
                         format!("assign_ack:{}:{}", ack.request_id, ok)
                     }
                     client_envelope::Msg::RequestEnd(e) => {
@@ -294,8 +318,9 @@ impl Agent for MockAgentServer {
             inner.sessions.lock().await.remove(&client_id);
         });
 
-        Ok(Response::new(Box::pin(ReceiverStream::new(out_rx).map(Ok))
-            as Self::ControlStream))
+        Ok(Response::new(
+            Box::pin(ReceiverStream::new(out_rx).map(Ok)) as Self::ControlStream
+        ))
     }
 
     type RequestDataStream = BoxStream<DataFrame>;
@@ -319,13 +344,21 @@ impl Agent for MockAgentServer {
             let mut pending = inner.pending.lock().await;
             let Some(mut p) = pending.remove(&head.request_id) else {
                 let _ = out_tx
-                    .send(frames::error("unknown_request", "no pending assignment", false))
+                    .send(frames::error(
+                        "unknown_request",
+                        "no pending assignment",
+                        false,
+                    ))
                     .await;
                 return;
             };
             if p.fencing != head.fencing_token {
                 let _ = out_tx
-                    .send(frames::error("fencing_mismatch", "stale fencing token", false))
+                    .send(frames::error(
+                        "fencing_mismatch",
+                        "stale fencing token",
+                        false,
+                    ))
                     .await;
                 return;
             }
@@ -383,8 +416,9 @@ impl Agent for MockAgentServer {
             }
         });
 
-        Ok(Response::new(Box::pin(ReceiverStream::new(out_rx).map(Ok))
-            as Self::RequestDataStream))
+        Ok(Response::new(
+            Box::pin(ReceiverStream::new(out_rx).map(Ok)) as Self::RequestDataStream
+        ))
     }
 
     async fn get_config(

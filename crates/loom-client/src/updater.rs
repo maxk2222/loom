@@ -64,7 +64,9 @@ pub async fn check_for_update(
         .await
         .context("manifest parse")?;
     let update_available = semver::Version::parse(&mf.version)
-        .map(|v| v > semver::Version::parse(current).unwrap_or_else(|_| semver::Version::new(0, 0, 0)))
+        .map(|v| {
+            v > semver::Version::parse(current).unwrap_or_else(|_| semver::Version::new(0, 0, 0))
+        })
         .unwrap_or(false);
     Ok(UpdateStatus {
         enabled: true,
@@ -99,7 +101,11 @@ pub async fn download_and_stage(
     // sha256 check (the artifact is the raw binary, signed with minisign)
     let computed = hex::encode(sha2::Sha256::digest(&bytes));
     if !computed.eq_ignore_ascii_case(&manifest_url_manifest.sha256) {
-        bail!("sha256 mismatch: expected {}, got {}", manifest_url_manifest.sha256, computed);
+        bail!(
+            "sha256 mismatch: expected {}, got {}",
+            manifest_url_manifest.sha256,
+            computed
+        );
     }
 
     // minisign verify (detached signature over the binary bytes)

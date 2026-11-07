@@ -53,7 +53,10 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/users/{id}", put(update_user).delete(delete_user))
         // projects
         .route("/api/projects", get(list_projects).post(create_project))
-        .route("/api/projects/{id}", put(update_project).delete(delete_project))
+        .route(
+            "/api/projects/{id}",
+            put(update_project).delete(delete_project),
+        )
         .route("/api/projects/{id}/models", put(set_project_models))
         // api keys
         .route("/api/keys", get(list_keys).post(create_key))
@@ -67,7 +70,10 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/deployments", get(list_deployments))
         // virtual models
         .route("/api/models", get(list_vms).post(create_vm))
-        .route("/api/models/{id}", get(vm_detail).put(update_vm).delete(delete_vm))
+        .route(
+            "/api/models/{id}",
+            get(vm_detail).put(update_vm).delete(delete_vm),
+        )
         // scheduler/queue
         .route("/api/scheduler/state", get(sched_state))
         .route("/api/requests/{id}/cancel", post(cancel_request))
@@ -134,7 +140,10 @@ async fn login(
             .status(StatusCode::OK)
             .header(header::SET_COOKIE, session_cookie(&tok))
             .body(Body::from(
-                serde_json::to_string(&json!({"user": {"id": u.user_id, "role": u.role, "email": u.email}})).unwrap(),
+                serde_json::to_string(
+                    &json!({"user": {"id": u.user_id, "role": u.role, "email": u.email}}),
+                )
+                .unwrap(),
             ))
             .unwrap(),
         _ => StatusCode::UNAUTHORIZED.into_response(),
@@ -146,7 +155,11 @@ async fn logout(State(s): State<AdminState>, req: Request) -> Response {
         .headers()
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
-        .and_then(|c| c.split(';').filter_map(|p| p.trim().strip_prefix("loom_session=")).next())
+        .and_then(|c| {
+            c.split(';')
+                .filter_map(|p| p.trim().strip_prefix("loom_session="))
+                .next()
+        })
         .map(|v| v.to_string())
     {
         let _ = s.auth.logout(&t).await;
@@ -164,15 +177,16 @@ async fn setup_status(State(s): State<AdminState>) -> Json<Value> {
     Json(json!({"needs_setup": n == 0}))
 }
 
-async fn setup_admin(
-    State(s): State<AdminState>,
-    Json(b): Json<Value>,
-) -> Response {
+async fn setup_admin(State(s): State<AdminState>, Json(b): Json<Value>) -> Response {
     let email = b.get("email").and_then(|v| v.as_str()).unwrap_or("");
     let pw = b.get("password").and_then(|v| v.as_str()).unwrap_or("");
     let name = b.get("display_name").and_then(|v| v.as_str()).unwrap_or("");
     if pw.len() < 8 || email.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid input"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"invalid input"})),
+        )
+            .into_response();
     }
     match s.auth.create_first_admin(email, pw, name).await {
         Ok(true) => Json(json!({"ok": true})).into_response(),
@@ -190,7 +204,12 @@ async fn overview(State(s): State<AdminState>) -> Json<Value> {
         sqlx::query_scalar("SELECT count(*) FROM requests_history WHERE created_at > now() - interval '5 min' AND status = 'queued'").fetch_one(&s.db).await.unwrap_or(0),
         sqlx::query_scalar("SELECT count(*) FROM requests_history WHERE created_at > now() - interval '5 min' AND status = 'streaming'").fetch_one(&s.db).await.unwrap_or(0),
     );
-    let today: i64 = sqlx::query_scalar("SELECT count(*) FROM requests_history WHERE created_at > now() - interval '1 day'").fetch_one(&s.db).await.unwrap_or(0);
+    let today: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM requests_history WHERE created_at > now() - interval '1 day'",
+    )
+    .fetch_one(&s.db)
+    .await
+    .unwrap_or(0);
     Json(json!({
         "clients_total": clients.len(),
         "clients_online": online,
@@ -203,7 +222,9 @@ async fn overview(State(s): State<AdminState>) -> Json<Value> {
 
 async fn events_sse(
     State(s): State<AdminState>,
-) -> Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+) -> Sse<
+    impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
     let mut rx = s.events.subscribe();
     let stream = async_stream::stream! {
         // initial keepalive
@@ -229,19 +250,21 @@ async fn events_sse(
             }
         }
     };
-    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
+    Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
 }
 
 // ---------------- users ----------------
 
 async fn list_users(State(s): State<AdminState>) -> Json<Value> {
-    let rows: Vec<(uuid::Uuid, String, String, String, bool)> = sqlx::query_as(
-        "SELECT id, email, display_name, role, disabled FROM users ORDER BY email",
+    let rows: Vec<(uuid::Uuid, String, String, String, bool)> =
+        sqlx::query_as("SELECT id, email, display_name, role, disabled FROM users ORDER BY email")
+            .fetch_all(&s.db)
+            .await
+            .unwrap_or_default();
+    Json(
+        json!({"users": rows.iter().map(|(id,e,n,r,d)| json!({"id":id,"email":e,"display_name":n,"role":r,"disabled":d})).collect::<Vec<_>>()}),
     )
-    .fetch_all(&s.db)
-    .await
-    .unwrap_or_default();
-    Json(json!({"users": rows.iter().map(|(id,e,n,r,d)| json!({"id":id,"email":e,"display_name":n,"role":r,"disabled":d})).collect::<Vec<_>>()}))
 }
 
 async fn create_user(State(s): State<AdminState>, Json(b): Json<Value>) -> Response {
@@ -249,12 +272,27 @@ async fn create_user(State(s): State<AdminState>, Json(b): Json<Value>) -> Respo
     let pw = b["password"].as_str().unwrap_or("");
     let role = b["role"].as_str().unwrap_or("viewer");
     let name = b["display_name"].as_str().unwrap_or("");
-    if email.is_empty() || pw.len() < 8 || !["admin","operator","viewer"].contains(&role) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid input"}))).into_response();
+    if email.is_empty() || pw.len() < 8 || !["admin", "operator", "viewer"].contains(&role) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"invalid input"})),
+        )
+            .into_response();
     }
-    let hash = match Auth::hash_password(pw) { Ok(h) => h, Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response() };
-    match sqlx::query("INSERT INTO users (email,password_hash,display_name,role) VALUES ($1,$2,$3,$4)")
-        .bind(&email).bind(&hash).bind(name).bind(role).execute(&s.db).await {
+    let hash = match Auth::hash_password(pw) {
+        Ok(h) => h,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    match sqlx::query(
+        "INSERT INTO users (email,password_hash,display_name,role) VALUES ($1,$2,$3,$4)",
+    )
+    .bind(&email)
+    .bind(&hash)
+    .bind(name)
+    .bind(role)
+    .execute(&s.db)
+    .await
+    {
         Ok(_) => {
             audit(&s.db, "user", "create", &email).await;
             Json(json!({"ok":true})).into_response()
@@ -263,17 +301,35 @@ async fn create_user(State(s): State<AdminState>, Json(b): Json<Value>) -> Respo
     }
 }
 
-async fn update_user(State(s): State<AdminState>, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
+async fn update_user(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Response {
     if let Some(role) = b.get("role").and_then(|v| v.as_str()) {
-        let _ = sqlx::query("UPDATE users SET role=$2, updated_at=now() WHERE id=$1::uuid").bind(&id).bind(role).execute(&s.db).await;
+        let _ = sqlx::query("UPDATE users SET role=$2, updated_at=now() WHERE id=$1::uuid")
+            .bind(&id)
+            .bind(role)
+            .execute(&s.db)
+            .await;
     }
     if let Some(d) = b.get("disabled").and_then(|v| v.as_bool()) {
-        let _ = sqlx::query("UPDATE users SET disabled=$2, updated_at=now() WHERE id=$1::uuid").bind(&id).bind(d).execute(&s.db).await;
+        let _ = sqlx::query("UPDATE users SET disabled=$2, updated_at=now() WHERE id=$1::uuid")
+            .bind(&id)
+            .bind(d)
+            .execute(&s.db)
+            .await;
     }
     if let Some(pw) = b.get("password").and_then(|v| v.as_str()) {
         if pw.len() >= 8 {
             if let Ok(h) = Auth::hash_password(pw) {
-                let _ = sqlx::query("UPDATE users SET password_hash=$2, updated_at=now() WHERE id=$1::uuid").bind(&id).bind(h).execute(&s.db).await;
+                let _ = sqlx::query(
+                    "UPDATE users SET password_hash=$2, updated_at=now() WHERE id=$1::uuid",
+                )
+                .bind(&id)
+                .bind(h)
+                .execute(&s.db)
+                .await;
             }
         }
     }
@@ -282,7 +338,10 @@ async fn update_user(State(s): State<AdminState>, Path(id): Path<String>, Json(b
 }
 
 async fn delete_user(State(s): State<AdminState>, Path(id): Path<String>) -> Response {
-    let _ = sqlx::query("DELETE FROM users WHERE id=$1::uuid AND role != 'admin'").bind(&id).execute(&s.db).await;
+    let _ = sqlx::query("DELETE FROM users WHERE id=$1::uuid AND role != 'admin'")
+        .bind(&id)
+        .execute(&s.db)
+        .await;
     audit(&s.db, "user", "delete", &id).await;
     Json(json!({"ok":true})).into_response()
 }
@@ -293,25 +352,45 @@ async fn list_projects(State(s): State<AdminState>) -> Json<Value> {
     let rows: Vec<(uuid::Uuid, String, String, i32, i32, bool)> = sqlx::query_as(
         "SELECT id, slug, name, priority_class, weight, enabled FROM projects ORDER BY slug",
     )
-    .fetch_all(&s.db).await.unwrap_or_default();
-    Json(json!({"projects": rows.iter().map(|(id,s,n,p,w,e)| json!({"id":id,"slug":s,"name":n,"priority_class":p,"weight":w,"enabled":e})).collect::<Vec<_>>()}))
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default();
+    Json(
+        json!({"projects": rows.iter().map(|(id,s,n,p,w,e)| json!({"id":id,"slug":s,"name":n,"priority_class":p,"weight":w,"enabled":e})).collect::<Vec<_>>()}),
+    )
 }
 
 async fn create_project(State(s): State<AdminState>, Json(b): Json<Value>) -> Response {
     let slug = b["slug"].as_str().unwrap_or("");
     let name = b["name"].as_str().unwrap_or("");
-    if slug.is_empty() { return (StatusCode::BAD_REQUEST, Json(json!({"error":"slug required"}))).into_response(); }
+    if slug.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"slug required"})),
+        )
+            .into_response();
+    }
     match sqlx::query("INSERT INTO projects (slug,name,priority_class,weight) VALUES ($1,$2,$3,$4)")
-        .bind(slug).bind(name)
+        .bind(slug)
+        .bind(name)
         .bind(b["priority_class"].as_i64().unwrap_or(1) as i32)
         .bind(b["weight"].as_i64().unwrap_or(1) as i32)
-        .execute(&s.db).await {
-        Ok(_) => { audit(&s.db,"project","create",slug).await; Json(json!({"ok":true})).into_response() }
+        .execute(&s.db)
+        .await
+    {
+        Ok(_) => {
+            audit(&s.db, "project", "create", slug).await;
+            Json(json!({"ok":true})).into_response()
+        }
         Err(_) => (StatusCode::CONFLICT, Json(json!({"error":"slug exists"}))).into_response(),
     }
 }
 
-async fn update_project(State(s): State<AdminState>, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
+async fn update_project(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Response {
     let _ = sqlx::query(
         "UPDATE projects SET name=COALESCE($2,name), priority_class=COALESCE($3,priority_class), weight=COALESCE($4,weight), enabled=COALESCE($5,enabled) WHERE id=$1::uuid")
         .bind(&id)
@@ -325,17 +404,43 @@ async fn update_project(State(s): State<AdminState>, Path(id): Path<String>, Jso
 }
 
 async fn delete_project(State(s): State<AdminState>, Path(id): Path<String>) -> Response {
-    let _ = sqlx::query("DELETE FROM projects WHERE id=$1::uuid").bind(&id).execute(&s.db).await;
+    let _ = sqlx::query("DELETE FROM projects WHERE id=$1::uuid")
+        .bind(&id)
+        .execute(&s.db)
+        .await;
     audit(&s.db, "project", "delete", &id).await;
     Json(json!({"ok":true})).into_response()
 }
 
-async fn set_project_models(State(s): State<AdminState>, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    let ids: Vec<String> = b["virtual_model_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
-    let mut tx = match s.db.begin().await { Ok(t) => t, Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response() };
-    let _ = sqlx::query("DELETE FROM project_models WHERE project_id=$1::uuid").bind(&id).execute(&mut *tx).await;
+async fn set_project_models(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Response {
+    let ids: Vec<String> = b["virtual_model_ids"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut tx = match s.db.begin().await {
+        Ok(t) => t,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let _ = sqlx::query("DELETE FROM project_models WHERE project_id=$1::uuid")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await;
     for vm in &ids {
-        let _ = sqlx::query("INSERT INTO project_models (project_id, virtual_model_id) VALUES ($1::uuid,$2::uuid)").bind(&id).bind(vm).execute(&mut *tx).await;
+        let _ = sqlx::query(
+            "INSERT INTO project_models (project_id, virtual_model_id) VALUES ($1::uuid,$2::uuid)",
+        )
+        .bind(&id)
+        .bind(vm)
+        .execute(&mut *tx)
+        .await;
     }
     let _ = tx.commit().await;
     audit(&s.db, "project", "set_models", &id).await;
@@ -345,15 +450,24 @@ async fn set_project_models(State(s): State<AdminState>, Path(id): Path<String>,
 // ---------------- api keys ----------------
 
 async fn list_keys(State(s): State<AdminState>) -> Json<Value> {
-    let rows: Vec<(uuid::Uuid, uuid::Uuid, String, String, i32, i32, i32, bool)> = sqlx::query_as(
+    type KeyRow = (uuid::Uuid, uuid::Uuid, String, String, i32, i32, i32, bool);
+    let rows: Vec<KeyRow> = sqlx::query_as(
         "SELECT id, project_id, name, prefix, rpm_limit, tpm_limit, max_concurrent, (revoked_at IS NULL) AS active FROM api_keys ORDER BY created_at DESC",
     ).fetch_all(&s.db).await.unwrap_or_default();
-    Json(json!({"keys": rows.iter().map(|(id,p,n,pre,rpm,tpm,mc,act)| json!({"id":id,"project_id":p,"name":n,"prefix":pre,"rpm_limit":rpm,"tpm_limit":tpm,"max_concurrent":mc,"active":act})).collect::<Vec<_>>()}))
+    Json(
+        json!({"keys": rows.iter().map(|(id,p,n,pre,rpm,tpm,mc,act)| json!({"id":id,"project_id":p,"name":n,"prefix":pre,"rpm_limit":rpm,"tpm_limit":tpm,"max_concurrent":mc,"active":act})).collect::<Vec<_>>()}),
+    )
 }
 
 async fn create_key(State(s): State<AdminState>, Json(b): Json<Value>) -> Response {
     let project = b["project_id"].as_str().unwrap_or("");
-    if project.is_empty() { return (StatusCode::BAD_REQUEST, Json(json!({"error":"project_id required"}))).into_response(); }
+    if project.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"project_id required"})),
+        )
+            .into_response();
+    }
     let token = format!("sk-{}", opaque_token(24));
     let hash = sha256_hex(&token);
     let prefix = token.chars().take(10).collect::<String>();
@@ -376,12 +490,19 @@ async fn create_key(State(s): State<AdminState>, Json(b): Json<Value>) -> Respon
             audit(&s.db, "api_key", "create", &id).await;
             Json(json!({"ok":true,"id":id,"token":token})).into_response()
         }
-        Err(_) => (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid project"}))).into_response(),
+        Err(_) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"invalid project"})),
+        )
+            .into_response(),
     }
 }
 
 async fn revoke_key(State(s): State<AdminState>, Path(id): Path<String>) -> Response {
-    let _ = sqlx::query("UPDATE api_keys SET revoked_at=now() WHERE id=$1::uuid").bind(&id).execute(&s.db).await;
+    let _ = sqlx::query("UPDATE api_keys SET revoked_at=now() WHERE id=$1::uuid")
+        .bind(&id)
+        .execute(&s.db)
+        .await;
     audit(&s.db, "api_key", "revoke", &id).await;
     Json(json!({"ok":true})).into_response()
 }
@@ -394,38 +515,63 @@ async fn list_clients(State(s): State<AdminState>) -> Json<Value> {
 
 async fn client_detail(State(s): State<AdminState>, Path(id): Path<String>) -> Json<Value> {
     let deps: Vec<Value> = sqlx::query_scalar::<_, String>(
-        "SELECT id::text FROM deployments WHERE client_id=$1::uuid").bind(&id)
-        .fetch_all(&s.db).await.unwrap_or_default()
-        .into_iter().map(|d| json!(d)).collect();
+        "SELECT id::text FROM deployments WHERE client_id=$1::uuid",
+    )
+    .bind(&id)
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|d| json!(d))
+    .collect();
     let live = s.registry.live_clients().await.unwrap_or_default();
-    let c = live.into_iter().find(|c| c["id"].as_str() == Some(id.as_str())).unwrap_or(json!({}));
+    let c = live
+        .into_iter()
+        .find(|c| c["id"].as_str() == Some(id.as_str()))
+        .unwrap_or(json!({}));
     Json(json!({"client": c, "deployments": deps}))
 }
 
-async fn client_status(State(s): State<AdminState>, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
+async fn client_status(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Response {
     let status = b["status"].as_str().unwrap_or("");
-    if !["active","suspended","pending"].contains(&status) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"invalid status"}))).into_response();
+    if !["active", "suspended", "pending"].contains(&status) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"invalid status"})),
+        )
+            .into_response();
     }
-    let _ = sqlx::query("UPDATE clients SET status=$2 WHERE id=$1::uuid").bind(&id).bind(status).execute(&s.db).await;
+    let _ = sqlx::query("UPDATE clients SET status=$2 WHERE id=$1::uuid")
+        .bind(&id)
+        .bind(status)
+        .execute(&s.db)
+        .await;
     audit(&s.db, "client", "status", &format!("{id}:{status}")).await;
     Json(json!({"ok":true})).into_response()
 }
 
 async fn issue_enroll_token(State(s): State<AdminState>, req: Request) -> Response {
     let user = req.extensions().get::<UserCtx>().cloned();
-    let body = axum::body::to_bytes(req.into_body(), 8192).await.unwrap_or_default();
+    let body = axum::body::to_bytes(req.into_body(), 8192)
+        .await
+        .unwrap_or_default();
     let b: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let token = format!("enroll_{}", opaque_token(24));
     let res = sqlx::query(
         "INSERT INTO enroll_tokens (token_hash,label,max_uses,expires_at,created_by)
-         VALUES ($1,$2,$3, now() + ($4 || ' hours')::interval, $5::uuid) RETURNING id::text")
-        .bind(sha256_hex(&token))
-        .bind(b["label"].as_str().unwrap_or(""))
-        .bind(b["max_uses"].as_i64().unwrap_or(1) as i32)
-        .bind(b["expires_hours"].as_i64().unwrap_or(24).to_string())
-        .bind(user.and_then(|u| uuid::Uuid::parse_str(&u.user_id).ok()))
-        .fetch_one(&s.db).await;
+         VALUES ($1,$2,$3, now() + ($4 || ' hours')::interval, $5::uuid) RETURNING id::text",
+    )
+    .bind(sha256_hex(&token))
+    .bind(b["label"].as_str().unwrap_or(""))
+    .bind(b["max_uses"].as_i64().unwrap_or(1) as i32)
+    .bind(b["expires_hours"].as_i64().unwrap_or(24).to_string())
+    .bind(user.and_then(|u| uuid::Uuid::parse_str(&u.user_id).ok()))
+    .fetch_one(&s.db)
+    .await;
     match res {
         Ok(row) => {
             use sqlx::Row;
@@ -455,12 +601,20 @@ async fn list_vms(State(s): State<AdminState>) -> Json<Value> {
     let rows: Vec<(uuid::Uuid, String, String, String, String, bool, bool)> = sqlx::query_as(
         "SELECT id, api_name, api_type, routing_strategy, description, enabled, allow_heterogeneous FROM virtual_models ORDER BY api_name")
         .fetch_all(&s.db).await.unwrap_or_default();
-    Json(json!({"models": rows.iter().map(|(id,n,t,st,d,e,h)| json!({"id":id,"api_name":n,"api_type":t,"routing_strategy":st,"description":d,"enabled":e,"allow_heterogeneous":h})).collect::<Vec<_>>()}))
+    Json(
+        json!({"models": rows.iter().map(|(id,n,t,st,d,e,h)| json!({"id":id,"api_name":n,"api_type":t,"routing_strategy":st,"description":d,"enabled":e,"allow_heterogeneous":h})).collect::<Vec<_>>()}),
+    )
 }
 
 async fn create_vm(State(s): State<AdminState>, Json(b): Json<Value>) -> Response {
     let name = b["api_name"].as_str().unwrap_or("");
-    if name.is_empty() { return (StatusCode::BAD_REQUEST, Json(json!({"error":"api_name required"}))).into_response(); }
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"api_name required"})),
+        )
+            .into_response();
+    }
     let res = sqlx::query(
         "INSERT INTO virtual_models (api_name,description,api_type,routing_strategy,required_capabilities,allow_heterogeneous,fallback_virtual_model_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7::uuid) RETURNING id::text")
@@ -481,12 +635,27 @@ async fn create_vm(State(s): State<AdminState>, Json(b): Json<Value>) -> Respons
             audit(&s.db, "virtual_model", "create", &id).await;
             Json(json!({"ok":true,"id":id})).into_response()
         }
-        Err(_) => (StatusCode::CONFLICT, Json(json!({"error":"api_name exists or bad fallback"}))).into_response(),
+        Err(_) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error":"api_name exists or bad fallback"})),
+        )
+            .into_response(),
     }
 }
 
 async fn vm_detail(State(s): State<AdminState>, Path(id): Path<String>) -> Json<Value> {
-    let vm: Option<(uuid::Uuid,String,String,String,String,bool,bool,Option<uuid::Uuid>,serde_json::Value)> = sqlx::query_as(
+    type VmRow = (
+        uuid::Uuid,
+        String,
+        String,
+        String,
+        String,
+        bool,
+        bool,
+        Option<uuid::Uuid>,
+        serde_json::Value,
+    );
+    let vm: Option<VmRow> = sqlx::query_as(
         "SELECT id, api_name, api_type, routing_strategy, description, enabled, allow_heterogeneous, fallback_virtual_model_id, required_capabilities FROM virtual_models WHERE id=$1::uuid")
         .bind(&id).fetch_optional(&s.db).await.unwrap_or(None);
     let members: Vec<(uuid::Uuid, uuid::Uuid, i32, i32, bool, bool)> = sqlx::query_as(
@@ -498,7 +667,11 @@ async fn vm_detail(State(s): State<AdminState>, Path(id): Path<String>) -> Json<
     }))
 }
 
-async fn update_vm(State(s): State<AdminState>, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
+async fn update_vm(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Response {
     let _ = sqlx::query(
         "UPDATE virtual_models SET description=COALESCE($2,description), api_type=COALESCE($3,api_type),
          routing_strategy=COALESCE($4,routing_strategy), required_capabilities=COALESCE($5,required_capabilities),
@@ -514,11 +687,19 @@ async fn update_vm(State(s): State<AdminState>, Path(id): Path<String>, Json(b):
         .bind(b.get("enabled").and_then(|v| v.as_bool()))
         .execute(&s.db).await;
     if let Some(members) = b.get("members").and_then(|v| v.as_array()) {
-        let mut tx = match s.db.begin().await { Ok(t) => t, Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response() };
-        let _ = sqlx::query("DELETE FROM virtual_model_members WHERE virtual_model_id=$1::uuid").bind(&id).execute(&mut *tx).await;
+        let mut tx = match s.db.begin().await {
+            Ok(t) => t,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let _ = sqlx::query("DELETE FROM virtual_model_members WHERE virtual_model_id=$1::uuid")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await;
         for m in members {
             let dep = m["deployment_id"].as_str().unwrap_or("");
-            if dep.is_empty() { continue; }
+            if dep.is_empty() {
+                continue;
+            }
             let _ = sqlx::query(
                 "INSERT INTO virtual_model_members (virtual_model_id,deployment_id,priority,weight,manual_pinned,enabled)
                  VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6)")
@@ -538,7 +719,10 @@ async fn update_vm(State(s): State<AdminState>, Path(id): Path<String>, Json(b):
 }
 
 async fn delete_vm(State(s): State<AdminState>, Path(id): Path<String>) -> Response {
-    let _ = sqlx::query("DELETE FROM virtual_models WHERE id=$1::uuid").bind(&id).execute(&s.db).await;
+    let _ = sqlx::query("DELETE FROM virtual_models WHERE id=$1::uuid")
+        .bind(&id)
+        .execute(&s.db)
+        .await;
     let _ = s.models.reload().await;
     audit(&s.db, "virtual_model", "delete", &id).await;
     Json(json!({"ok":true})).into_response()
@@ -551,7 +735,11 @@ async fn sched_state(State(s): State<AdminState>) -> Json<Value> {
     let classes = 4u32;
     let mut queues = Vec::new();
     for p in 0..classes {
-        let n: i64 = redis::cmd("ZCARD").arg(s.scheduler.rt().k(&format!("queue:{p}"))).query_async(&mut c).await.unwrap_or(0);
+        let n: i64 = redis::cmd("ZCARD")
+            .arg(s.scheduler.rt().k(&format!("queue:{p}")))
+            .query_async(&mut c)
+            .await
+            .unwrap_or(0);
         queues.push(json!({"class": p, "depth": n}));
     }
     Json(json!({"queues": queues}))
@@ -562,21 +750,40 @@ async fn cancel_request(State(s): State<AdminState>, Path(id): Path<String>) -> 
 }
 
 #[derive(Deserialize)]
-struct HistQ { limit: Option<i64>, #[allow(dead_code)] status: Option<String> }
+struct HistQ {
+    limit: Option<i64>,
+    #[allow(dead_code)]
+    status: Option<String>,
+}
 
 async fn history(State(s): State<AdminState>, Query(q): Query<HistQ>) -> Json<Value> {
+    type HistRow = (
+        uuid::Uuid,
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        String,
+        chrono::DateTime<chrono::Utc>,
+    );
     let limit = q.limit.unwrap_or(100).min(500);
-    let rows: Vec<(uuid::Uuid, String, i64, i64, i64, i64, i64, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+    let rows: Vec<HistRow> = sqlx::query_as(
         "SELECT id, status, queue_wait_ms, ttft_ms, duration_ms, prompt_tokens, completion_tokens, error_code, created_at FROM requests_history ORDER BY created_at DESC LIMIT $1")
         .bind(limit).fetch_all(&s.db).await.unwrap_or_default();
-    Json(json!({"requests": rows.iter().map(|(id,st,qw,t,d,pt,ct,ec,ca)| json!({"id":id,"status":st,"queue_wait_ms":qw,"ttft_ms":t,"duration_ms":d,"prompt_tokens":pt,"completion_tokens":ct,"error_code":ec,"created_at":ca})).collect::<Vec<_>>()}))
+    Json(
+        json!({"requests": rows.iter().map(|(id,st,qw,t,d,pt,ct,ec,ca)| json!({"id":id,"status":st,"queue_wait_ms":qw,"ttft_ms":t,"duration_ms":d,"prompt_tokens":pt,"completion_tokens":ct,"error_code":ec,"created_at":ca})).collect::<Vec<_>>()}),
+    )
 }
 
 async fn usage_stats(State(s): State<AdminState>) -> Json<Value> {
     let rows: Vec<(uuid::Uuid, i64, i64, i64)> = sqlx::query_as(
         "SELECT project_id, sum(requests), sum(prompt_tokens), sum(completion_tokens) FROM usage_counters WHERE bucket > now() - interval '24 hours' GROUP BY project_id")
         .fetch_all(&s.db).await.unwrap_or_default();
-    Json(json!({"usage_24h": rows.iter().map(|(p,r,pt,ct)| json!({"project_id":p,"requests":r,"prompt_tokens":pt,"completion_tokens":ct})).collect::<Vec<_>>()}))
+    Json(
+        json!({"usage_24h": rows.iter().map(|(p,r,pt,ct)| json!({"project_id":p,"requests":r,"prompt_tokens":pt,"completion_tokens":ct})).collect::<Vec<_>>()}),
+    )
 }
 
 // ---------------- settings / branding / system ----------------
@@ -588,9 +795,17 @@ async fn get_setting(State(s): State<AdminState>, Path(key): Path<String>) -> Js
     }
 }
 
-async fn put_setting(State(s): State<AdminState>, Path(key): Path<String>, Json(b): Json<Value>) -> Response {
-    if !["scheduler","queue","branding","retention"].contains(&key.as_str()) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"unknown setting"}))).into_response();
+async fn put_setting(
+    State(s): State<AdminState>,
+    Path(key): Path<String>,
+    Json(b): Json<Value>,
+) -> Response {
+    if !["scheduler", "queue", "branding", "retention"].contains(&key.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"unknown setting"})),
+        )
+            .into_response();
     }
     let _ = s.settings.set(&key, b["value"].clone()).await;
     bump_version(&s.db, "settings", &key, &b["value"]).await;
@@ -604,10 +819,14 @@ async fn branding(State(s): State<AdminState>) -> Json<Value> {
 
 async fn put_branding(State(s): State<AdminState>, Json(b): Json<Value>) -> Response {
     let mut cur = s.settings.branding().await.unwrap_or(json!({}));
-    for k in ["app_name","tagline","accent_color"] {
+    for k in ["app_name", "tagline", "accent_color"] {
         if let Some(v) = b.get(k).and_then(|v| v.as_str()) {
             if k == "accent_color" && !v.starts_with('#') {
-                return (StatusCode::BAD_REQUEST, Json(json!({"error":"accent_color must be #rrggbb"}))).into_response();
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"accent_color must be #rrggbb"})),
+                )
+                    .into_response();
             }
             cur[k] = json!(v);
         }
@@ -620,14 +839,20 @@ async fn put_branding(State(s): State<AdminState>, Json(b): Json<Value>) -> Resp
 
 async fn brand_logo(State(s): State<AdminState>, Path(ext): Path<String>) -> Response {
     match s.settings.logo_path().await {
-        Ok(Some(p)) if std::path::Path::new(&p).exists() => {
-            match tokio::fs::read(&p).await {
-                Ok(bytes) => Response::builder()
-                    .header("content-type", match ext.as_str() { "png"=>"image/png","webp"=>"image/webp",_=>"image/jpeg" })
-                    .body(Body::from(bytes)).unwrap(),
-                _ => StatusCode::NOT_FOUND.into_response(),
-            }
-        }
+        Ok(Some(p)) if std::path::Path::new(&p).exists() => match tokio::fs::read(&p).await {
+            Ok(bytes) => Response::builder()
+                .header(
+                    "content-type",
+                    match ext.as_str() {
+                        "png" => "image/png",
+                        "webp" => "image/webp",
+                        _ => "image/jpeg",
+                    },
+                )
+                .body(Body::from(bytes))
+                .unwrap(),
+            _ => StatusCode::NOT_FOUND.into_response(),
+        },
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -643,7 +868,13 @@ async fn upload_logo(State(s): State<AdminState>, mut mp: Multipart) -> Response
                     audit(&s.db, "branding", "logo", "").await;
                     return Json(json!({"ok":true})).into_response();
                 }
-                Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response(),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": e.to_string()})),
+                    )
+                        .into_response()
+                }
             }
         }
     }
@@ -651,16 +882,30 @@ async fn upload_logo(State(s): State<AdminState>, mut mp: Multipart) -> Response
 }
 
 async fn config_versions(State(s): State<AdminState>) -> Json<Value> {
-    let rows: Vec<(i64,String,String,serde_json::Value,String,chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+    type CfgVerRow = (
+        i64,
+        String,
+        String,
+        serde_json::Value,
+        String,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let rows: Vec<CfgVerRow> = sqlx::query_as(
         "SELECT id, entity, entity_id, change, actor, created_at FROM config_versions ORDER BY id DESC LIMIT 100")
         .fetch_all(&s.db).await.unwrap_or_default();
-    Json(json!({"versions": rows.iter().map(|(i,e,eid,c,a,t)| json!({"id":i,"entity":e,"entity_id":eid,"change":c,"actor":a,"created_at":t})).collect::<Vec<_>>()}))
+    Json(
+        json!({"versions": rows.iter().map(|(i,e,eid,c,a,t)| json!({"id":i,"entity":e,"entity_id":eid,"change":c,"actor":a,"created_at":t})).collect::<Vec<_>>()}),
+    )
 }
 
 async fn system_info(State(s): State<AdminState>) -> Json<Value> {
     let db_ok = sqlx::query("SELECT 1").execute(&s.db).await.is_ok();
     let mut c = s.scheduler.rt().conn.clone();
-    let redis_ok: bool = redis::cmd("PING").query_async::<String>(&mut c).await.map(|v| v=="PONG").unwrap_or(false);
+    let redis_ok: bool = redis::cmd("PING")
+        .query_async::<String>(&mut c)
+        .await
+        .map(|v| v == "PONG")
+        .unwrap_or(false);
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "postgres": db_ok,
@@ -672,22 +917,42 @@ async fn trigger_backup(State(s): State<AdminState>) -> Response {
     // Runs pg_dump against the configured DB via env var.
     let out = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg(format!("pg_dump \"$LOOM_DATABASE_URL\" > {}/backup-$(date +%Y%m%d-%H%M%S).sql", s.settings.data_dir))
-        .output().await;
+        .arg(format!(
+            "pg_dump \"$LOOM_DATABASE_URL\" > {}/backup-$(date +%Y%m%d-%H%M%S).sql",
+            s.settings.data_dir
+        ))
+        .output()
+        .await;
     match out {
         Ok(o) if o.status.success() => Json(json!({"ok":true})).into_response(),
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"backup failed"}))).into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"backup failed"})),
+        )
+            .into_response(),
     }
 }
 
 // ---------------- helpers ----------------
 
 async fn audit(db: &PgPool, entity: &str, action: &str, entity_id: &str) {
-    let _ = sqlx::query("INSERT INTO audit_logs (actor, action, entity, entity_id) VALUES ('admin',$1,$2,$3)")
-        .bind(action).bind(entity).bind(entity_id).execute(db).await;
+    let _ = sqlx::query(
+        "INSERT INTO audit_logs (actor, action, entity, entity_id) VALUES ('admin',$1,$2,$3)",
+    )
+    .bind(action)
+    .bind(entity)
+    .bind(entity_id)
+    .execute(db)
+    .await;
 }
 
 async fn bump_version(db: &PgPool, entity: &str, entity_id: &str, change: &Value) {
-    let _ = sqlx::query("INSERT INTO config_versions (entity, entity_id, change, actor) VALUES ($1,$2,$3,'admin')")
-        .bind(entity).bind(entity_id).bind(change).execute(db).await;
+    let _ = sqlx::query(
+        "INSERT INTO config_versions (entity, entity_id, change, actor) VALUES ($1,$2,$3,'admin')",
+    )
+    .bind(entity)
+    .bind(entity_id)
+    .bind(change)
+    .execute(db)
+    .await;
 }

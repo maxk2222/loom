@@ -34,7 +34,8 @@ impl BackendAdapter for GenericAdapter {
 
     async fn list_models(&self) -> Result<Vec<String>, AdapterError> {
         let url = format!("{}/v1/models", self.endpoint());
-        let v = common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(10)).await?;
+        let v =
+            common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(10)).await?;
         Ok(common::parse_openai_models(&v))
     }
 

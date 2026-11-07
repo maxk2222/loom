@@ -88,7 +88,8 @@ impl Router {
             }
             Strategy::Weighted => {
                 // weighted shuffle approximation: sort by weight desc then stable
-                candidates.sort_by(|a, b| b.weight.cmp(&a.weight).then(a.priority.cmp(&b.priority)));
+                candidates
+                    .sort_by(|a, b| b.weight.cmp(&a.weight).then(a.priority.cmp(&b.priority)));
             }
             Strategy::RoundRobin => {
                 candidates.sort_by_key(|m| m.priority);

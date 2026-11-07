@@ -2,8 +2,8 @@
 //! argon2 passwords, opaque tokens hashed with sha256.
 
 use anyhow::Result;
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::{rand_core::OsRng, SaltString};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use loom_core::ids::{opaque_token, sha256_hex};
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -172,7 +172,12 @@ impl Auth {
     }
 
     /// Login: check email/password → create session token.
-    pub async fn login(&self, email: &str, password: &str, ip: &str) -> Result<Option<(String, UserCtx)>> {
+    pub async fn login(
+        &self,
+        email: &str,
+        password: &str,
+        ip: &str,
+    ) -> Result<Option<(String, UserCtx)>> {
         #[derive(sqlx::FromRow)]
         struct U {
             id: uuid::Uuid,
@@ -254,7 +259,12 @@ impl Auth {
     }
 
     /// Create the first admin (setup wizard) — only when none exists.
-    pub async fn create_first_admin(&self, email: &str, password: &str, name: &str) -> Result<bool> {
+    pub async fn create_first_admin(
+        &self,
+        email: &str,
+        password: &str,
+        name: &str,
+    ) -> Result<bool> {
         if self.admin_count().await? > 0 {
             return Ok(false);
         }

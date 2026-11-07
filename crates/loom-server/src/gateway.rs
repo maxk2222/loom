@@ -1,7 +1,7 @@
 //! OpenAI-compatible gateway: /v1/* endpoints, SSE bridging, error taxonomy.
 
 use crate::auth::{ApiKeyCtx, Auth};
-use crate::scheduler::{EndMeta, SchedErr, Scheduler, PendingRequest};
+use crate::scheduler::{EndMeta, PendingRequest, SchedErr, Scheduler};
 use axum::{
     body::Body,
     extract::{Request, State},
@@ -14,10 +14,10 @@ use axum::{
 use bytes::Bytes;
 use loom_core::capability::ApiType;
 use loom_core::error::{ApiError, ErrorCode};
+use loom_core::ids::RequestId;
 use loom_core::openai::{
     request_model, request_stream, required_caps_from_request, ModelList, SSE_DONE,
 };
-use loom_core::ids::RequestId;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Instant;
@@ -98,9 +98,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
     // Body (bounded)
     let body_bytes = match axum::body::to_bytes(req.into_body(), 4 * 1024 * 1024).await {
         Ok(b) => b,
-        Err(_) => {
-            return err(ErrorCode::PayloadTooLarge, "request too large", &request_id)
-        }
+        Err(_) => return err(ErrorCode::PayloadTooLarge, "request too large", &request_id),
     };
     let body: Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
@@ -113,7 +111,11 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
 
     // Scope + model permission
     if !c.scopes.iter().any(|s| s == api.as_str() || s == "*") {
-        return err(ErrorCode::PermissionDenied, "scope not permitted", &request_id);
+        return err(
+            ErrorCode::PermissionDenied,
+            "scope not permitted",
+            &request_id,
+        );
     }
     match s.auth.model_allowed(&c, &model).await {
         Ok(true) => {}
@@ -155,7 +157,15 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         }
     };
 
-    let RequestOutcomeParts { rx, end_rx, trace, dep, client, lease: _lease, cancel } = split(outcome);
+    let RequestOutcomeParts {
+        rx,
+        end_rx,
+        trace,
+        dep,
+        client,
+        lease: _lease,
+        cancel,
+    } = split(outcome);
     let rid = request_id.clone();
     let key_id = c.api_key_id.clone();
     let usage = s.usage.clone();
@@ -181,7 +191,11 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                     virtual_model_id: String::new(),
                     deployment_id: dep,
                     client_id: client,
-                    status: if meta.status.is_empty() { "aborted".into() } else { meta.status },
+                    status: if meta.status.is_empty() {
+                        "aborted".into()
+                    } else {
+                        meta.status
+                    },
                     queue_wait_ms: 0,
                     ttft_ms: meta.ttft_ms,
                     duration_ms: started2.elapsed().as_millis() as i64,
@@ -229,7 +243,11 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         let _ = cancel2;
     };
 
-    let content_type = if is_sse { "text/event-stream" } else { "application/json" };
+    let content_type = if is_sse {
+        "text/event-stream"
+    } else {
+        "application/json"
+    };
     info!(req = %request_id, model = %model, streaming = is_sse, "request dispatched");
     Response::builder()
         .status(StatusCode::OK)

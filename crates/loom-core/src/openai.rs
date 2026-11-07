@@ -240,8 +240,16 @@ pub struct Usage {
 /// Derive required capabilities from a raw request JSON.
 pub fn required_caps_from_request(body: &Value) -> crate::RequiredCaps {
     let mut req = crate::RequiredCaps::default();
-    if body.get("tools").and_then(|v| v.as_array()).map(|a| !a.is_empty()) == Some(true)
-        || body.get("functions").and_then(|v| v.as_array()).map(|a| !a.is_empty()) == Some(true)
+    if body
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        == Some(true)
+        || body
+            .get("functions")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            == Some(true)
     {
         req.tools = true;
     }
@@ -279,12 +287,17 @@ pub fn request_model(body: &Value) -> Option<&str> {
 
 /// Whether the request asked for streaming.
 pub fn request_stream(body: &Value) -> bool {
-    body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false)
+    body.get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 /// SSE frame prefix helper.
 pub fn sse_data_line(v: &Value) -> String {
-    format!("data: {}\n\n", serde_json::to_string(v).unwrap_or_else(|_| json!({}).to_string()))
+    format!(
+        "data: {}\n\n",
+        serde_json::to_string(v).unwrap_or_else(|_| json!({}).to_string())
+    )
 }
 
 pub const SSE_DONE: &str = "data: [DONE]\n\n";

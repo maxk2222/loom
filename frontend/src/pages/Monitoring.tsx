@@ -11,6 +11,7 @@ const TOOLTIP_STYLE = { background: "#10161d", border: "1px solid #1f2a36", bord
 export default function MonitoringPage() {
   const usage = useQuery({ queryKey: ["usage"], queryFn: () => api.get<{ usage_24h: UsageStat[] }>("/api/stats/usage"), refetchInterval: 10000 });
   const hist = useQuery({ queryKey: ["hist"], queryFn: () => api.get<{ requests: HistoryRow[] }>("/api/history?limit=200"), refetchInterval: 5000 });
+  const versions = useQuery({ queryKey: ["cfgvers"], queryFn: () => api.get<{ versions: { id: number; entity: string; entity_id: string; change: unknown; actor: string; created_at: string }[] }>("/api/config-versions"), refetchInterval: 15000 });
 
   const data = (usage.data?.usage_24h ?? []).map((u) => ({
     project: u.project_id.slice(0, 8),
@@ -66,6 +67,23 @@ export default function MonitoringPage() {
               </tr>
             ))}
             {rows.length === 0 && <tr><td className="td text-center text-muted" colSpan={7}>No history.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+      <Card className="overflow-hidden p-0">
+        <div className="border-b border-border px-4 py-3 text-sm font-medium">Config history</div>
+        <table className="w-full">
+          <thead><tr><th className="th">Time</th><th className="th">Entity</th><th className="th">Entity id</th><th className="th">Actor</th></tr></thead>
+          <tbody>
+            {(versions.data?.versions ?? []).map((v) => (
+              <tr key={v.id}>
+                <td className="td text-muted">{new Date(v.created_at).toLocaleString()}</td>
+                <td className="td">{v.entity}</td>
+                <td className="td font-mono text-xs text-muted">{v.entity_id || "—"}</td>
+                <td className="td text-muted">{v.actor}</td>
+              </tr>
+            ))}
+            {(versions.data?.versions ?? []).length === 0 && <tr><td className="td text-center text-muted" colSpan={4}>No config changes recorded.</td></tr>}
           </tbody>
         </table>
       </Card>

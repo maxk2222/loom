@@ -4,7 +4,7 @@
 //! - `max_concurrent`: total slots (all classes)
 //! - `local_reserve`: slots guaranteed for local priority traffic
 //! - `tier2_max`: max concurrent tier-2 slots (client-enforced:
-//!    tier2_max <= max_concurrent - local_reserve)
+//!   tier2_max <= max_concurrent - local_reserve)
 //!
 //! Admission rules:
 //! - local (priority): admit while `local_active + tier2_active < max_concurrent`.
@@ -16,8 +16,8 @@
 //!
 //! No local queue: admit or reject immediately.
 
-use loom_core::config::DeploymentConfig;
 use loom_core::capability::SharingMode;
+use loom_core::config::DeploymentConfig;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
@@ -346,7 +346,11 @@ impl LocalScheduler {
     /// Find a deployment that can admit a local request for `model_hint`
     /// (deployment name or model name match). Returns candidates sorted by
     /// current free capacity.
-    pub fn local_candidates(&self, model_hint: &str, resolve: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+    pub fn local_candidates(
+        &self,
+        model_hint: &str,
+        resolve: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<String> {
         let map = self.inner.deployments.read().unwrap();
         let mut out: Vec<(String, u32)> = Vec::new();
         for (id, dep) in map.iter() {
@@ -362,19 +366,13 @@ impl LocalScheduler {
                 }
             }
         }
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by_key(|d| std::cmp::Reverse(d.1));
         out.into_iter().map(|(id, _)| id).collect()
     }
 
     /// Cancel an in-flight request by id (admin abort / server cancel).
     pub fn cancel_request(&self, request_id: &str) -> bool {
-        if let Some(tok) = self
-            .inner
-            .request_cancels
-            .read()
-            .unwrap()
-            .get(request_id)
-        {
+        if let Some(tok) = self.inner.request_cancels.read().unwrap().get(request_id) {
             tok.cancel();
             true
         } else {

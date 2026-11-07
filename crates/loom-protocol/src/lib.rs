@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err, clippy::too_many_arguments)]
+
 //! loom-protocol: generated protobuf types + envelope helpers, versioning,
 //! fencing utilities, and message-size limits shared by server and client.
 

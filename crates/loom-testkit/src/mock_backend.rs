@@ -127,15 +127,30 @@ async fn chat(
     st.total_requests.fetch_add(1, Ordering::SeqCst);
     let b = behavior(&st);
     if !b.healthy {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":{"message":"backend unhealthy"}}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":{"message":"backend unhealthy"}})),
+        )
+            .into_response();
     }
     if let Some(code) = b.fail_status {
         let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        return (status, Json(json!({"error":{"message":"injected failure","code":code}}))).into_response();
+        return (
+            status,
+            Json(json!({"error":{"message":"injected failure","code":code}})),
+        )
+            .into_response();
     }
 
-    let model = body.get("model").and_then(|m| m.as_str()).unwrap_or(&st.model).to_string();
-    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let model = body
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or(&st.model)
+        .to_string();
+    let stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     st.in_flight.fetch_add(1, Ordering::SeqCst);
     let st2 = st.clone();
 
@@ -154,7 +169,11 @@ async fn chat(
             let _g = Guard(st2.clone());
             tokio::time::sleep(b.ttft).await;
             for i in 0..b.stream_chunks {
-                let finish = if i + 1 == b.stream_chunks { Some("stop") } else { None };
+                let finish = if i + 1 == b.stream_chunks {
+                    Some("stop")
+                } else {
+                    None
+                };
                 let mut chunk = json!({
                     "id": "chatcmpl-mock",
                     "object": "chat.completion.chunk",

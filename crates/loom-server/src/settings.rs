@@ -69,7 +69,11 @@ impl Settings {
     pub async fn logo_path(&self) -> Result<Option<String>> {
         let b = self.branding().await?;
         Ok(b.get("logo_path").and_then(|v| v.as_str()).map(|s| {
-            format!("{}/branding/{}", self.data_dir, s.rsplit('/').next().unwrap_or(""))
+            format!(
+                "{}/branding/{}",
+                self.data_dir,
+                s.rsplit('/').next().unwrap_or("")
+            )
         }))
     }
 }

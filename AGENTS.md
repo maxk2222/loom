@@ -15,9 +15,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                       # unit tests (no external deps)
 # integration tests need Postgres+Redis (docker compose):
 docker compose -f deploy/docker-compose.yml up -d postgres redis
-LOOM_TEST_DATABASE_URL=postgres://ccl:ccl@localhost:5432/loom_test \
+LOOM_TEST_DATABASE_URL=postgres://loom:loom@localhost:5432/loom_test \
 LOOM_TEST_REDIS_URL=redis://localhost:6379/15 \
-  cargo test -p loom-server --test integration
+  cargo test -p loom-testkit
 ```
 
 ## Dev services

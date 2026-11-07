@@ -1,6 +1,6 @@
-use loom_server::*;
 use axum::routing::get;
 use clap::Parser;
+use loom_server::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::info;
@@ -85,7 +85,9 @@ async fn main() -> anyhow::Result<()> {
                                     .await;
                                 }
                             }
-                            Err(e) => tracing::warn!(client = %cid, error = %e, "hb watcher offline failed"),
+                            Err(e) => {
+                                tracing::warn!(client = %cid, error = %e, "hb watcher offline failed")
+                            }
                         }
                         sess.unregister(&cid).await;
                         sch.wake();
@@ -118,8 +120,12 @@ async fn main() -> anyhow::Result<()> {
         if let Some(t) = grpc_tls {
             let cert = std::fs::read(&t.cert_path).unwrap();
             let key = std::fs::read(&t.key_path).unwrap();
-            b = b.tls_config(tonic::transport::ServerTlsConfig::new()
-                .identity(tonic::transport::Identity::from_pem(cert, key))).unwrap();
+            b = b
+                .tls_config(
+                    tonic::transport::ServerTlsConfig::new()
+                        .identity(tonic::transport::Identity::from_pem(cert, key)),
+                )
+                .unwrap();
         }
         info!(%grpc_addr, "gRPC agent endpoint listening");
         b.add_service(grpc_service::server(svc))
@@ -161,28 +167,41 @@ async fn main() -> anyhow::Result<()> {
         .merge(adm)
         .nest("/ui", dashboard_static::router())
         .route("/healthz", get(|| async { "ok" }))
-        .route("/readyz", get(move || {
-            let p = pool2.clone();
-            let r = rt2.clone();
-            async move {
-                let db_ok = sqlx::query("SELECT 1").execute(&p).await.is_ok();
-                let mut c = r.conn.clone();
-                let rd_ok: bool = redis::cmd("PING")
-                    .query_async::<String>(&mut c)
-                    .await
-                    .map(|v| v == "PONG")
-                    .unwrap_or(false);
-                if db_ok && rd_ok { "ready" } else { "not ready" }
-            }
-        }))
-        .route("/", get(|| async { axum::response::Redirect::permanent("/ui/") }))
+        .route(
+            "/readyz",
+            get(move || {
+                let p = pool2.clone();
+                let r = rt2.clone();
+                async move {
+                    let db_ok = sqlx::query("SELECT 1").execute(&p).await.is_ok();
+                    let mut c = r.conn.clone();
+                    let rd_ok: bool = redis::cmd("PING")
+                        .query_async::<String>(&mut c)
+                        .await
+                        .map(|v| v == "PONG")
+                        .unwrap_or(false);
+                    if db_ok && rd_ok {
+                        "ready"
+                    } else {
+                        "not ready"
+                    }
+                }
+            }),
+        )
+        .route(
+            "/",
+            get(|| async { axum::response::Redirect::permanent("/ui/") }),
+        )
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let http_addr: SocketAddr = cfg.http_bind.parse()?;
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
     info!(%http_addr, "HTTP listening (v1 + api + ui)");
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -193,7 +212,10 @@ fn init_tracing() {
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
     if json {
-        tracing_subscriber::fmt().with_env_filter(filter).json().init();
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .init();
     } else {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }

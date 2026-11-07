@@ -14,9 +14,12 @@ struct Args {
 enum Cmd {
     /// Enroll this workstation at a server (client-side).
     Enroll {
-        #[arg(long)] server: String,
-        #[arg(long)] token: String,
-        #[arg(long, default_value = "")] name: String,
+        #[arg(long)]
+        server: String,
+        #[arg(long)]
+        token: String,
+        #[arg(long, default_value = "")]
+        name: String,
         #[arg(long, env = "LOOM_CONFIG", default_value = "")]
         config: String,
     },
@@ -34,17 +37,23 @@ enum Cmd {
     CreateAdmin {
         #[arg(long, env = "LOOM_DATABASE_URL")]
         database_url: String,
-        #[arg(long)] email: String,
-        #[arg(long)] password: String,
-        #[arg(long, default_value = "Admin")] name: String,
+        #[arg(long)]
+        email: String,
+        #[arg(long)]
+        password: String,
+        #[arg(long, default_value = "Admin")]
+        name: String,
     },
     /// Issue an enrollment token (server-side, direct DB).
     IssueEnrollToken {
         #[arg(long, env = "LOOM_DATABASE_URL")]
         database_url: String,
-        #[arg(long, default_value = "")] label: String,
-        #[arg(long, default_value_t = 1)] max_uses: i32,
-        #[arg(long, default_value_t = 24)] expires_hours: i64,
+        #[arg(long, default_value = "")]
+        label: String,
+        #[arg(long, default_value_t = 1)]
+        max_uses: i32,
+        #[arg(long, default_value_t = 24)]
+        expires_hours: i64,
     },
     /// Print a diagnostics bundle (config paths, versions).
     Diagnostics,
@@ -52,19 +61,26 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "warn".into()),
-    ).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+        )
+        .init();
     match Args::parse().cmd {
-        Cmd::Enroll { server, token, name, config } => {
+        Cmd::Enroll {
+            server,
+            token,
+            name,
+            config,
+        } => {
             let path = if config.is_empty() {
                 loom_core::config::ClientConfig::default();
                 default_config_path()
-            } else { config.into() };
+            } else {
+                config.into()
+            };
             let mut cfg = if path.exists() {
-                toml::from_str::<loom_core::config::ClientConfig>(
-                    &std::fs::read_to_string(&path)?)?
+                toml::from_str::<loom_core::config::ClientConfig>(&std::fs::read_to_string(&path)?)?
             } else {
                 loom_core::config::ClientConfig::default()
             };
@@ -94,7 +110,12 @@ async fn main() -> Result<()> {
             println!("migrations applied");
             Ok(())
         }
-        Cmd::CreateAdmin { database_url, email, password, name } => {
+        Cmd::CreateAdmin {
+            database_url,
+            email,
+            password,
+            name,
+        } => {
             let pool = sqlx::PgPool::connect(&database_url).await?;
             use argon2::password_hash::{rand_core::OsRng, SaltString};
             use argon2::{Argon2, PasswordHasher};
@@ -108,7 +129,12 @@ async fn main() -> Result<()> {
             println!("admin created: {email}");
             Ok(())
         }
-        Cmd::IssueEnrollToken { database_url, label, max_uses, expires_hours } => {
+        Cmd::IssueEnrollToken {
+            database_url,
+            label,
+            max_uses,
+            expires_hours,
+        } => {
             let pool = sqlx::PgPool::connect(&database_url).await?;
             let token = format!("enroll_{}", loom_core::ids::opaque_token(24));
             sqlx::query(
@@ -123,8 +149,16 @@ async fn main() -> Result<()> {
         }
         Cmd::Diagnostics => {
             println!("loom {}", env!("CARGO_PKG_VERSION"));
-            println!("config: {}", std::env::var("LOOM_CONFIG").unwrap_or_else(|_| default_config_path().display().to_string()));
-            println!("platform: {}-{}", std::env::consts::OS, std::env::consts::ARCH);
+            println!(
+                "config: {}",
+                std::env::var("LOOM_CONFIG")
+                    .unwrap_or_else(|_| default_config_path().display().to_string())
+            );
+            println!(
+                "platform: {}-{}",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            );
             Ok(())
         }
     }

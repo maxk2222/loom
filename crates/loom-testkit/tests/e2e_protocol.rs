@@ -32,8 +32,10 @@ fn dep(id: &str, model: &str, max_c: u32, reserve: u32, tier2: u32) -> Deploymen
 }
 
 fn make_cfg(server_url: &str, backend_url: &str, tiers: u32) -> ClientConfig {
-    let mut c = ClientConfig::default();
-    c.name = "test-ws".into();
+    let mut c = ClientConfig {
+        name: "test-ws".into(),
+        ..Default::default()
+    };
     c.server_url = server_url.into();
     c.connector.tls = TlsMode::Off;
     c.connector.heartbeat_secs = 1;
@@ -76,7 +78,11 @@ async fn start_rig(tier2: u32) -> Rig {
 
     let backends = BackendManager::new();
     backends.sync_from_config(&cfg).await;
-    let deps: Vec<_> = cfg.backends.iter().flat_map(|b| b.deployments.clone()).collect();
+    let deps: Vec<_> = cfg
+        .backends
+        .iter()
+        .flat_map(|b| b.deployments.clone())
+        .collect();
     let sched = LocalScheduler::new(cfg.sharing_enabled);
     sched.sync_deployments(&deps);
 
@@ -86,7 +92,12 @@ async fn start_rig(tier2: u32) -> Rig {
         tokio::spawn(async move { conn.run().await });
     }
     // wait for session
-    let up = wait_until(|| async { connector.is_connected() }, Duration::from_secs(10), Duration::from_millis(20)).await;
+    let up = wait_until(
+        || async { connector.is_connected() },
+        Duration::from_secs(10),
+        Duration::from_millis(20),
+    )
+    .await;
     assert!(up, "client did not connect");
 
     Rig {
@@ -143,11 +154,8 @@ async fn e2e_reject_when_tier2_full() {
         .await;
     // assignment may fail outright (no session send) or receive a reject ack —
     // mock returns error only when control send fails; client acks reject.
-    match assigned {
-        Ok(rx) => {
-            let _ = rx.await; // if it resolves, request never produces data
-        }
-        Err(_) => {} // control unavailable also acceptable — but with 0 slots
+    if let Ok(rx) = assigned {
+        let _ = rx.await; // if it resolves, request never produces data
     }
     // capacity snapshot must show no free tier-2
     let snap = rig.sched.capacity_snapshot();
@@ -174,7 +182,9 @@ async fn e2e_config_push_applied() {
     // client acks config — captured by mock
     let captured = rig.server.captured().await;
     assert!(
-        captured.iter().any(|c| c.contains("config") || c.contains("ack")),
+        captured
+            .iter()
+            .any(|c| c.contains("config") || c.contains("ack")),
         "expected config ack, got {captured:?}"
     );
 }

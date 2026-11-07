@@ -160,7 +160,11 @@ impl ClientRegistry {
         let mut c = self.rt.conn.clone();
         for cap in caps {
             let key = self.rt.k(&format!("dep:{}", cap.deployment_id));
-            let state = if cap.accepting { "available" } else { "draining" };
+            let state = if cap.accepting {
+                "available"
+            } else {
+                "draining"
+            };
             let _: () = redis::cmd("HSET")
                 .arg(&key)
                 .arg("tier2_total")
@@ -190,13 +194,12 @@ impl ClientRegistry {
     pub async fn client_offline(&self, client_id: &str) -> Result<(Vec<String>, Vec<String>)> {
         let mut c = self.rt.conn.clone();
         // find dep ids for this client
-        let dep_ids: Vec<String> = sqlx::query_scalar(
-            "SELECT id::text FROM deployments WHERE client_id = $1::uuid",
-        )
-        .bind(client_id)
-        .fetch_all(&self.db)
-        .await
-        .unwrap_or_default();
+        let dep_ids: Vec<String> =
+            sqlx::query_scalar("SELECT id::text FROM deployments WHERE client_id = $1::uuid")
+                .bind(client_id)
+                .fetch_all(&self.db)
+                .await
+                .unwrap_or_default();
         let _: () = redis::cmd("HSET")
             .arg(self.rt.k(&format!("client:{client_id}")))
             .arg("online")
@@ -235,8 +238,14 @@ impl ClientRegistry {
         }
         Ok(Some(DepRuntime {
             state: m.get("state").cloned().unwrap_or_default(),
-            tier2_free: m.get("tier2_free").and_then(|v| v.parse().ok()).unwrap_or(0),
-            tier2_total: m.get("tier2_total").and_then(|v| v.parse().ok()).unwrap_or(0),
+            tier2_free: m
+                .get("tier2_free")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            tier2_total: m
+                .get("tier2_total")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             client_id: m.get("client_id").cloned().unwrap_or_default(),
         }))
     }
@@ -244,11 +253,10 @@ impl ClientRegistry {
     /// All deployments whose runtime state is `available`.
     pub async fn available_deployments(&self) -> Result<Vec<String>> {
         // Deployments live in Postgres (identity); runtime availability in Redis.
-        let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT id::text FROM deployments WHERE enabled = true",
-        )
-        .fetch_all(&self.db)
-        .await?;
+        let ids: Vec<String> =
+            sqlx::query_scalar("SELECT id::text FROM deployments WHERE enabled = true")
+                .fetch_all(&self.db)
+                .await?;
         let mut out = Vec::new();
         for id in ids {
             if let Some(rt) = self.dep_runtime(&id).await? {
@@ -354,11 +362,14 @@ async fn write_dep_runtime(
     }
     // capabilities JSON for routing filter
     if let Some(cp) = &d.capabilities {
-        pipe.arg("capabilities").arg(serde_json::to_string(&json!({
-            "chat": cp.chat, "completions": cp.completions, "embeddings": cp.embeddings,
-            "tools": cp.tools, "vision": cp.vision, "json_mode": cp.json_mode,
-            "streaming": cp.streaming, "context_length": cp.context_length,
-        })).unwrap_or_default());
+        pipe.arg("capabilities").arg(
+            serde_json::to_string(&json!({
+                "chat": cp.chat, "completions": cp.completions, "embeddings": cp.embeddings,
+                "tools": cp.tools, "vision": cp.vision, "json_mode": cp.json_mode,
+                "streaming": cp.streaming, "context_length": cp.context_length,
+            }))
+            .unwrap_or_default(),
+        );
     }
     let _: () = pipe.ignore().query_async(c).await?;
     Ok(())

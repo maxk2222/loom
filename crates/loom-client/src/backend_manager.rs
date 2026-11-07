@@ -45,6 +45,12 @@ struct DeploymentEntry {
     health: Arc<RwLock<Health>>,
 }
 
+impl Default for BackendManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BackendManager {
     pub fn new() -> Self {
         let http = reqwest::Client::builder()
@@ -135,7 +141,9 @@ impl BackendManager {
         for bid in backend_ids {
             let adapter_health = {
                 let backends = self.inner.backends.read().await;
-                let Some(be) = backends.get(&bid) else { continue };
+                let Some(be) = backends.get(&bid) else {
+                    continue;
+                };
                 if !be.cfg.enabled {
                     continue;
                 }
@@ -182,7 +190,14 @@ impl BackendManager {
 
     /// Force re-probe all deployments of a backend.
     pub async fn reprobe(&self) {
-        let dep_ids: Vec<String> = self.inner.deployments.read().await.keys().cloned().collect();
+        let dep_ids: Vec<String> = self
+            .inner
+            .deployments
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect();
         for did in dep_ids {
             let (backend_id, model) = {
                 let deps = self.inner.deployments.read().await;
@@ -261,13 +276,17 @@ impl BackendManager {
         let (backend_id, model) = {
             let deps = self.inner.deployments.read().await;
             let Some(d) = deps.get(dep_id) else {
-                return Err(AdapterError::Protocol(format!("unknown deployment {dep_id}")));
+                return Err(AdapterError::Protocol(format!(
+                    "unknown deployment {dep_id}"
+                )));
             };
             (d.backend_id.clone(), d.cfg.model_name.clone())
         };
         let backends = self.inner.backends.read().await;
         let Some(be) = backends.get(&backend_id) else {
-            return Err(AdapterError::Connect(format!("missing backend {backend_id}")));
+            return Err(AdapterError::Connect(format!(
+                "missing backend {backend_id}"
+            )));
         };
         if !be.cfg.enabled {
             return Err(AdapterError::Connect("backend disabled".into()));
@@ -310,7 +329,8 @@ impl BackendManager {
         let mut seen = std::collections::BTreeSet::new();
         deps.values()
             .filter(|d| d.cfg.enabled)
-            .filter_map(|d| seen.insert(d.cfg.model_name.clone()).then(|| d.cfg.model_name.clone()))
+            .filter(|d| seen.insert(d.cfg.model_name.clone()))
+            .map(|d| d.cfg.model_name.clone())
             .collect()
     }
 

@@ -1,6 +1,10 @@
 //! Embedded dashboard assets (server variant build of frontend).
 
-use axum::{response::{Html, IntoResponse}, routing::get, Router};
+use axum::{
+    response::{Html, IntoResponse},
+    routing::get,
+    Router,
+};
 
 #[derive(rust_embed::Embed)]
 #[folder = "../../frontend/dist/"]
@@ -37,12 +41,21 @@ fn serve(p: &str) -> String {
 }
 
 fn mime(p: &str) -> &'static str {
-    if p.ends_with(".html") { "text/html; charset=utf-8" }
-    else if p.ends_with(".js") || p.ends_with(".mjs") { "text/javascript" }
-    else if p.ends_with(".css") { "text/css" }
-    else if p.ends_with(".svg") { "image/svg+xml" }
-    else if p.ends_with(".png") { "image/png" }
-    else if p.ends_with(".woff2") { "font/woff2" }
-    else if p.ends_with(".json") { "application/json" }
-    else { "application/octet-stream" }
+    if p.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if p.ends_with(".js") || p.ends_with(".mjs") {
+        "text/javascript"
+    } else if p.ends_with(".css") {
+        "text/css"
+    } else if p.ends_with(".svg") {
+        "image/svg+xml"
+    } else if p.ends_with(".png") {
+        "image/png"
+    } else if p.ends_with(".woff2") {
+        "font/woff2"
+    } else if p.ends_with(".json") {
+        "application/json"
+    } else {
+        "application/octet-stream"
+    }
 }

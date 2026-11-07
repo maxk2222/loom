@@ -11,6 +11,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tonic::Streaming;
 
+type DataStreamPair = (Streaming<DataFrame>, mpsc::Sender<DataFrame>);
+
 #[derive(Default)]
 pub struct SessionManager {
     inner: Mutex<Inner>,
@@ -22,8 +24,7 @@ struct Inner {
     sessions: HashMap<String, mpsc::Sender<ServerEnvelope>>,
     /// request_id -> correlator for the incoming RequestData stream pair:
     /// (inbound client stream, outbound server->client sender).
-    pending_data:
-        HashMap<String, oneshot::Sender<(Streaming<DataFrame>, mpsc::Sender<DataFrame>)>>,
+    pending_data: HashMap<String, oneshot::Sender<DataStreamPair>>,
 }
 
 impl SessionManager {
@@ -60,10 +61,7 @@ impl SessionManager {
     }
 
     /// Register expectation of a client data stream for a request.
-    pub async fn expect_data(
-        &self,
-        request_id: &str,
-    ) -> oneshot::Receiver<(Streaming<DataFrame>, mpsc::Sender<DataFrame>)> {
+    pub async fn expect_data(&self, request_id: &str) -> oneshot::Receiver<DataStreamPair> {
         let (tx, rx) = oneshot::channel();
         self.inner
             .lock()

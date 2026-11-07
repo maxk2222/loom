@@ -34,7 +34,8 @@ impl BackendAdapter for VllmAdapter {
 
     async fn list_models(&self) -> Result<Vec<String>, AdapterError> {
         let url = format!("{}/v1/models", self.endpoint());
-        let v = common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(10)).await?;
+        let v =
+            common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(10)).await?;
         Ok(common::parse_openai_models(&v))
     }
 
@@ -44,7 +45,7 @@ impl BackendAdapter for VllmAdapter {
             chat: true,
             completions: true,
             streaming: true,
-            tools: true, // vLLM supports tool calling for models that advertise it
+            tools: true,     // vLLM supports tool calling for models that advertise it
             json_mode: true, // guided decoding
             ..Default::default()
         };
@@ -52,8 +53,11 @@ impl BackendAdapter for VllmAdapter {
 
         // Vision detection: model name heuristics + /v1/models metadata if any.
         let lower = model.to_lowercase();
-        if lower.contains("vl") || lower.contains("vision") || lower.contains("llava")
-            || lower.contains("qwen2-vl") || lower.contains("pixtral")
+        if lower.contains("vl")
+            || lower.contains("vision")
+            || lower.contains("llava")
+            || lower.contains("qwen2-vl")
+            || lower.contains("pixtral")
         {
             caps.vision = true;
             caps.modalities.insert("image".into());

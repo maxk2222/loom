@@ -16,8 +16,8 @@ use axum::{
     Json, Router,
 };
 use loom_core::capability::ApiType;
-use loom_core::openai::{request_model, required_caps_from_request, ModelList};
 use loom_core::error::{ApiError, ErrorCode};
+use loom_core::openai::{request_model, required_caps_from_request, ModelList};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -56,26 +56,38 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/models", get(openai_models))
         // local admin
         .route("/local/api/status", get(admin_status))
-        .route("/local/api/config", get(admin_get_config).put(admin_put_config))
-        .route("/local/api/backends", get(admin_list_backends).post(admin_add_backend))
+        .route(
+            "/local/api/config",
+            get(admin_get_config).put(admin_put_config),
+        )
+        .route(
+            "/local/api/backends",
+            get(admin_list_backends).post(admin_add_backend),
+        )
         .route(
             "/local/api/backends/{id}",
             put(admin_update_backend).delete(admin_delete_backend),
         )
         .route("/local/api/deployments", get(admin_list_deployments))
         .route("/local/api/requests", get(admin_list_requests))
-        .route("/local/api/requests/{id}/cancel", post(admin_cancel_request))
-        .route("/local/api/sharing", get(admin_get_sharing).put(admin_put_sharing))
+        .route(
+            "/local/api/requests/{id}/cancel",
+            post(admin_cancel_request),
+        )
+        .route(
+            "/local/api/sharing",
+            get(admin_get_sharing).put(admin_put_sharing),
+        )
         .route("/local/api/reprobe", post(admin_reprobe))
         .route("/local/api/connection", get(admin_connection))
         .route("/local/api/metrics", get(admin_metrics))
         .route("/healthz", get(|| async { "ok" }));
 
     let api = if state.cfg_blocking().local_api.serve_ui {
-        api.nest("/ui", crate::local_ui::router())
-            .route("/", get(|| async {
-                axum::response::Redirect::permanent("/ui/")
-            }))
+        api.nest("/ui", crate::local_ui::router()).route(
+            "/",
+            get(|| async { axum::response::Redirect::permanent("/ui/") }),
+        )
     } else {
         api
     };
@@ -126,27 +138,37 @@ async fn auth_middleware(
 // OpenAI endpoints (priority class)
 // ---------------------------------------------------------------------------
 
-async fn openai_chat(State(s): State<AppState>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+async fn openai_chat(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
     openai_inference(s, ApiType::Chat, headers, body).await
 }
-async fn openai_completions(State(s): State<AppState>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+async fn openai_completions(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
     openai_inference(s, ApiType::Completions, headers, body).await
 }
-async fn openai_embeddings(State(s): State<AppState>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+async fn openai_embeddings(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
     openai_inference(s, ApiType::Embeddings, headers, body).await
 }
 
 async fn openai_models(State(s): State<AppState>) -> Json<Value> {
     let models = s.backends.local_models().await;
-    Json(serde_json::to_value(ModelList::of(models, "loom-local")).unwrap_or(json!({"object":"list","data":[]})))
+    Json(
+        serde_json::to_value(ModelList::of(models, "loom-local"))
+            .unwrap_or(json!({"object":"list","data":[]})),
+    )
 }
 
-async fn openai_inference(
-    s: AppState,
-    api: ApiType,
-    headers: HeaderMap,
-    body: Value,
-) -> Response {
+async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: Value) -> Response {
     let request_id = loom_core::ids::RequestId::new().to_string();
     let model = match request_model(&body) {
         Some(m) => m.to_string(),
@@ -162,10 +184,18 @@ async fn openai_inference(
     let req_caps = required_caps_from_request(&body);
     if let Some(caps) = s.backends.capabilities(&dep_id).await {
         if !caps.supports_api(api) {
-            return err(ErrorCode::InvalidRequest, "model does not support this endpoint", &request_id);
+            return err(
+                ErrorCode::InvalidRequest,
+                "model does not support this endpoint",
+                &request_id,
+            );
         }
         if !caps.satisfies(&req_caps) {
-            return err(ErrorCode::InvalidRequest, "deployment lacks required capabilities (tools/vision/json_mode)", &request_id);
+            return err(
+                ErrorCode::InvalidRequest,
+                "deployment lacks required capabilities (tools/vision/json_mode)",
+                &request_id,
+            );
         }
     }
     if let Some(h) = s.backends.health_of(&dep_id).await {
@@ -205,10 +235,7 @@ async fn openai_inference(
 
     let started = Instant::now();
     let cancel = CancellationToken::new();
-    let resp = s
-        .backends
-        .forward(&dep_id, api, body, cancel.clone())
-        .await;
+    let resp = s.backends.forward(&dep_id, api, body, cancel.clone()).await;
 
     let resp = match resp {
         Ok(r) => r,
@@ -279,12 +306,16 @@ async fn openai_inference(
         .status(StatusCode::OK)
         .header("content-type", content_type)
         .header("x-request-id", &request_id)
-        .body(Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        .body(Body::from_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
         .unwrap_or_else(|_| err(ErrorCode::Internal, "response build", &request_id))
 }
 
 fn err(code: ErrorCode, msg: impl Into<String>, request_id: &str) -> Response {
-    let e = ApiError::new(code, msg).with_request_id(request_id).envelope();
+    let e = ApiError::new(code, msg)
+        .with_request_id(request_id)
+        .envelope();
     (
         StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         Json(e),
@@ -333,10 +364,7 @@ struct PutConfigBody {
     config: loom_core::config::ClientConfig,
 }
 
-async fn admin_put_config(
-    State(s): State<AppState>,
-    Json(body): Json<PutConfigBody>,
-) -> Response {
+async fn admin_put_config(State(s): State<AppState>, Json(body): Json<PutConfigBody>) -> Response {
     let mut new_cfg = body.config;
     // Never let the UI overwrite the device credential accidentally.
     let current = s.cfg.get().await;
@@ -404,7 +432,11 @@ async fn admin_add_backend(State(s): State<AppState>, Json(body): Json<BackendBo
         Ok(_) => {
             let cfg = s.cfg.get().await;
             s.backends.sync_from_config(&cfg).await;
-            let deps: Vec<_> = cfg.backends.iter().flat_map(|b| b.deployments.clone()).collect();
+            let deps: Vec<_> = cfg
+                .backends
+                .iter()
+                .flat_map(|b| b.deployments.clone())
+                .collect();
             s.scheduler.sync_deployments(&deps);
             Json(json!({"ok": true, "id": b.id})).into_response()
         }
@@ -428,7 +460,11 @@ async fn admin_delete_backend(State(s): State<AppState>, Path(id): Path<String>)
         Ok(_) => {
             let cfg = s.cfg.get().await;
             s.backends.sync_from_config(&cfg).await;
-            let deps: Vec<_> = cfg.backends.iter().flat_map(|b| b.deployments.clone()).collect();
+            let deps: Vec<_> = cfg
+                .backends
+                .iter()
+                .flat_map(|b| b.deployments.clone())
+                .collect();
             s.scheduler.sync_deployments(&deps);
             Json(json!({"ok": true})).into_response()
         }
@@ -483,7 +519,10 @@ async fn admin_get_sharing(State(s): State<AppState>) -> Json<SharingState> {
     })
 }
 
-async fn admin_put_sharing(State(s): State<AppState>, Json(body): Json<SharingBody>) -> Json<Value> {
+async fn admin_put_sharing(
+    State(s): State<AppState>,
+    Json(body): Json<SharingBody>,
+) -> Json<Value> {
     if let Some(v) = body.sharing_enabled {
         let _ = s.cfg.update(|c| c.sharing_enabled = v).await;
         s.scheduler.set_sharing_enabled(v);
