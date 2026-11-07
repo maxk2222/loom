@@ -3,20 +3,24 @@ import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { useBranding } from "../lib/branding";
+import { Logo } from "../components/ui";
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center p-4">
+      <div className="auth-bg" />
+      <div className="page-enter w-full max-w-sm">{children}</div>
+    </div>
+  );
+}
 
 function BrandHeader() {
   const b = useBranding();
   return (
     <div className="mb-8 text-center">
-      {b.logo_path ? (
-        <img src={b.logo_path} alt="" className="mx-auto mb-3 h-12 w-12 rounded object-contain" />
-      ) : (
-        <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-lg bg-accent text-xl font-bold text-white">
-          {b.app_name.slice(0, 1)}
-        </div>
-      )}
-      <h1 className="text-xl font-semibold">{b.app_name}</h1>
-      <p className="mt-1 text-sm text-muted">{b.tagline}</p>
+      <Logo size={64} className="mx-auto mb-4" />
+      <h1 className="grad-text text-2xl font-bold tracking-tight">{b.app_name}</h1>
+      <p className="mt-1.5 text-sm text-muted">{b.tagline}</p>
     </div>
   );
 }
@@ -43,25 +47,36 @@ export function Login() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center p-4">
-      <div className="w-full max-w-sm">
-        <BrandHeader />
-        <form onSubmit={submit} className="card space-y-4 p-6">
-          <div>
-            <label className="label">Email</label>
-            <input className="input" type="email" autoFocus value={email} onChange={(e) => setEmail(e.target.value)} required />
-          </div>
-          <div>
-            <label className="label">Password</label>
-            <input className="input" type="password" value={pw} onChange={(e) => setPw(e.target.value)} required />
-          </div>
-          {err && <div className="text-sm text-err">{err}</div>}
-          <button className="btn-primary w-full justify-center" disabled={busy}>
-            {busy ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
-      </div>
-    </div>
+    <Shell>
+      <BrandHeader />
+      <form onSubmit={submit} className="card space-y-4 p-6">
+        <div>
+          <label className="label">Email</label>
+          <input
+            className="input"
+            type="email"
+            autoFocus
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+        </div>
+        <div>
+          <label className="label">Password</label>
+          <input
+            className="input"
+            type="password"
+            value={pw}
+            onChange={(e) => setPw(e.target.value)}
+            required
+          />
+        </div>
+        {err && <div className="rounded-lg bg-err/10 px-3 py-2 text-sm text-err">{err}</div>}
+        <button className="btn-primary w-full justify-center" disabled={busy}>
+          {busy ? "Signing in…" : "Sign in"}
+        </button>
+      </form>
+    </Shell>
   );
 }
 
@@ -90,34 +105,32 @@ export function Setup() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center p-4">
-      <div className="w-full max-w-sm">
-        <BrandHeader />
-        <form onSubmit={submit} className="card space-y-4 p-6">
-          <h2 className="text-sm font-medium text-muted">Create the first administrator</h2>
-          <div>
-            <label className="label">Display name</label>
-            <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
-          </div>
-          <div>
-            <label className="label">Email</label>
-            <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-          </div>
-          <div>
-            <label className="label">Password (min. 8 chars)</label>
-            <input className="input" type="password" minLength={8} value={pw} onChange={(e) => setPw(e.target.value)} required />
-          </div>
-          <div>
-            <label className="label">Confirm password</label>
-            <input className="input" type="password" minLength={8} value={pw2} onChange={(e) => setPw2(e.target.value)} required />
-          </div>
-          {err && <div className="text-sm text-err">{err}</div>}
-          <button className="btn-primary w-full justify-center" disabled={busy}>
-            {busy ? "Creating…" : "Create admin"}
-          </button>
-        </form>
-      </div>
-    </div>
+    <Shell>
+      <BrandHeader />
+      <form onSubmit={submit} className="card space-y-4 p-6">
+        <h2 className="text-sm font-medium text-muted">Create the first administrator</h2>
+        <div>
+          <label className="label">Display name</label>
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">Email</label>
+          <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        </div>
+        <div>
+          <label className="label">Password (min. 8 chars)</label>
+          <input className="input" type="password" minLength={8} value={pw} onChange={(e) => setPw(e.target.value)} required />
+        </div>
+        <div>
+          <label className="label">Confirm password</label>
+          <input className="input" type="password" minLength={8} value={pw2} onChange={(e) => setPw2(e.target.value)} required />
+        </div>
+        {err && <div className="rounded-lg bg-err/10 px-3 py-2 text-sm text-err">{err}</div>}
+        <button className="btn-primary w-full justify-center" disabled={busy}>
+          {busy ? "Creating…" : "Create admin"}
+        </button>
+      </form>
+    </Shell>
   );
 }
 
@@ -127,7 +140,13 @@ export function SetupGate({ children }: { children: React.ReactNode }) {
     queryFn: () => api.get<{ needs_setup: boolean }>("/api/setup/status"),
     retry: false,
   });
-  if (isLoading) return <div className="flex min-h-screen items-center justify-center text-muted">Loading…</div>;
+  if (isLoading)
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="auth-bg" />
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-border border-t-accent" />
+      </div>
+    );
   if (data?.needs_setup) return <Setup />;
   return <>{children}</>;
 }

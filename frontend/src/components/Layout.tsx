@@ -17,6 +17,7 @@ import {
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { api, APP_VARIANT } from "../lib/api";
 import { useBranding } from "../lib/branding";
+import { Logo } from "./ui";
 
 interface NavItem {
   to: string;
@@ -53,27 +54,28 @@ export default function Layout() {
   const logout = async () => {
     try {
       await api.post("/api/auth/logout");
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     nav("/login");
   };
 
   return (
     <div className="flex min-h-screen">
-      <aside className="w-52 shrink-0 border-r border-border bg-panel p-3">
-        <div className="mb-6 flex items-center gap-2 px-1 pt-1">
-          {brand.logo_path ? (
-            <img src={brand.logo_path} alt="" className="h-7 w-7 rounded object-contain" />
-          ) : (
-            <div className="flex h-7 w-7 items-center justify-center rounded bg-accent text-sm font-bold text-white">
-              {brand.app_name.slice(0, 1)}
+      <aside className="flex w-56 shrink-0 flex-col border-r border-border bg-panel/60 backdrop-blur">
+        <div className="grad-line" />
+        <div className="flex items-center gap-2.5 px-4 pb-4 pt-4">
+          <Logo size={30} />
+          <div className="min-w-0">
+            <div className="grad-text text-sm font-bold leading-tight tracking-wide">
+              {brand.app_name}
             </div>
-          )}
-          <div>
-            <div className="text-sm font-semibold leading-tight">{brand.app_name}</div>
-            <div className="text-[10px] text-muted leading-tight">{brand.tagline}</div>
+            <div className="truncate text-[10px] leading-tight text-muted">
+              {APP_VARIANT === "client" ? "Workstation Client" : brand.tagline}
+            </div>
           </div>
         </div>
-        <nav className="space-y-0.5">
+        <nav className="flex-1 space-y-0.5 overflow-y-auto px-2.5">
           {items.map((it) => (
             <NavLink
               key={it.to}
@@ -81,24 +83,46 @@ export default function Layout() {
               end={it.to === "/"}
               className={({ isActive }) =>
                 clsx(
-                  "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors",
-                  isActive ? "bg-accent/15 text-accent" : "text-muted hover:bg-panel2 hover:text-text",
+                  "group relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-all",
+                  isActive
+                    ? "bg-accent/12 text-text"
+                    : "text-muted hover:bg-panel2 hover:text-text",
                 )
               }
             >
-              {it.icon}
-              {it.label}
+              {({ isActive }) => (
+                <>
+                  <span
+                    className={clsx(
+                      "absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full transition-all",
+                      isActive ? "bg-accent opacity-100" : "opacity-0",
+                    )}
+                    style={isActive ? { background: "var(--grad)" } : undefined}
+                  />
+                  <span className={isActive ? "text-accent" : "text-muted/70 group-hover:text-muted"}>
+                    {it.icon}
+                  </span>
+                  {it.label}
+                </>
+              )}
             </NavLink>
           ))}
         </nav>
-        {APP_VARIANT === "server" && (
-          <button onClick={logout} className="btn-ghost mt-6 w-full justify-start px-3">
-            <LogOut size={16} /> Sign out
-          </button>
-        )}
+        <div className="space-y-1 border-t border-border p-2.5">
+          {APP_VARIANT === "server" && (
+            <button onClick={logout} className="btn-ghost w-full justify-start px-3">
+              <LogOut size={16} /> Sign out
+            </button>
+          )}
+          <div className="px-3 pb-1 pt-1 text-[10px] text-muted/50">
+            {APP_VARIANT === "client" ? "loom-client" : "loom-server"} · dark
+          </div>
+        </div>
       </aside>
-      <main className="min-w-0 flex-1 p-6">
-        <Outlet />
+      <main className="min-w-0 flex-1 p-6 lg:p-8">
+        <div className="page-enter mx-auto max-w-6xl">
+          <Outlet />
+        </div>
       </main>
     </div>
   );

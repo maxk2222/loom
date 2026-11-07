@@ -8,8 +8,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (res.status === 401) {
-    if (APP_VARIANT === "server" && !location.pathname.startsWith("/login")) {
-      location.assign("/login");
+    if (APP_VARIANT === "server" && !location.pathname.startsWith("/ui/login")) {
+      location.assign("/ui/login");
     }
     throw new Error("unauthorized");
   }

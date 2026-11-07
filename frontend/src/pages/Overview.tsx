@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, Boxes, Cpu, ListOrdered, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
-import { Stat } from "../components/ui";
+import { LiveBadge, PageHeader, Stat } from "../components/ui";
 import type { ClientRow, Overview } from "../lib/types";
 
 export default function OverviewPage() {
@@ -25,8 +25,12 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-lg font-semibold">Overview</h1>
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
+      <PageHeader
+        title="Overview"
+        desc={`${online.length} of ${d?.clients_total ?? 0} clients online · live via event stream`}
+        actions={<LiveBadge live={online.length > 0} />}
+      />
+      <div className="stagger grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
         <Stat label="Clients online" value={<span className="flex items-center gap-2"><Cpu size={18} className="text-ok" />{online.length}<span className="text-sm text-muted">/ {d?.clients_total ?? 0}</span></span>} />
         <Stat label="Virtual models" value={<span className="flex items-center gap-2"><Boxes size={18} className="text-accent" />{d?.virtual_models ?? 0}</span>} />
         <Stat label="Queued (5m)" value={<span className="flex items-center gap-2"><ListOrdered size={18} className="text-warn" />{d?.queued_5m ?? 0}</span>} />
@@ -41,7 +45,7 @@ export default function OverviewPage() {
             {(clients.data?.clients ?? []).map((c) => (
               <tr key={c.id}>
                 <td className="td">{c.name}</td>
-                <td className="td">{c.online ? <span className="text-ok">online</span> : <span className="text-muted">offline</span>}</td>
+                <td className="td"><LiveBadge live={c.online} /></td>
                 <td className="td text-muted">{c.version || "—"}</td>
                 <td className="td text-muted">{c.platform || "—"}</td>
                 <td className="td text-muted">{c.last_seen_at ? new Date(c.last_seen_at).toLocaleString() : "—"}</td>
