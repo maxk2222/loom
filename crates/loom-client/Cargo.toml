@@ -50,10 +50,13 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 
 [target."cfg(target_os = \"macos\")".dependencies]
 core-foundation = { version = "0.10", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true }
+objc2-app-kit = { version = "0.3.2", optional = true, features = ["std", "objc2-core-foundation", "NSApplication", "NSRunningApplication"] }
 
 [features]
 default = []
-tray = ["dep:tray-icon", "dep:image", "dep:core-foundation"]
+tray = ["dep:tray-icon", "dep:image", "dep:core-foundation", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]
 
 [dev-dependencies]
 loom-testkit.workspace = true

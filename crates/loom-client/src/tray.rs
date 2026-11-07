@@ -74,6 +74,15 @@ pub fn run() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     {
+        // A bare binary has no NSApplication — without one, the status item
+        // renders but its menu never opens on click. Initialize as a menu-bar
+        // agent app (Accessory: no Dock icon, no Cmd-Tab entry).
+        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+        use objc2_foundation::MainThreadMarker;
+        let mtm = MainThreadMarker::new().expect("tray must run on the main thread");
+        let app = NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
         // Menu clicks are delivered through the app run loop — pump it in
         // short bursts so our channel polling stays responsive.
         use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoopRunInMode};
