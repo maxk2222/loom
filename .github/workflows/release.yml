@@ -74,12 +74,24 @@ jobs:
           done
           ls -la "$out"
 
-      - uses: taiki-e/install-action@v2
+      - uses: actions/upload-artifact@v4
         with:
-          tool: minisign
+          name: bin-${{ matrix.arch }}
+          path: out/*
 
-      - name: Sign artifacts (minisign)
-        shell: bash
+  sign-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: rel
+          merge-multiple: true
+
+      - name: Install rsign2 (minisign-compatible signer)
+        run: cargo install rsign2 --locked
+
+      - name: Sign artifacts
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
@@ -90,12 +102,13 @@ jobs:
           fi
           printf '%s' "${MINISIGN_SECRET_KEY}" > /tmp/loom-release.key
           chmod 600 /tmp/loom-release.key
-          for f in out/loom-*; do
+          for f in rel/loom-*; do
             case "$f" in *.sha256|*.minisig) continue;; esac
-            minisign -Sm "$f" -s /tmp/loom-release.key -x "${f}.minisig" -W
+            rsign2 sign "$f" -s /tmp/loom-release.key -W # emits ${f}.minisig
           done
+          ls rel/ | head -30
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: out/*
+          files: rel/*
