@@ -145,11 +145,18 @@ pub async fn download_and_stage(
 /// systemd restart it.
 pub fn apply_staged(staged: &std::path::Path) -> Result<PathBuf> {
     let current = std::env::current_exe().context("current_exe")?;
+    apply_staged_to(staged, &current)
+}
+
+/// Swap `current` with `staged`, keeping a `.prev` backup next to it.
+/// Split from `apply_staged` so tests can drive the swap without being the
+/// running executable.
+pub fn apply_staged_to(staged: &std::path::Path, current: &std::path::Path) -> Result<PathBuf> {
     let prev = current.with_extension("prev");
-    std::fs::rename(&current, &prev).context("backup current binary")?;
-    if let Err(e) = std::fs::rename(staged, &current) {
+    std::fs::rename(current, &prev).context("backup current binary")?;
+    if let Err(e) = std::fs::rename(staged, current) {
         // rollback best-effort
-        let _ = std::fs::rename(&prev, &current);
+        let _ = std::fs::rename(&prev, current);
         return Err(e).context("install staged binary");
     }
     Ok(prev)
@@ -158,11 +165,16 @@ pub fn apply_staged(staged: &std::path::Path) -> Result<PathBuf> {
 /// Roll back to the .prev binary (if present) and exit for restart.
 pub fn rollback() -> Result<()> {
     let current = std::env::current_exe()?;
+    rollback_at(&current)
+}
+
+/// Restore `<current>.prev` over `current`. Split for testability.
+pub fn rollback_at(current: &std::path::Path) -> Result<()> {
     let prev = current.with_extension("prev");
     if !prev.exists() {
         bail!("no previous binary to roll back to");
     }
-    std::fs::rename(&prev, &current)?;
+    std::fs::rename(&prev, current)?;
     Ok(())
 }
 
@@ -209,6 +221,40 @@ fn public_key(cfg: &UpdaterConfig) -> String {
         .unwrap_or_else(|| DEFAULT_UPDATE_PUBKEY.into())
 }
 
+/// Self-update preconditions independent of the network: environment shapes
+/// where a binary swap is either impossible or the wrong mechanism.
+/// Checked *before* downloading so failures are cheap and explicit.
+fn ensure_self_update_supported() -> Result<()> {
+    // Windows locks the running .exe — an in-place rename always fails.
+    if cfg!(windows) {
+        bail!("self-update is not supported on Windows; install the new release manually");
+    }
+    // Inside a container the binary lives on the image layer: a swap would not
+    // survive a restart anyway and typically fails on permissions. The correct
+    // update path is pulling a newer image.
+    if in_container() {
+        bail!("running inside a container — pull a newer image instead of self-updating");
+    }
+    Ok(())
+}
+
+/// Best-effort container detection (Docker, Podman, k8s pods, …).
+fn in_container() -> bool {
+    if std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
+    {
+        return true;
+    }
+    std::fs::read_to_string("/proc/1/cgroup")
+        .map(|c| {
+            c.contains("docker")
+                || c.contains("kubepods")
+                || c.contains("containerd")
+                || c.contains("podman")
+        })
+        .unwrap_or(false)
+}
+
 /// One update cycle: check the manifest; when `force` or `auto_apply` and an
 /// update is available → download, verify, stage, swap, then exit so the
 /// supervisor (systemd/launchd) restarts us on the new binary.
@@ -229,7 +275,26 @@ pub async fn run_once(
     if !st.update_available || !(force || cfg.auto_apply) {
         return Ok(st);
     }
-    let staged = download_and_stage(&mf, &public_key(cfg), stage_dir).await?;
+    // The release demands a newer wire protocol than this build speaks —
+    // installing it would break the client↔server session.
+    if mf.min_version_protocol > loom_protocol::limits::PROTOCOL_VERSION {
+        bail!(
+            "release {} requires protocol v{} but this build speaks v{} — update the server first",
+            mf.version,
+            mf.min_version_protocol,
+            loom_protocol::limits::PROTOCOL_VERSION
+        );
+    }
+    ensure_self_update_supported()?;
+    // Stage next to the running binary: guaranteed same filesystem (rename is
+    // atomic across the swap) and writable wherever a self-updatable install
+    // lives — the config dir is NOT a safe choice (systemd mounts it
+    // read-only under ProtectSystem=strict). `stage_dir` is only a fallback.
+    let stage_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| stage_dir.to_path_buf());
+    let staged = download_and_stage(&mf, &public_key(cfg), &stage_dir).await?;
     info!(version = %mf.version, "update staged; swapping binary and restarting");
     apply_staged(&staged)?; // keeps a .prev backup for manual rollback
     std::process::exit(0);
@@ -265,5 +330,27 @@ imqqDIPsV8ArLIM/Z0azYXQxuB1Hsrejc2NLm9d6DF1Uinc7ZBO9YC0AtUZV1kov9p1u7QEJmtgqHGEW
             manifest_base(&cfg, "http://host:50051"),
             "https://l.example.com"
         );
+    }
+
+    #[test]
+    fn swap_keeps_prev_and_rolls_back() {
+        let dir = std::env::temp_dir().join(format!("loom-upd-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("loom-client");
+        let staged = dir.join("loom-client.new");
+        std::fs::write(&current, b"old-binary").unwrap();
+        std::fs::write(&staged, b"new-binary").unwrap();
+
+        let prev = apply_staged_to(&staged, &current).unwrap();
+        assert_eq!(std::fs::read(&current).unwrap(), b"new-binary");
+        assert_eq!(std::fs::read(&prev).unwrap(), b"old-binary");
+        assert!(!staged.exists());
+
+        rollback_at(&current).unwrap();
+        assert_eq!(std::fs::read(&current).unwrap(), b"old-binary");
+        assert!(!prev.exists());
+        assert!(rollback_at(&current).is_err()); // nothing left to restore
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

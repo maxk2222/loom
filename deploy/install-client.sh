@@ -33,30 +33,39 @@ if [[ "$EUID" -ne 0 ]] && [[ "$OS" == "Linux" ]]; then
   exit 1
 fi
 
-BIN_DIR="${PREFIX}/bin"
-echo ">> Installing binaries to ${BIN_DIR}"
-# Binaries are expected alongside this script (release bundle) or on PATH.
-for bin in loom-client loom; do
+find_bin() {
+  local bin="$1"
   if command -v "$bin" >/dev/null 2>&1; then
-    src="$(command -v "$bin")"
+    command -v "$bin"
   elif [[ -x "./bin/$bin" ]]; then
-    src="./bin/$bin"
+    echo "./bin/$bin"
   else
     echo "!! $bin not found — place release binaries under ./bin/ or PATH" >&2
     exit 1
   fi
-  install -m 0755 "$src" "${BIN_DIR}/${bin}"
-done
+}
 
+BIN_DIR="${PREFIX}/bin"
 if [[ "$OS" == "Linux" ]]; then
   echo ">> Creating ${CONFIG_DIR}, ${DATA_DIR}"
-  mkdir -p "$CONFIG_DIR" "$DATA_DIR"
+  mkdir -p "$CONFIG_DIR" "$DATA_DIR" "${DATA_DIR}/bin"
   chmod 750 "$CONFIG_DIR"
   id -u loom-client &>/dev/null || useradd -r -d "$DATA_DIR" -s /usr/sbin/nologin loom-client
+
+  # The daemon binary lives in the data dir on purpose: the systemd unit uses
+  # ProtectSystem=strict, which makes ${PREFIX} read-only — a binary under
+  # ReadWritePaths is the only location the self-updater may swap in place.
+  # /usr/local/bin/loom-client stays a convenience symlink for manual runs.
+  install -m 0755 "$(find_bin loom-client)" "${DATA_DIR}/bin/loom-client"
   chown -R loom-client:loom-client "$DATA_DIR"
+  install -m 0755 "$(find_bin loom)" "${BIN_DIR}/loom"
+  ln -sf "${DATA_DIR}/bin/loom-client" "${BIN_DIR}/loom-client"
 else
   CONFIG_DIR="${HOME}/Library/Application Support/loom-client"
   mkdir -p "$CONFIG_DIR"
+  for bin in loom-client loom; do
+    install -m 0755 "$(find_bin "$bin")" "${BIN_DIR}/${bin}"
+  done
 fi
 
 CFG="${CONFIG_DIR}/config.toml"
@@ -65,12 +74,10 @@ if [[ ! -f "$CFG" ]]; then
   cat > "$CFG" <<EOF
 name = "${CLIENT_NAME}"
 server_url = "${SERVER_URL}"
-local_api_bind = "127.0.0.1:8391"
-admin_bind = "127.0.0.1:8391"
+sharing_enabled = true
 
-[sharing]
-enabled = true
-default_mode = "auto"
+[local_api]
+bind = "127.0.0.1:8391"
 
 [updater]
 enabled = true
@@ -102,7 +109,7 @@ User=loom-client
 Group=loom-client
 EnvironmentFile=-/etc/loom-client/enroll.env
 Environment=LOOM_CONFIG=/etc/loom-client/config.toml
-ExecStart=/usr/local/bin/loom-client
+ExecStart=/var/lib/loom-client/bin/loom-client
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

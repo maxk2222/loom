@@ -9,7 +9,9 @@ User=loom-client
 Group=loom-client
 EnvironmentFile=-/etc/loom-client/enroll.env
 Environment=LOOM_CONFIG=/etc/loom-client/config.toml
-ExecStart=/usr/local/bin/loom-client
+# The binary lives under ReadWritePaths so the self-updater can swap it in
+# place — /usr/local/bin is read-only under ProtectSystem=strict.
+ExecStart=/var/lib/loom-client/bin/loom-client
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
