@@ -6,7 +6,7 @@ RUN npm ci --no-audit --no-fund
 COPY frontend/ .
 RUN npm run build && npm run build:client
 
-FROM rust:1.88-slim AS rust-build
+FROM rust:1.89-slim AS rust-build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./

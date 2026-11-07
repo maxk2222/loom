@@ -1,0 +1,57 @@
+# LOOM client — standalone Docker deployment.
+#
+# Quick start (Ollama already running on the Docker host):
+#   LOOM_SERVER_URL=http://loom.example.com:50051 \
+#   LOOM_ENROLL_TOKEN=enroll_xxx \
+#   LOOM_MODELS="qwen2.5:0.5b,smollm2:135m" \
+#   docker compose -f docker-compose.client.yml up -d
+#
+# The client container only proxies HTTP to your inference backends — the GPU
+# stays wherever the backend runs (host, another container, another machine).
+services:
+  loom-client:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.client
+    image: loom-client:latest
+    container_name: loom-client
+    restart: unless-stopped
+    environment:
+      LOOM_SERVER_URL: ${LOOM_SERVER_URL:?set LOOM_SERVER_URL to your LOOM server gRPC endpoint}
+      LOOM_ENROLL_TOKEN: ${LOOM_ENROLL_TOKEN:-}
+      LOOM_CLIENT_NAME: ${LOOM_CLIENT_NAME:-docker-node}
+      LOOM_SHARING: ${LOOM_SHARING:-true}
+      LOOM_LOCAL_API_KEY: ${LOOM_LOCAL_API_KEY:-}
+      # Pressure gate: pause tier-2 above these host CPU/RAM percentages.
+      LOOM_PRESSURE_CPU: ${LOOM_PRESSURE_CPU:-0}
+      LOOM_PRESSURE_RAM: ${LOOM_PRESSURE_RAM:-0}
+      LOOM_UNLOAD_MODELS: ${LOOM_UNLOAD_MODELS:-false}
+      # Quick one-backend bootstrap — for more backends mount a config.toml.
+      LOOM_BACKEND_TYPE: ${LOOM_BACKEND_TYPE:-ollama}
+      LOOM_BACKEND_URL: ${LOOM_BACKEND_URL:-http://host.docker.internal:11434}
+      LOOM_MODELS: ${LOOM_MODELS:-}
+    extra_hosts:
+      # Lets LOOM_BACKEND_URL=http://host.docker.internal:… reach services on
+      # the Docker host (native on Docker Desktop, explicit on Linux).
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - loom-client-data:/etc/loom-client
+    ports:
+      # Local dashboard + priority API — loopback-only by default; expose
+      # wider only together with LOOM_LOCAL_API_KEY.
+      - "127.0.0.1:8391:8391"
+    # Host-wide stats: with no memory limit the monitor sees real host
+    # pressure via procfs. Setting mem_limit scopes ram_pct to the container.
+
+  # Optional: run Ollama as a sidecar in the same compose project instead of
+  # on the host. Then use LOOM_BACKEND_URL=http://ollama:11434.
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ollama-data:/root/.ollama
+  #   # deploy.resources reservations for GPU passthrough where available.
+
+volumes:
+  loom-client-data:
+  # ollama-data:

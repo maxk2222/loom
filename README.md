@@ -173,6 +173,38 @@ curl -fsSL https://loom.example.com/install-client.sh | \
 
 The client registers, reports its backends, and appears online within seconds.
 
+### Workstation (Docker)
+
+No native install wanted? The client also ships as a container image — it only
+proxies HTTP to your inference backends, so the GPU stays wherever Ollama,
+llama.cpp or LM Studio actually runs (host, sidecar container, another machine).
+
+```bash
+docker run -d --name loom-client --restart unless-stopped \
+  -e LOOM_SERVER_URL=http://loom.example.com:50051 \
+  -e LOOM_ENROLL_TOKEN=enroll_… \
+  -e LOOM_CLIENT_NAME=docker-node \
+  -e LOOM_BACKEND_URL=http://host.docker.internal:11434 \
+  -e LOOM_MODELS="qwen2.5:0.5b" \
+  --add-host=host.docker.internal:host-gateway \
+  -v loom-client-data:/etc/loom-client \
+  -p 127.0.0.1:8391:8391 \
+  loom-client:latest
+```
+
+On first start the container renders `config.toml` from env vars; afterwards
+the persisted config (incl. the issued device credential) is authoritative —
+edit backends/limits in the dashboard or mount your own `config.toml` instead.
+See `deploy/docker-compose.client.yml` for a ready-made stack incl. an
+optional Ollama sidecar.
+
+> **Pressure gating inside Docker:** the monitor reads procfs, so on a Linux
+> Docker host CPU/RAM stats reflect the *real* host — pressure gating works as
+> intended. Two caveats: a `mem_limit` scopes `ram_pct` to the container's
+> cgroup share, and under Docker Desktop (macOS/Windows) stats measure the
+> Docker VM, not your actual machine — set pressure limits accordingly or use
+> a native client for precise host-pressure behaviour.
+
 ### First request
 
 ```bash

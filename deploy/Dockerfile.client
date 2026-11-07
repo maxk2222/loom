@@ -1,0 +1,37 @@
+# LOOM client image: client-UI build → Rust binary (headless, no tray) → slim runtime.
+#
+# The container only needs outbound HTTPS to local inference backends (Ollama,
+# llama.cpp, LM Studio, …) and to the LOOM server gRPC endpoint — no GPU access
+# is required inside the container itself.
+FROM node:22-slim AS ui-build
+WORKDIR /ui
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ .
+RUN npm run build:client
+
+FROM rust:1.89-slim AS rust-build
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY proto proto
+COPY --from=ui-build /ui/dist-client frontend/dist-client
+RUN cargo build --release -p loom-client && cp target/release/loom-client /out-client
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 10001 -m loom \
+    && mkdir -p /etc/loom-client && chown loom:loom /etc/loom-client
+COPY --from=rust-build /out-client /usr/local/bin/loom-client
+COPY deploy/docker-entrypoint-client.sh /usr/local/bin/docker-entrypoint-client.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint-client.sh
+USER loom
+# LOOM_SERVER_URL / LOOM_ENROLL_TOKEN / LOOM_* vars are read at container
+# start by the entrypoint — not baked into the image.
+ENV LOOM_CONFIG=/etc/loom-client/config.toml \
+    LOOM_LOCAL_API_BIND=0.0.0.0:8391
+VOLUME /etc/loom-client
+EXPOSE 8391
+HEALTHCHECK --interval=15s --timeout=3s --retries=5 CMD curl -fsS http://localhost:8391/healthz || exit 1
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint-client.sh"]
