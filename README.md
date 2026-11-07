@@ -46,7 +46,8 @@ the moment its owner needs the GPU, the offered capacity collapses to zero
 | 🛡️ **Fence-protected** | Fencing tokens + atomic Redis Lua leases kill split-brain double-execution |
 | 📊 **Full observability** | Dark dashboard, live SSE, TTFT p50/p99, per-project usage, audit trail |
 | 🔌 **Real OpenAI API** | Chat · Completions · Embeddings · streaming · tools · vision |
-| 🧩 **Any backend** | vLLM, Ollama, or any OpenAI-compatible server — capabilities auto-probed |
+| 🧩 **Any backend** | vLLM, Ollama, llama.cpp, LM Studio, or any OpenAI-compatible server — capabilities auto-probed |
+| ☁️ **Hosted providers** | Azure OpenAI, Anthropic (translated), OpenRouter/Groq/Together presets — as remote backends (no local compute) |
 
 ---
 

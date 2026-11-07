@@ -184,6 +184,11 @@ impl BackendManager {
                     tokio::spawn(async move {
                         let backends = inner.backends.read().await;
                         if let Some(be) = backends.get(&bid2) {
+                            // Hosted providers hold no local model — warm-up is
+                            // meaningless and would only burn a paid request.
+                            if be.cfg.remote {
+                                return;
+                            }
                             match be.adapter.warm_up(&model).await {
                                 Ok(_) => info!(deployment = %model, "model warmed"),
                                 Err(e) => {

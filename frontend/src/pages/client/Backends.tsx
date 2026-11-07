@@ -24,6 +24,8 @@ interface BackendForm {
   api_key: string;
   has_api_key?: boolean;
   enabled: boolean;
+  remote?: boolean;
+  api_version?: string;
   health_interval_secs: number;
   deployments: DepForm[];
 }
@@ -47,6 +49,8 @@ const EMPTY_BACKEND: BackendForm = {
   endpoint: "",
   api_key: "",
   enabled: true,
+  remote: false,
+  api_version: "2024-10-21",
   health_interval_secs: 15,
   deployments: [{ ...EMPTY_DEP }],
 };
@@ -55,6 +59,23 @@ const TYPE_OPTS = [
   { value: "ollama", label: "Ollama" },
   { value: "vllm", label: "vLLM" },
   { value: "generic_open_ai", label: "OpenAI-compatible" },
+  { value: "llama_cpp", label: "llama.cpp" },
+  { value: "azure_open_ai", label: "Azure OpenAI" },
+  { value: "anthropic", label: "Anthropic" },
+];
+
+// Hosted provider presets: endpoint + type + remote flag only —
+// name/key/models stay user-supplied.
+const PRESETS = [
+  { id: "", label: "custom / self-hosted" },
+  { id: "openrouter", label: "OpenRouter", name: "openrouter", endpoint: "https://openrouter.ai/api", backend_type: "generic_open_ai" },
+  { id: "groq", label: "Groq", name: "groq", endpoint: "https://api.groq.com/openai", backend_type: "generic_open_ai" },
+  { id: "together", label: "Together AI", name: "together", endpoint: "https://api.together.xyz", backend_type: "generic_open_ai" },
+  { id: "fireworks", label: "Fireworks AI", name: "fireworks", endpoint: "https://api.fireworks.ai/inference", backend_type: "generic_open_ai" },
+  { id: "deepinfra", label: "DeepInfra", name: "deepinfra", endpoint: "https://api.deepinfra.com", backend_type: "generic_open_ai" },
+  { id: "openai", label: "OpenAI", name: "openai", endpoint: "https://api.openai.com", backend_type: "generic_open_ai" },
+  { id: "azure", label: "Azure OpenAI", name: "azure", endpoint: "https://YOUR-RESOURCE.openai.azure.com", backend_type: "azure_open_ai" },
+  { id: "anthropic", label: "Anthropic", name: "anthropic", endpoint: "https://api.anthropic.com", backend_type: "anthropic" },
 ];
 const SHARE_OPTS = [
   { value: "shared", label: "shared" },
@@ -95,7 +116,7 @@ export default function BackendsPage() {
     try {
       const r = await api.post<{ ok?: boolean; error?: string; latency_ms?: number; models?: string[] }>(
         "/local/api/backends/test",
-        { endpoint: b.endpoint, api_key: b.api_key, backend_type: b.backend_type },
+        { endpoint: b.endpoint, api_key: b.api_key, backend_type: b.backend_type, api_version: b.api_version },
       );
       setTesting(r);
     } catch (e: any) {
@@ -138,6 +159,7 @@ export default function BackendsPage() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <Badge tone="accent">{b.backend_type}</Badge>
+                  {b.remote && <Badge tone="muted">remote</Badge>}
                   <span className="font-mono text-xs text-muted">{b.endpoint}</span>
                   {b.has_api_key && <Badge tone="muted">api key</Badge>}
                   {!b.enabled && <Badge tone="err">disabled</Badge>}
@@ -186,17 +208,53 @@ export default function BackendsPage() {
       <Modal open={!!editing} title={editing?.id ? "Edit backend" : "Add backend"} onClose={() => { setEditing(null); setTesting(null); }} wide>
         {editing && (
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <Field label="Name">
                 <input className="input" value={editing.name} onChange={(e) => upd(editing, { name: e.target.value })} placeholder="e.g. ollama-main" />
               </Field>
               <Field label="Type">
                 <Select value={editing.backend_type} onChange={(v) => upd(editing, { backend_type: v })} options={TYPE_OPTS} />
               </Field>
+              <Field label="Preset">
+                <Select
+                  value=""
+                  onChange={(v) => {
+                    const p = PRESETS.find(x => x.id === v);
+                    if (p?.id) upd(editing, {
+                      name: editing.name || p.name!,
+                      endpoint: p.endpoint!,
+                      backend_type: p.backend_type!,
+                      remote: true,
+                    });
+                  }}
+                  options={PRESETS.map(p => ({ value: p.id, label: p.label }))}
+                />
+              </Field>
             </div>
             <Field label="Endpoint URL" hint="Base URL, e.g. http://127.0.0.1:11434 or http://gpu-01:8000">
               <input className="input font-mono" value={editing.endpoint} onChange={(e) => upd(editing, { endpoint: e.target.value })} placeholder="http://…" />
             </Field>
+            <div className="flex items-center gap-4">
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-text">
+                <input
+                  type="checkbox"
+                  className="accent-accent"
+                  checked={!!editing.remote}
+                  onChange={(e) => upd(editing, { remote: e.target.checked })}
+                />
+                remote / hosted provider
+                <span className="text-muted">(no local compute — skips auto-load warm-up)</span>
+              </label>
+              {editing.backend_type === "azure_open_ai" && (
+                <Field label="api-version">
+                  <input
+                    className="input w-36 font-mono"
+                    value={editing.api_version ?? "2024-10-21"}
+                    onChange={(e) => upd(editing, { api_version: e.target.value })}
+                  />
+                </Field>
+              )}
+            </div>
             <div className="flex items-end gap-3">
               <Field label={editing.has_api_key || editing.id ? "API key (blank = keep existing)" : "API key (optional)"}>
                 <input

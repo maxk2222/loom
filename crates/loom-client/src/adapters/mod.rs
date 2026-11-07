@@ -12,7 +12,10 @@ use std::pin::Pin;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+pub mod anthropic;
+pub mod azure;
 pub mod generic;
+pub mod llamacpp;
 pub mod ollama;
 pub mod vllm;
 
@@ -98,6 +101,9 @@ pub fn make_adapter(cfg: &BackendConfig, http: reqwest::Client) -> Box<dyn Backe
         BackendType::Vllm => Box::new(vllm::VllmAdapter::new(cfg.clone(), http)),
         BackendType::Ollama => Box::new(ollama::OllamaAdapter::new(cfg.clone(), http)),
         BackendType::GenericOpenAi => Box::new(generic::GenericAdapter::new(cfg.clone(), http)),
+        BackendType::AzureOpenAi => Box::new(azure::AzureAdapter::new(cfg.clone(), http)),
+        BackendType::Anthropic => Box::new(anthropic::AnthropicAdapter::new(cfg.clone(), http)),
+        BackendType::LlamaCpp => Box::new(llamacpp::LlamaCppAdapter::new(cfg.clone(), http)),
     }
 }
 
@@ -128,6 +134,15 @@ pub(crate) mod common {
             req = req.bearer_auth(api_key);
         }
 
+        send_stream(req, cancel).await
+    }
+
+    /// Send a fully-built request and return the raw byte stream. Shared by
+    /// adapters with custom auth/URL schemes (Azure, Anthropic).
+    pub async fn send_stream(
+        req: reqwest::RequestBuilder,
+        cancel: CancellationToken,
+    ) -> Result<BackendResponse, AdapterError> {
         let send = req.send();
         let resp = tokio::select! {
             _ = cancel.cancelled() => return Err(AdapterError::Cancelled),

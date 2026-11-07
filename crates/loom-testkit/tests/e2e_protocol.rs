@@ -49,6 +49,8 @@ fn make_cfg(server_url: &str, backend_url: &str, tiers: u32) -> ClientConfig {
         api_key: String::new(),
         deployments: vec![dep("dep-a", "mock-llama", 4, 1, tiers)],
         enabled: true,
+        remote: false,
+        api_version: String::new(),
         health_interval_secs: 60,
     }];
     c

@@ -115,6 +115,12 @@ pub enum BackendType {
     Vllm,
     Ollama,
     GenericOpenAi,
+    /// Azure OpenAI: `api-key` header + /openai/deployments/{dep} URL scheme.
+    AzureOpenAi,
+    /// Anthropic Messages API (translated to/from OpenAI chat format).
+    Anthropic,
+    /// llama.cpp server: OpenAI-compat + native model load/unload.
+    LlamaCpp,
 }
 
 impl BackendType {
@@ -123,6 +129,9 @@ impl BackendType {
             BackendType::Vllm => "vllm",
             BackendType::Ollama => "ollama",
             BackendType::GenericOpenAi => "generic_openai",
+            BackendType::AzureOpenAi => "azure_openai",
+            BackendType::Anthropic => "anthropic",
+            BackendType::LlamaCpp => "llama_cpp",
         }
     }
 }

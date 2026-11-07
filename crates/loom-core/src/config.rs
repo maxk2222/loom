@@ -194,9 +194,20 @@ pub struct BackendConfig {
     /// Enabled toggle.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Hosted/remote provider (OpenRouter, Groq, Azure, Anthropic, …): no own
+    /// compute — auto-load warm-up and JIT keep-warm are skipped.
+    #[serde(default)]
+    pub remote: bool,
+    /// Azure OpenAI only: api-version query param.
+    #[serde(default = "default_api_version")]
+    pub api_version: String,
     /// Health probe interval seconds.
     #[serde(default = "default_health")]
     pub health_interval_secs: u64,
+}
+
+fn default_api_version() -> String {
+    "2024-10-21".into()
 }
 
 fn default_health() -> u64 {

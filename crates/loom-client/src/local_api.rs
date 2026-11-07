@@ -15,7 +15,8 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use loom_core::capability::ApiType;
+use loom_core::capability::{ApiType, BackendType};
+use loom_core::config::BackendConfig;
 use loom_core::error::{ApiError, ErrorCode};
 use loom_core::openai::{request_model, required_caps_from_request, ModelList};
 use serde::{Deserialize, Serialize};
@@ -589,56 +590,46 @@ struct TestBody {
     api_key: String,
     #[serde(default)]
     backend_type: String,
+    #[serde(default)]
+    api_version: String,
 }
 
 async fn admin_test_backend(State(_s): State<AppState>, Json(b): Json<TestBody>) -> Json<Value> {
     if let Err(e) = validate_endpoint(&b.endpoint) {
         return Json(json!({"ok": false, "error": e}));
     }
-    let path = match b.backend_type.as_str() {
-        "ollama" => "/api/tags",
-        _ => "/v1/models",
+    // Build a throwaway adapter so the test exercises the real URL scheme /
+    // auth headers of the selected backend type.
+    let bt: loom_core::capability::BackendType =
+        serde_json::from_value(json!(b.backend_type)).unwrap_or(BackendType::GenericOpenAi);
+    let cfg = BackendConfig {
+        id: "__test".into(),
+        name: "__test".into(),
+        backend_type: bt,
+        endpoint: b.endpoint.clone(),
+        api_key: b.api_key.clone(),
+        deployments: vec![],
+        enabled: true,
+        remote: true,
+        api_version: if b.api_version.is_empty() {
+            "2024-10-21".into()
+        } else {
+            b.api_version.clone()
+        },
+        health_interval_secs: 15,
     };
-    let url = format!("{}{}", b.endpoint.trim_end_matches('/'), path);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .unwrap_or_default();
-    let mut req = client.get(&url);
-    if !b.api_key.is_empty() {
-        req = req.bearer_auth(&b.api_key);
-    }
+    let adapter = crate::adapters::make_adapter(&cfg, client);
     let t = std::time::Instant::now();
-    match req.send().await {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let body: serde_json::Value = resp.json().await.unwrap_or_default();
-            let models: Vec<String> = if b.backend_type == "ollama" {
-                body["models"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|m| m["name"].as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            } else {
-                body["data"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|m| m["id"].as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
-            Json(json!({
-                "ok": (200..300).contains(&status),
-                "status": status,
-                "latency_ms": t.elapsed().as_millis() as u64,
-                "models": models,
-            }))
-        }
+    match adapter.list_models().await {
+        Ok(models) => Json(json!({
+            "ok": true,
+            "latency_ms": t.elapsed().as_millis(),
+            "models": models,
+        })),
         Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
     }
 }

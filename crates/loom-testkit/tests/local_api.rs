@@ -36,6 +36,8 @@ fn backend(id: &str, url: &str, deps: Vec<DeploymentConfig>) -> BackendConfig {
         api_key: String::new(),
         deployments: deps,
         enabled: true,
+        remote: false,
+        api_version: String::new(),
         health_interval_secs: 60,
     }
 }
