@@ -77,17 +77,28 @@ pub fn run() -> Result<()> {
         // A bare binary has no NSApplication — without one, the status item
         // renders but its menu never opens on click. Initialize as a menu-bar
         // agent app (Accessory: no Dock icon, no Cmd-Tab entry).
-        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-        use objc2_foundation::MainThreadMarker;
+        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
+        use objc2_foundation::{MainThreadMarker, NSDate, NSDefaultRunLoopMode};
         let mtm = MainThreadMarker::new().expect("tray must run on the main thread");
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        app.finishLaunching();
 
-        // Menu clicks are delivered through the app run loop — pump it in
-        // short bursts so our channel polling stays responsive.
-        use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoopRunInMode};
+        // AppKit events only dispatch via nextEventMatchingMask/sendEvent —
+        // a bare CFRunLoop pump does NOT open menus or fire actions.
+        let distant_past = NSDate::distantPast();
         loop {
-            unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 1) };
+            while let Some(ev) = unsafe {
+                app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                    NSEventMask::Any,
+                    Some(&distant_past),
+                    NSDefaultRunLoopMode,
+                    true,
+                )
+            } {
+                app.sendEvent(&ev);
+            }
+            app.updateWindows();
             if let Ok(ev) = tray_rx.try_recv() {
                 if matches!(ev, TrayIconEvent::DoubleClick { .. }) {
                     open_ui();
@@ -96,6 +107,7 @@ pub fn run() -> Result<()> {
             if let Ok(ev) = menu_rx.try_recv() {
                 handle_menu(ev, &open_id, &quit_id);
             }
+            std::thread::sleep(std::time::Duration::from_millis(30));
         }
     }
     #[cfg(not(target_os = "macos"))]
