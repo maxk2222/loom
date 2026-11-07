@@ -120,6 +120,11 @@ It only ever talks to clients — over a client-initiated, TLS-secured gRPC
 channel — and the client's local admission control has the final word on
 every single request.
 
+> [!IMPORTANT]
+> Local-first is an invariant, not a configuration: the workstation owner
+> always wins. Central requests only ever consume *offered* tier-2 slots,
+> and the offer shrinks to zero automatically under local CPU/RAM pressure.
+
 <details>
 <summary><b>📡 The channel split (click to expand)</b></summary>
 
@@ -161,6 +166,12 @@ docker compose --profile full up -d
 ```
 
 Open `https://localhost/` → the setup wizard creates your first admin.
+
+> [!TIP]
+> The split ports are deliberate: the dashboard/API live on the HTTP port
+> (`8080` by default, behind your TLS proxy), while clients connect to the
+> gRPC port (`50051`) — only the gRPC port needs to be reachable from
+> workstations.
 
 ### Workstation (one command)
 
@@ -308,6 +319,11 @@ config); routing, grants, scopes and rate limits apply exactly like chat.
 Generic OpenAI-compatible and vLLM adapters forward media requests; async
 video *job polling* is not routed yet — creation requests only.
 
+> [!NOTE]
+> Media capabilities are opt-in and strict: a vision/image/audio/video
+> request is never routed to a deployment without the explicit flag —
+> unknown or probed-default capabilities only open the text APIs.
+
 **Readiness-aware routing.** Clients probe their backends every ~10s —
 endpoint health, installed models, and (for Ollama, vLLM, llama.cpp) the
 *actually loaded* set. A deployment whose backend is down or whose model was
@@ -322,6 +338,12 @@ deployments re-warm right away and rejoin once resident again.
   their original position
 - Weighted DRR share between projects inside a class
 - Global queue cap → clean `429 overloaded` instead of collapse
+- `429` responses carry **`Retry-After`** — `1s` for concurrency limits,
+  `60s / rpm_limit` for per-minute windows
+- Structural vs. transient shortage: requests whose members are *all*
+  unreachable fail fast (`all deployments unavailable`, `max_attempts`
+  counted) instead of head-of-line blocking their class queue; requests
+  behind merely-*busy* members wait for their deadline
 - At most **2 candidate retries** before stream start — none after (no
   double-generation ever)
 
@@ -342,11 +364,17 @@ deployments re-warm right away and rejoin once resident again.
   (Argon2 + HttpOnly session cookie) — or to keep the API open for local use.
   Alternatively set `local_api.api_key` in `config.toml` (written `0600`) to
   require a Bearer key; both auth paths are optional
+
+> [!WARNING]
+> Treat device credentials and `sk-…` API keys as secrets: they are only
+> shown once at issue time, stored hashed server-side, and a leaked device
+> credential enrolls *workloads*, not people — revoke it in the dashboard
+> (Clients → Suspend) rather than rotating config files.
 - **Prompts and responses are never persisted** — not in Postgres, Redis,
   logs, or metrics
 - gRPC fencing tokens make stale assignments harmless after reconnects
 
-### � Auto-updates (server-triggered, signature-verified)
+### 🔄 Auto-updates (server-triggered, signature-verified)
 
 Tagged releases (`v*`) build signed binaries for Linux/macOS/Windows on
 x86-64 and ARM64 via `.github/workflows/release.yml`. Artifacts are
@@ -379,7 +407,13 @@ x86-64 and ARM64 via `.github/workflows/release.yml`. Artifacts are
   `MINISIGN_SECRET_KEY` repo secret is set (generate with
   `minisign -G -p loom-release.pub -s loom-release.key -W`).
 
-### �📟 The dashboard
+> [!CAUTION]
+> Always swap client binaries **through the updater** — a manual binary
+> replacement bypasses the pending-boot marker, so the watchdog can neither
+> count the boots nor auto-rollback on a crash loop (e.g. a binary built
+> for a newer glibc than the host's).
+
+### 📟 The dashboard
 
 Dark-only, zero build config needed at deploy time: live client status, queue
 depths, virtual-model editor with member management, project/API-key/user
@@ -464,10 +498,15 @@ docs/              ADRs, protocol spec, security model, runbooks
 - [x] Update-check chip in both UIs (compares against latest release)
 - [x] Native client install: systemd (Linux), `.app` bundle + launchd + menu-bar tray (macOS)
 - [x] Installer + self-update pipeline
+- [x] Signed release artifacts (minisign) + staged smoke test + boot-failure
+  watchdog with automatic `.prev` rollback
+- [x] Media endpoints: image generation, TTS/STT/translation, video creation
+- [x] Auto routers: LLM-classified, deterministic `when`-rules and
+  `reasoning_effort` escalation via member `set` overrides
+- [x] API Users: per-user keys, model grants, scopes, RPM/TPM/concurrency
 - [ ] mTLS for agent channel (TLS + device credential today)
 - [ ] TPM metering (best-effort), project quotas
 - [ ] Multi-replica scheduler coordination
-- [ ] Signed release artifacts (minisign)
 
 ---
 

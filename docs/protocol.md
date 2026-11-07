@@ -108,6 +108,17 @@ after reconnect, lease expiry and dispatcher retries.
 - Leases held by a client that goes offline are resolved atomically:
   `reserved` leases requeue their request, `active` leases fail the request.
 
+## Queue semantics (server-side)
+
+- Requests enter a per-priority-class queue when no member has free
+  tier-2 capacity, keeping their original FIFO position across requeues.
+- Shortage kinds are distinguished: a member being **busy** is transient
+  (request waits until its deadline); **all members unreachable** is
+  structural — the request is counted against `max_attempts` and then
+  fails `unavailable`, so it cannot head-of-line block the class.
+- Client-visible `429` responses include `Retry-After`
+  (`1s` concurrency, `60s / rpm_limit` for rate windows).
+
 ## Error codes (data `error` frames / RequestEnd)
 
 `admission_rejected`, `capacity_decreased`, `backend_unavailable`,
