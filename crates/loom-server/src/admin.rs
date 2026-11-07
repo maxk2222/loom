@@ -1613,9 +1613,18 @@ fn member_extras_valid(m: &Value) -> bool {
         "top_k",
         "repetition_penalty",
     ];
+    const EFFORT_LEVELS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
     if let Some(set) = m["set"].as_object() {
         if set.keys().any(|k| !SET_KEYS.contains(&k.as_str())) {
             return false;
+        }
+        // reasoning_effort must be a known level — a typo would otherwise
+        // reach the backend verbatim and mean something undefined.
+        if let Some(e) = set.get("reasoning_effort") {
+            match e.as_str() {
+                Some(v) if EFFORT_LEVELS.contains(&v) => {}
+                _ => return false,
+            }
         }
     } else if !m["set"].is_null() {
         return false;

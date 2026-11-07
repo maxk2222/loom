@@ -125,10 +125,13 @@ impl BackendManager {
     /// Also computes per-deployment tier-2 readiness (backend reachable +
     /// model installed/loaded) and pushes a capacity report on any change so
     /// the server stops routing to stale deployments quickly.
+    /// `inventory_notify` fires when probe results (capabilities) changed —
+    /// those only travel inside full inventory reports.
     pub fn spawn_health_loop(
         &self,
         sched: crate::scheduler::LocalScheduler,
         capacity_notify: std::sync::Arc<tokio::sync::Notify>,
+        inventory_notify: std::sync::Arc<tokio::sync::Notify>,
     ) {
         let this = self.clone();
         tokio::spawn(async move {
@@ -137,8 +140,12 @@ impl BackendManager {
                 tokio::select! {
                     _ = this.inner.cancel.cancelled() => break,
                     _ = tick.tick() => {
-                        if this.health_pass(&sched).await {
+                        let (ready_changed, inv_changed) = this.health_pass(&sched).await;
+                        if ready_changed {
                             capacity_notify.notify_one();
+                        }
+                        if inv_changed {
+                            inventory_notify.notify_one();
                         }
                     }
                 }
@@ -146,9 +153,13 @@ impl BackendManager {
         });
     }
 
-    /// Returns true when any deployment's readiness changed this pass.
-    async fn health_pass(&self, sched: &crate::scheduler::LocalScheduler) -> bool {
+    /// Returns (readiness_changed, inventory_changed): whether any
+    /// deployment's readiness flipped this pass, and whether any
+    /// capability table was newly filled (probe/override) — the latter only
+    /// reaches the server inside a full inventory report.
+    async fn health_pass(&self, sched: &crate::scheduler::LocalScheduler) -> (bool, bool) {
         let mut changed = false;
+        let mut inv_changed = false;
         // Probe each backend; mark deployments accordingly.
         let backend_ids: Vec<String> = self.inner.backends.read().await.keys().cloned().collect();
         for bid in backend_ids {
@@ -213,6 +224,10 @@ impl BackendManager {
                 // and the deployment is enabled+idle (re-warms after recovery).
                 // Keep-alive warm: JIT backends (LM Studio) evict idle models,
                 // so re-warm every ~4 min while healthy rather than once.
+                // Not-loaded retries run on a 60s cadence — fast enough to
+                // re-warm real evictions, but not a 10s hammer against a
+                // model the backend refuses to load.
+                let rewarm_secs = if loaded_ok { 240 } else { 60 };
                 let mut w = de.warmed_at.write().await;
                 if adapter_health != Health::Healthy {
                     *w = None;
@@ -222,10 +237,8 @@ impl BackendManager {
                     // pressure-offloaded model must stay unloaded — the local
                     // path still loads it JIT on demand.
                     && !sched.tier2_gated(&did)
-                    // Re-warm on the 4-min keep-alive cadence OR immediately
-                    // when the model was just evicted (ready flipped false).
-                    && (!loaded_ok
-                        || w.map(|t| t.elapsed().as_secs() >= 240).unwrap_or(true))
+                    && w.map(|t| t.elapsed().as_secs() >= rewarm_secs)
+                        .unwrap_or(true)
                 {
                     *w = Some(std::time::Instant::now());
                     let inner = self.inner.clone();
@@ -252,6 +265,7 @@ impl BackendManager {
                 // own capability table IS the authoritative report.
                 if de.cfg.capability_overrides && de.caps.read().await.is_none() {
                     *de.caps.write().await = Some(de.cfg.capabilities.clone());
+                    inv_changed = true;
                 }
                 // Probe capabilities once (or when empty) unless overridden.
                 let needs_probe = !de.cfg.capability_overrides
@@ -265,6 +279,7 @@ impl BackendManager {
                                 // Manual capability fields from config merge in.
                                 merge_overrides(&mut probed, &de.cfg.capabilities);
                                 *de.caps.write().await = Some(probed);
+                                inv_changed = true;
                             }
                             Err(e) => {
                                 warn!(deployment = %did, error = %e, "capability probe failed");
@@ -274,7 +289,7 @@ impl BackendManager {
                 }
             }
         }
-        changed
+        (changed, inv_changed)
     }
 
     /// Force re-probe all deployments of a backend.

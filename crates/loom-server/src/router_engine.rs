@@ -494,6 +494,37 @@ fn effort_at_least(effort: u8, v: &Value) -> bool {
     effort_level_of(v).is_some_and(|n| effort > 0 && (effort as u64) >= n)
 }
 
+/// Merge member `set` overrides into the request body (gateway, pre-dispatch).
+/// `reasoning_effort` is special-cased: the lowest escalation tier disables
+/// reasoning, and "off" must stick regardless of which request shape the
+/// caller used — flat `reasoning_effort` or Responses-style
+/// `reasoning.effort`. Both fields are set so an object-form override cannot
+/// silently re-enable reasoning against a flat "none".
+/// `model`/`messages`/`stream` can never be hijacked by member config.
+pub fn merge_set_overrides(body: &mut Value, set: &Value) {
+    let (Some(b), Some(over)) = (body.as_object_mut(), set.as_object()) else {
+        return;
+    };
+    for (k, v) in over {
+        if matches!(k.as_str(), "model" | "messages" | "stream") {
+            continue;
+        }
+        b.insert(k.clone(), v.clone());
+        if k == "reasoning_effort" {
+            let effort = v.clone();
+            match b.get_mut("reasoning") {
+                Some(Value::Object(o)) => {
+                    o.insert("effort".into(), effort);
+                }
+                Some(slot) => *slot = json!({"effort": effort}),
+                None => {
+                    b.insert("reasoning".into(), json!({"effort": effort}));
+                }
+            }
+        }
+    }
+}
+
 /// Deterministic pick: first member whose `when` matches, in config order.
 fn heuristic_choice(cfg: &Value, m: &ReqMetrics) -> Result<RouteChoice> {
     let summary = metrics_summary(m);
@@ -859,6 +890,40 @@ mod tests {
         assert!(ch.is_none());
         let ch = pick_member(&c, "choose fast please").unwrap();
         assert_eq!(ch.model, "fast");
+    }
+
+    #[test]
+    fn merge_set_off_sticks_through_both_forms() {
+        // Caller used the object form with high — a flat "none" set must
+        // neutralize it so reasoning cannot stay enabled.
+        let mut body = json!({
+            "model": "x",
+            "reasoning": {"effort": "high", "summary": "auto"},
+            "messages": [],
+        });
+        merge_set_overrides(&mut body, &json!({"reasoning_effort": "none"}));
+        assert_eq!(body["reasoning_effort"], "none");
+        assert_eq!(body["reasoning"]["effort"], "none");
+        assert_eq!(body["reasoning"]["summary"], "auto"); // untouched keys kept
+                                                          // Object form created when absent; scalar `reasoning` replaced.
+        let mut b2 = json!({"model": "x"});
+        merge_set_overrides(
+            &mut b2,
+            &json!({"reasoning_effort": "high", "temperature": 0.2}),
+        );
+        assert_eq!(b2["reasoning"]["effort"], "high");
+        assert_eq!(b2["temperature"], 0.2);
+        let mut b3 = json!({"reasoning": "garbage"});
+        merge_set_overrides(&mut b3, &json!({"reasoning_effort": "none"}));
+        assert_eq!(b3["reasoning"]["effort"], "none");
+        // Hijack keys are never merged.
+        let mut b4 = json!({"model": "a", "messages": [1], "stream": false});
+        merge_set_overrides(
+            &mut b4,
+            &json!({"model": "b", "messages": [], "stream": true}),
+        );
+        assert_eq!(b4["model"], "a");
+        assert_eq!(b4["stream"], false);
     }
 
     #[test]

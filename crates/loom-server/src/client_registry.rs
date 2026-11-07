@@ -11,6 +11,9 @@ use sqlx::PgPool;
 pub struct ClientRegistry {
     pub db: PgPool,
     pub rt: Rt,
+    /// Model routing snapshot — patched live so inventory reports reach the
+    /// scheduler's capability filter without waiting for an admin reload.
+    pub models: crate::model_registry::ModelRegistry,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
@@ -151,6 +154,16 @@ impl ClientRegistry {
         for d in &inv.deployments {
             upsert_deployment(&self.db, client_id, d).await?;
             write_dep_runtime(&mut c, &self.rt, client_id, d, None).await?;
+            // Patch the routing snapshot: without this, fresh probe results
+            // and enabled toggles only exist in Postgres/Redis while the
+            // scheduler keeps filtering on the stale snapshot.
+            let caps = d
+                .capabilities
+                .as_ref()
+                .map(|cp| serde_json::from_value(dep_caps_json(cp)).unwrap_or_default());
+            self.models
+                .patch_deployment(&d.deployment_id, caps, Some(d.enabled))
+                .await;
         }
         // Deployments no longer reported by the client → disable them so they
         // leave the routing pool (soft-delete: usage/history keep FK refs).
@@ -177,6 +190,9 @@ impl ClientRegistry {
                 .query_async(&mut c)
                 .await
                 .unwrap_or(());
+            self.models
+                .patch_deployment(dep_id, None, Some(false))
+                .await;
         }
         self.apply_capacity(client_id, &inv.capacities).await?;
         Ok(())
@@ -345,18 +361,22 @@ pub struct DepRuntime {
     pub pressure_gated: bool,
 }
 
+/// pb::Capabilities → the JSON shape stored in deployments.capabilities and
+/// parsed into loom_core::Capabilities for the routing snapshot.
+fn dep_caps_json(c: &loom_protocol::pb::Capabilities) -> serde_json::Value {
+    json!({
+        "chat": c.chat, "completions": c.completions, "embeddings": c.embeddings,
+        "tools": c.tools, "vision": c.vision, "json_mode": c.json_mode,
+        "streaming": c.streaming, "context_length": c.context_length,
+        "modalities": c.modalities,
+        "images": c.images, "audio_speech": c.audio_speech,
+        "audio_transcription": c.audio_transcription,
+        "audio_translation": c.audio_translation, "video": c.video,
+    })
+}
+
 async fn upsert_deployment(db: &PgPool, client_id: &str, d: &DeploymentReport) -> Result<()> {
-    let caps = d.capabilities.as_ref().map(|c| {
-        json!({
-            "chat": c.chat, "completions": c.completions, "embeddings": c.embeddings,
-            "tools": c.tools, "vision": c.vision, "json_mode": c.json_mode,
-            "streaming": c.streaming, "context_length": c.context_length,
-            "modalities": c.modalities,
-            "images": c.images, "audio_speech": c.audio_speech,
-            "audio_transcription": c.audio_transcription,
-            "audio_translation": c.audio_translation, "video": c.video,
-        })
-    });
+    let caps = d.capabilities.as_ref().map(dep_caps_json);
     sqlx::query(
         "INSERT INTO deployments (id, client_id, name, backend_type, endpoint_url, model_name, capabilities, enabled, reported)
          VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9)
@@ -399,16 +419,11 @@ async fn write_dep_runtime(
     if let Some(s) = state {
         pipe.arg("state").arg(s);
     }
-    // capabilities JSON for routing filter
+    // capabilities JSON for routing filter + admin views — keep in sync
+    // with the full shape written to Postgres.
     if let Some(cp) = &d.capabilities {
-        pipe.arg("capabilities").arg(
-            serde_json::to_string(&json!({
-                "chat": cp.chat, "completions": cp.completions, "embeddings": cp.embeddings,
-                "tools": cp.tools, "vision": cp.vision, "json_mode": cp.json_mode,
-                "streaming": cp.streaming, "context_length": cp.context_length,
-            }))
-            .unwrap_or_default(),
-        );
+        pipe.arg("capabilities")
+            .arg(serde_json::to_string(&dep_caps_json(cp)).unwrap_or_default());
     }
     let _: () = pipe.ignore().query_async(c).await?;
     Ok(())
@@ -420,4 +435,32 @@ pub fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The JSON written to deployments.capabilities / Redis must round-trip
+    /// into loom_core::Capabilities — the scheduler filters on that shape.
+    #[test]
+    fn dep_caps_json_roundtrips_into_core_capabilities() {
+        let pb = loom_protocol::pb::Capabilities {
+            chat: true,
+            vision: true,
+            streaming: true,
+            context_length: 262144,
+            modalities: vec!["image".into()],
+            images: true,
+            audio_speech: true,
+            video: true,
+            ..Default::default()
+        };
+        let caps: loom_core::capability::Capabilities =
+            serde_json::from_value(dep_caps_json(&pb)).unwrap();
+        assert!(caps.vision);
+        assert!(caps.images && caps.audio_speech && caps.video);
+        assert_eq!(caps.context_length, 262144);
+        assert!(caps.modalities.contains("image"));
+    }
 }

@@ -50,6 +50,8 @@ pub struct ConnectorState {
     pub server_version_hint: RwLock<String>,
     /// Notify -> debounced capacity report push.
     pub capacity_notify: std::sync::Arc<Notify>,
+    /// Notify -> full inventory push (probe results, capability changes).
+    pub inventory_notify: std::sync::Arc<Notify>,
     /// Notify -> drop the current session and reconnect (name/url/enabled
     /// changes take effect on the next hello).
     pub reconnect_notify: std::sync::Arc<Notify>,
@@ -78,6 +80,7 @@ impl Connector {
                 session_id: RwLock::new(String::new()),
                 server_version_hint: RwLock::new(String::new()),
                 capacity_notify: std::sync::Arc::new(Notify::new()),
+                inventory_notify: std::sync::Arc::new(Notify::new()),
                 reconnect_notify: std::sync::Arc::new(Notify::new()),
                 ctrl_tx: RwLock::new(None),
                 agent: Mutex::new(None),
@@ -139,13 +142,23 @@ impl Connector {
     /// Main connector loop: connect → session → reconnect.
     pub async fn run(&self) {
         let mut backoff = Duration::from_secs(1);
-        // Debounced capacity-report task.
+        // Debounced report tasks: capacity changes → capacity report;
+        // probe/capability changes → full inventory (server needs caps for
+        // routing filters — without this, probe results only arrived on
+        // reconnect or config writes).
         let state = self.state.clone();
         tokio::spawn(async move {
             loop {
-                state.capacity_notify.notified().await;
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                state.send_capacity_report().await;
+                tokio::select! {
+                    _ = state.capacity_notify.notified() => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        state.send_capacity_report().await;
+                    }
+                    _ = state.inventory_notify.notified() => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        state.push_inventory().await;
+                    }
+                }
             }
         });
 

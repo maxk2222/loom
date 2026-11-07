@@ -34,7 +34,18 @@ pub struct Member {
     pub priority: i64,
     pub weight: i64,
     pub manual_pinned: bool,
-    pub enabled: bool,
+    /// virtual_model_members.enabled (the VM-side toggle).
+    pub member_enabled: bool,
+    /// deployments.enabled (the client-side toggle — changes arrive with
+    /// inventory reports and are patched into the snapshot live).
+    pub dep_enabled: bool,
+}
+
+impl Member {
+    /// Routable only when both sides are enabled.
+    pub fn enabled(&self) -> bool {
+        self.member_enabled && self.dep_enabled
+    }
 }
 
 #[derive(Clone)]
@@ -77,7 +88,8 @@ impl ModelRegistry {
             priority: i32,
             weight: i32,
             manual_pinned: bool,
-            enabled: bool,
+            member_enabled: bool,
+            dep_enabled: bool,
         }
 
         let vms: Vec<VmRow> = sqlx::query_as(
@@ -91,7 +103,7 @@ impl ModelRegistry {
         let members: Vec<MRow> = sqlx::query_as(
             "SELECT m.virtual_model_id, m.deployment_id, d.client_id, d.model_name,
                     d.capabilities, m.priority, m.weight, m.manual_pinned,
-                    (m.enabled AND d.enabled) AS enabled
+                    m.enabled AS member_enabled, d.enabled AS dep_enabled
              FROM virtual_model_members m
              JOIN deployments d ON d.id = m.deployment_id",
         )
@@ -112,7 +124,8 @@ impl ModelRegistry {
                     priority: m.priority as i64,
                     weight: m.weight as i64,
                     manual_pinned: m.manual_pinned,
-                    enabled: m.enabled,
+                    member_enabled: m.member_enabled,
+                    dep_enabled: m.dep_enabled,
                 });
         }
 
@@ -176,7 +189,7 @@ impl ModelRegistry {
             .members
             .iter()
             .filter(|m| {
-                if !m.enabled {
+                if !m.enabled() {
                     return false;
                 }
                 // Unprobed members (reported all-false / empty) are permissive
@@ -203,6 +216,32 @@ impl ModelRegistry {
     pub async fn fallback(&self, vm: &VirtualModel) -> Option<VirtualModel> {
         let id = vm.fallback_virtual_model_id.as_ref()?;
         self.resolve_by_id(id).await
+    }
+
+    /// Patch live deployment attributes (capabilities, enabled flag) into
+    /// the snapshot wherever the deployment appears as a member — without
+    /// this, inventory reports only reach Postgres/Redis while routing
+    /// decisions keep filtering on the stale snapshot until the next
+    /// admin-triggered reload.
+    pub async fn patch_deployment(
+        &self,
+        deployment_id: &str,
+        caps: Option<Capabilities>,
+        dep_enabled: Option<bool>,
+    ) {
+        let mut snap = self.snapshot.write().await;
+        for vm in snap.values_mut() {
+            for m in &mut vm.members {
+                if m.deployment_id == deployment_id {
+                    if let Some(c) = &caps {
+                        m.capabilities = c.clone();
+                    }
+                    if let Some(e) = dep_enabled {
+                        m.dep_enabled = e;
+                    }
+                }
+            }
+        }
     }
 }
 

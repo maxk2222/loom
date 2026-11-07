@@ -29,12 +29,13 @@ async fn main() -> anyhow::Result<()> {
     info!("redis connected, runtime state reset");
 
     let sessions = session::SessionManager::new();
+    let models = model_registry::ModelRegistry::new(pool.clone());
+    models.reload().await?;
     let registry = client_registry::ClientRegistry {
         db: pool.clone(),
         rt: rt.clone(),
+        models: models.clone(),
     };
-    let models = model_registry::ModelRegistry::new(pool.clone());
-    models.reload().await?;
     let sched = scheduler::Scheduler::new(
         rt.clone(),
         cfg.scheduler.clone(),

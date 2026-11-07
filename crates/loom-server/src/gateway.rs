@@ -215,17 +215,9 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                 Ok(ch) => {
                     info!(req = %request_id, router = %model, pick = %ch.model, reason = %ch.reason, "auto-routed");
                     // Member `set` overrides are merged into the request —
-                    // e.g. {"reasoning_effort":"high"} for reasoning
-                    // escalation. `model` is rewritten by dispatch anyway.
-                    if let Some(over) = ch.set.as_object() {
-                        if let Some(b) = body.as_object_mut() {
-                            for (k, v) in over {
-                                if k != "model" && k != "messages" && k != "stream" {
-                                    b.insert(k.clone(), v.clone());
-                                }
-                            }
-                        }
-                    }
+                    // e.g. {"reasoning_effort":"high"} for escalation or
+                    // "none" for the off tier (both API forms normalized).
+                    crate::router_engine::merge_set_overrides(&mut body, &ch.set);
                     let m = ch.model.clone();
                     routed = Some(ch);
                     m

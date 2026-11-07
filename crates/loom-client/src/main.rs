@@ -87,7 +87,11 @@ async fn async_main() -> anyhow::Result<()> {
     scheduler.sync_deployments(&dep_cfgs);
 
     let connector = Connector::new(cfg_store.clone(), backends.clone(), scheduler.clone());
-    backends.spawn_health_loop(scheduler.clone(), connector.state().capacity_notify.clone());
+    backends.spawn_health_loop(
+        scheduler.clone(),
+        connector.state().capacity_notify.clone(),
+        connector.state().inventory_notify.clone(),
+    );
 
     // Pressure monitor: samples cpu/ram, closes tier-2 gates under load and
     // optionally unloads idle models. Stats feed the dashboard.
