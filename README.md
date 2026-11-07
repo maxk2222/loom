@@ -277,10 +277,26 @@ grant on the router name transparently covers all members.
 
 **Deterministic routing.** Routers also support `mode: "heuristic"` — no
 engine model, zero added latency. Each member gets `when` rules over request
-metrics (`chars`, `msgs`, `code`, `images`, `system`); the first matching
-member in list order wins, with a catch-all member or fallback model behind
-it. Rule editing, ordering and a metrics-preview test console live on the
-same dashboard page.
+metrics: `chars`, `est_tokens` (chars/4), `msgs`, `code`, `images`, `audio`,
+`system`, `tools`, `json_mode`, `reasoning` (intent keywords) and `effort`
+(the caller's `reasoning_effort` / `reasoning.effort`, levels `none`…`max`).
+Rule keys are `chars_lt/gte`, `tokens_lt/gte`, `msgs_lt/gte`, the booleans by
+name, `effort_gte`/`effort_lt` (number or level name), plus `any: [rules]`
+(OR) and `not: {rule}` combinators. The first matching member in list order
+wins, with a catch-all member or fallback model behind it.
+
+**Reasoning escalation.** Any member may carry `set` overrides merged into
+the request before dispatch — e.g.
+`{"name":"deep","ref":"vm:qwq","set":{"reasoning_effort":"high"}}` routes to a
+reasoning model *and* raises its effort. Typical escalation ladders:
+`effort_gte: "high"` → reasoning member, `reasoning: true` (detected intent)
+→ reasoning member, `tools: true` → tool-capable member. Allowed `set` keys:
+`reasoning_effort`, `temperature`, `top_p`, `max_tokens`, `top_k`,
+`repetition_penalty`, `presence_penalty`, `frequency_penalty`, `seed`,
+`stop`. Member `tags` (e.g. `["reasoning","vision"]`) are also shown to the
+LLM engine as `[tags]` in its model menu. LLM-mode classifications are
+cached ~2 min per identical prompt+config, and member matching uses
+word-boundary containment to avoid noise misfires.
 
 **Media endpoints.** Beyond chat, virtual models can serve the wider OpenAI
 surface: `POST /v1/images/generations`, `/v1/audio/speech`,

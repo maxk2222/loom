@@ -143,7 +143,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
 
     // Multipart bodies (audio transcription/translation) are forwarded raw;
     // the `model` form field is extracted for routing and grants only.
-    let (body, model) = if api.is_multipart() {
+    let (mut body, model) = if api.is_multipart() {
         let m = match multipart_model(&body_bytes, &content_type).await {
             Some(m) => m,
             None => {
@@ -214,6 +214,18 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
             {
                 Ok(ch) => {
                     info!(req = %request_id, router = %model, pick = %ch.model, reason = %ch.reason, "auto-routed");
+                    // Member `set` overrides are merged into the request —
+                    // e.g. {"reasoning_effort":"high"} for reasoning
+                    // escalation. `model` is rewritten by dispatch anyway.
+                    if let Some(over) = ch.set.as_object() {
+                        if let Some(b) = body.as_object_mut() {
+                            for (k, v) in over {
+                                if k != "model" && k != "messages" && k != "stream" {
+                                    b.insert(k.clone(), v.clone());
+                                }
+                            }
+                        }
+                    }
                     let m = ch.model.clone();
                     routed = Some(ch);
                     m

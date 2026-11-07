@@ -8,17 +8,29 @@ import type { DeploymentRow, VirtualModel } from "../lib/types";
 interface WhenRule {
   chars_lt?: number;
   chars_gte?: number;
+  tokens_lt?: number;
+  tokens_gte?: number;
   msgs_lt?: number;
   msgs_gte?: number;
   code?: boolean;
   images?: boolean;
+  audio?: boolean;
   system?: boolean;
+  tools?: boolean;
+  json_mode?: boolean;
+  reasoning?: boolean;
+  effort_gte?: number | string; // level name or 0..7
+  effort_lt?: number | string;
+  any?: WhenRule[]; // OR — editable via API; rendered read-only here
+  not?: WhenRule; // negation — editable via API
 }
 interface RouterMember {
   ref: string; // "vm:<api_name>" | "dep:<uuid>"
   name: string;
   description: string;
   when?: WhenRule; // heuristic mode: first matching member wins
+  tags?: string[]; // shown to the LLM engine as [tags] in the model menu
+  set?: Record<string, unknown>; // request overrides merged on dispatch
 }
 interface RouterConfig {
   mode: "llm" | "heuristic";
@@ -45,6 +57,12 @@ const TRI = [
   { value: "true", label: "yes" },
   { value: "false", label: "no" },
 ];
+
+// OpenAI reasoning_effort levels — stored as names, the backend maps them.
+const EFFORTS = ["", "none", "minimal", "low", "medium", "high", "xhigh", "max"].map((v) => ({
+  value: v,
+  label: v || "any",
+}));
 
 export default function RoutersPage() {
   const qc = useQueryClient();
@@ -125,10 +143,21 @@ export default function RoutersPage() {
     [members[i], members[j]] = [members[j], members[i]];
     setC({ members });
   };
+  const setSet = (i: number, patch: Record<string, unknown>) => {
+    const members = f.config.members.slice();
+    const s = { ...(members[i].set ?? {}), ...patch };
+    for (const k of Object.keys(s)) if (s[k] === undefined || s[k] === "") delete s[k];
+    members[i] = { ...members[i], set: Object.keys(s).length ? s : undefined };
+    setC({ members });
+  };
   const whenSummary = (w?: WhenRule) => {
     if (!w || Object.keys(w).length === 0) return "catch-all";
+    const fmt = (v: unknown) =>
+      typeof v === "boolean" ? (v ? "yes" : "no")
+        : typeof v === "object" && v !== null ? JSON.stringify(v)
+        : String(v);
     return Object.entries(w)
-      .map(([k, v]) => `${k.replace("_lt", "<").replace("_gte", "≥")} ${typeof v === "number" ? v : v ? "yes" : "no"}`)
+      .map(([k, v]) => `${k.replace("_lt", "<").replace("_gte", "≥")} ${fmt(v)}`)
       .join(" · ");
   };
   const memberLabel = (ref: string) => {
@@ -220,6 +249,9 @@ export default function RoutersPage() {
                     <div><span className="text-muted">picked:</span>{" "}
                       {testRes.pick ? <Badge tone="ok">{testRes.pick.model} ({testRes.pick.reason})</Badge> : <Badge tone="warn">no member matched → fallback</Badge>}
                     </div>
+                    {testRes.pick?.set && Object.keys(testRes.pick.set).length > 0 && (
+                      <div><span className="text-muted">overrides:</span> <code className="text-accent">{JSON.stringify(testRes.pick.set)}</code></div>
+                    )}
                   </>
                 ) : (
                   <div className="text-err">{testRes.error}</div>
@@ -299,25 +331,81 @@ export default function RoutersPage() {
                     </div>
                   </div>
                   {isHeuristic && (
-                    <div className="grid grid-cols-[repeat(4,minmax(70px,1fr)),repeat(3,minmax(64px,1fr))] items-end gap-1.5 border-t border-border/40 pt-2">
-                      {(["chars_lt", "chars_gte", "msgs_lt", "msgs_gte"] as const).map((k) => (
-                        <label key={k} className="text-[10px] text-muted">
-                          {k.replace("_", " ")}
+                    <div className="space-y-1.5 border-t border-border/40 pt-2">
+                      <div className="grid grid-cols-[repeat(4,minmax(70px,1fr)),repeat(4,minmax(60px,1fr))] items-end gap-1.5">
+                        {(["chars_lt", "chars_gte", "tokens_lt", "tokens_gte"] as const).map((k) => (
+                          <label key={k} className="text-[10px] text-muted">
+                            {k.replace("_", " ")}
+                            <input className="input mt-0.5 px-1.5 py-1 font-mono text-[11px]" type="number" min={0}
+                              value={m.when?.[k] ?? ""} placeholder="—"
+                              onChange={(e) => setWhen(i, { [k]: e.target.value === "" ? undefined : Number(e.target.value) })} />
+                          </label>
+                        ))}
+                        {(["code", "images", "audio", "system"] as const).map((k) => (
+                          <label key={k} className="text-[10px] text-muted">
+                            {k}
+                            <Select value={m.when?.[k] === undefined ? "" : String(m.when[k])}
+                              options={TRI}
+                              onChange={(v) => setWhen(i, { [k]: v === "" ? undefined : v === "true" })} />
+                          </label>
+                        ))}
+                      </div>
+                      <div className="grid grid-cols-[repeat(2,minmax(70px,1fr)),repeat(4,minmax(60px,1fr)),minmax(64px,1fr)] items-end gap-1.5">
+                        <label className="text-[10px] text-muted">effort ≥
+                          <Select value={String(m.when?.effort_gte ?? "")} options={EFFORTS}
+                            onChange={(v) => setWhen(i, { effort_gte: v === "" ? undefined : v })} />
+                        </label>
+                        <label className="text-[10px] text-muted">effort &lt;
+                          <Select value={String(m.when?.effort_lt ?? "")} options={EFFORTS}
+                            onChange={(v) => setWhen(i, { effort_lt: v === "" ? undefined : v })} />
+                        </label>
+                        <label className="text-[10px] text-muted">msgs ≥
                           <input className="input mt-0.5 px-1.5 py-1 font-mono text-[11px]" type="number" min={0}
-                            value={m.when?.[k] ?? ""} placeholder="—"
-                            onChange={(e) => setWhen(i, { [k]: e.target.value === "" ? undefined : Number(e.target.value) })} />
+                            value={m.when?.msgs_gte ?? ""} placeholder="—"
+                            onChange={(e) => setWhen(i, { msgs_gte: e.target.value === "" ? undefined : Number(e.target.value) })} />
                         </label>
-                      ))}
-                      {(["code", "images", "system"] as const).map((k) => (
-                        <label key={k} className="text-[10px] text-muted">
-                          {k}
-                          <Select value={m.when?.[k] === undefined ? "" : String(m.when[k])}
-                            options={TRI}
-                            onChange={(v) => setWhen(i, { [k]: v === "" ? undefined : v === "true" })} />
+                        {(["reasoning", "tools", "json_mode"] as const).map((k) => (
+                          <label key={k} className="text-[10px] text-muted">
+                            {k.replace("_", " ")}
+                            <Select value={m.when?.[k] === undefined ? "" : String(m.when[k])}
+                              options={TRI}
+                              onChange={(v) => setWhen(i, { [k]: v === "" ? undefined : v === "true" })} />
+                          </label>
+                        ))}
+                        <label className="text-[10px] text-muted">msgs &lt;
+                          <input className="input mt-0.5 px-1.5 py-1 font-mono text-[11px]" type="number" min={0}
+                            value={m.when?.msgs_lt ?? ""} placeholder="—"
+                            onChange={(e) => setWhen(i, { msgs_lt: e.target.value === "" ? undefined : Number(e.target.value) })} />
                         </label>
-                      ))}
+                      </div>
                     </div>
                   )}
+                  {/* member extras: engine tags + request overrides (escalation) */}
+                  <div className="grid grid-cols-[1fr,minmax(90px,120px),minmax(70px,90px),minmax(80px,100px)] items-end gap-1.5 border-t border-border/40 pt-2">
+                    <label className="text-[10px] text-muted">
+                      tags {!isHeuristic && <span className="text-muted/60">(engine hint)</span>}
+                      <input className="input mt-0.5 px-1.5 py-1 font-mono text-[11px]"
+                        placeholder="reasoning, vision…" value={(m.tags ?? []).join(",")}
+                        onChange={(e) => setMember(i, {
+                          tags: e.target.value.split(",").map((t) => t.trim()).filter(Boolean),
+                        })} />
+                    </label>
+                    <label className="text-[10px] text-muted" title="Override merged into the request when this member is picked — reasoning escalation">
+                      set effort
+                      <Select value={String(m.set?.reasoning_effort ?? "")} options={EFFORTS}
+                        onChange={(v) => setSet(i, { reasoning_effort: v === "" ? undefined : v })} />
+                    </label>
+                    <label className="text-[10px] text-muted">set temp
+                      <input className="input mt-0.5 px-1.5 py-1 font-mono text-[11px]" type="number" step={0.1}
+                        value={m.set?.temperature === undefined ? "" : String(m.set.temperature)} placeholder="—"
+                        onChange={(e) => setSet(i, { temperature: e.target.value === "" ? undefined : Number(e.target.value) })} />
+                    </label>
+                    <label className="text-[10px] text-muted">set max tok
+                      <input className="input mt-0.5 px-1.5 py-1 font-mono text-[11px]" type="number" min={0}
+                        value={m.set?.max_tokens === undefined ? "" : String(m.set.max_tokens)} placeholder="—"
+                        onChange={(e) => setSet(i, { max_tokens: e.target.value === "" ? undefined : Number(e.target.value) })} />
+                    </label>
+                  </div>
                 </Card>
               ))}
               {f.config.members.length === 0 && (

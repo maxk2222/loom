@@ -1555,8 +1555,76 @@ async fn validate_router_cfg(s: &AdminState, cfg: &Value) -> Result<(), StatusCo
                 _ => return Err(StatusCode::BAD_REQUEST),
             }
         }
+        if !when_keys_valid(&m["when"]) || !member_extras_valid(m) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
     }
     Ok(())
+}
+
+/// `when` rule keys — unknown keys would silently never match, so typos are
+/// rejected at write time. Recurses into `any`/`not` sub-rules.
+fn when_keys_valid(when: &Value) -> bool {
+    const KEYS: &[&str] = &[
+        "chars_lt",
+        "chars_gte",
+        "tokens_lt",
+        "tokens_gte",
+        "msgs_lt",
+        "msgs_gte",
+        "code",
+        "images",
+        "audio",
+        "system",
+        "tools",
+        "json_mode",
+        "reasoning",
+        "effort_gte",
+        "effort_lt",
+        "any",
+        "not",
+    ];
+    let Some(o) = when.as_object() else {
+        return when.is_null();
+    };
+    o.iter().all(|(k, v)| {
+        KEYS.contains(&k.as_str())
+            && match k.as_str() {
+                "any" => v.as_array().is_some_and(|a| a.iter().all(when_keys_valid)),
+                "not" => when_keys_valid(v),
+                _ => true,
+            }
+    })
+}
+
+/// Member extras: `set` only allows generation-parameter keys (body merge
+/// must not let a member hijack model/messages/stream); `tags` must be a
+/// string array.
+fn member_extras_valid(m: &Value) -> bool {
+    const SET_KEYS: &[&str] = &[
+        "reasoning_effort",
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "presence_penalty",
+        "frequency_penalty",
+        "seed",
+        "stop",
+        "top_k",
+        "repetition_penalty",
+    ];
+    if let Some(set) = m["set"].as_object() {
+        if set.keys().any(|k| !SET_KEYS.contains(&k.as_str())) {
+            return false;
+        }
+    } else if !m["set"].is_null() {
+        return false;
+    }
+    match &m["tags"] {
+        Value::Null => true,
+        Value::Array(a) => a.iter().all(|t| t.is_string()),
+        _ => false,
+    }
 }
 
 /// Materialize `dep:` member refs into hidden direct VMs. Returns Err(400)
