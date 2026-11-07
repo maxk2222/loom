@@ -239,31 +239,40 @@ impl Scheduler {
 
     async fn enqueue_and_wait(&self, req: PendingRequest) -> Result<RequestOutcome, SchedErr> {
         let rid = req.request_id.to_string();
-        let mut c = self.inner.rt.conn.clone();
-        let res: String = redis::Script::new(crate::lua::QUEUE_ENQUEUE)
-            .key(self.inner.rt.k(&format!("queue:{}", req.prio)))
-            .key(self.inner.rt.k(&format!("req:{rid}")))
-            .key(self.inner.rt.k("queue:count"))
-            .key(self.inner.rt.k("req:watchdog"))
-            .arg(&rid)
-            .arg(req.enqueue_ts)
-            .arg(self.inner.cfg.max_queue as i64)
-            .arg(&req.project_id)
-            .arg(&req.model)
-            .arg(req.prio)
-            .arg(req.deadline_ts)
-            .invoke_async(&mut c)
-            .await
-            .map_err(|e| SchedErr::Backend(e.to_string()))?;
-        if res != "OK" {
-            return Err(SchedErr::QueueFull);
-        }
+        // Register pending BEFORE enqueueing — a dispatcher pop between the
+        // enqueue script and the insert would otherwise drop the request.
         let (done_tx, done_rx) = oneshot::channel();
         self.inner
             .pending
             .lock()
             .await
             .insert(rid.clone(), PendingEntry { req, done_tx });
+        let mut c = self.inner.rt.conn.clone();
+        // pull fields out under the guard, then drop it before the lua await
+        let (prio, ets, proj, model, dl) = {
+            let p = self.inner.pending.lock().await;
+            let r = &p.get(&rid).unwrap().req;
+            (r.prio, r.enqueue_ts, r.project_id.clone(), r.model.clone(), r.deadline_ts)
+        };
+        let res: String = redis::Script::new(crate::lua::QUEUE_ENQUEUE)
+            .key(self.inner.rt.k(&format!("queue:{prio}")))
+            .key(self.inner.rt.k(&format!("req:{rid}")))
+            .key(self.inner.rt.k("queue:count"))
+            .key(self.inner.rt.k("req:watchdog"))
+            .arg(&rid)
+            .arg(ets)
+            .arg(self.inner.cfg.max_queue as i64)
+            .arg(&proj)
+            .arg(&model)
+            .arg(prio)
+            .arg(dl)
+            .invoke_async(&mut c)
+            .await
+            .map_err(|e| SchedErr::Backend(e.to_string()))?;
+        if res != "OK" {
+            self.inner.pending.lock().await.remove(&rid);
+            return Err(SchedErr::QueueFull);
+        }
         self.inner.wake.notify_one();
         let wait = self.inner.cfg.queue_timeout_secs.max(5);
         match tokio::time::timeout(Duration::from_secs(wait), done_rx).await {
@@ -365,17 +374,12 @@ impl Scheduler {
                     let _ = e.done_tx.send(Ok(outcome));
                 }
                 Err(SchedErr::NoCapacity) | Err(SchedErr::NoCandidates) => {
-                    // requeue preserving FIFO position
-                    let PendingEntry { req, done_tx } = e;
-                    if let Err(err) = self.requeue(&req).await {
-                        let _ = done_tx.send(Err(err));
-                        continue;
+                    // requeue preserving FIFO position — pending entry goes
+                    // back first, then the queue re-enqueue (see enqueue_and_wait).
+                    if self.requeue(e, &rid).await {
+                        return; // capacity exhausted → stop dispatching
                     }
-                    self.inner.pending.lock().await.insert(
-                        rid.clone(),
-                        PendingEntry { req, done_tx },
-                    );
-                    return;
+                    continue;
                 }
                 Err(err) => {
                     let _ = e.done_tx.send(Err(err));
@@ -384,8 +388,11 @@ impl Scheduler {
         }
     }
 
-    async fn requeue(&self, req: &PendingRequest) -> Result<(), SchedErr> {
-        let rid = req.request_id.to_string();
+    /// Requeue a popped entry back into its class queue. Returns true when the
+    /// entry was requeued (stop dispatching — capacity exhausted); false when
+    /// the entry was finally failed (caller already notified).
+    async fn requeue(&self, e: PendingEntry, rid: &str) -> bool {
+        let PendingEntry { req, done_tx } = e;
         let mut c = self.inner.rt.conn.clone();
         let attempts: u32 = redis::cmd("HINCRBY")
             .arg(self.inner.rt.k(&format!("req:{rid}")))
@@ -395,24 +402,40 @@ impl Scheduler {
             .await
             .unwrap_or(0);
         if attempts >= self.inner.cfg.max_attempts {
-            return Err(SchedErr::NoCapacity);
+            let _ = done_tx.send(Err(SchedErr::NoCapacity));
+            return false;
         }
-        let _: String = redis::Script::new(crate::lua::QUEUE_ENQUEUE)
-            .key(self.inner.rt.k(&format!("queue:{}", req.prio)))
+        // pending entry back first, then enqueue (no drop race)
+        let (prio, ets, proj, model, dl) =
+            (req.prio, req.enqueue_ts, req.project_id.clone(), req.model.clone(), req.deadline_ts);
+        self.inner
+            .pending
+            .lock()
+            .await
+            .insert(rid.to_string(), PendingEntry { req, done_tx });
+        let res: String = redis::Script::new(crate::lua::QUEUE_ENQUEUE)
+            .key(self.inner.rt.k(&format!("queue:{prio}")))
             .key(self.inner.rt.k(&format!("req:{rid}")))
             .key(self.inner.rt.k("queue:count"))
             .key(self.inner.rt.k("req:watchdog"))
-            .arg(&rid)
-            .arg(req.enqueue_ts) // original ts → FIFO preserved
+            .arg(rid)
+            .arg(ets) // original ts → FIFO preserved
             .arg(self.inner.cfg.max_queue as i64)
-            .arg(&req.project_id)
-            .arg(&req.model)
-            .arg(req.prio)
-            .arg(req.deadline_ts)
+            .arg(&proj)
+            .arg(&model)
+            .arg(prio)
+            .arg(dl)
             .invoke_async(&mut c)
             .await
             .unwrap_or_else(|_| "ERR".into());
-        Ok(())
+        if res != "OK" {
+            // enqueue failed (queue full while retrying) → fail the caller
+            if let Some(e) = self.inner.pending.lock().await.remove(rid) {
+                let _ = e.done_tx.send(Err(SchedErr::QueueFull));
+            }
+            return false;
+        }
+        true
     }
 
     async fn try_dispatch(&self, req: &PendingRequest) -> Result<RequestOutcome, SchedErr> {

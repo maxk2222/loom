@@ -29,6 +29,8 @@ pub struct GatewayState {
     pub scheduler: Scheduler,
     pub models: crate::model_registry::ModelRegistry,
     pub usage: crate::usage::UsageWriter,
+    /// Request deadline (ms) for queued/dispatched requests.
+    pub request_deadline_ms: i64,
 }
 
 pub fn router(state: GatewayState) -> Router {
@@ -141,7 +143,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         project_id: c.project_id.clone(),
         prio: c.priority_class,
         enqueue_ts: now,
-        deadline_ts: now + 600_000,
+        deadline_ts: now + s.request_deadline_ms,
     };
 
     let started = Instant::now();

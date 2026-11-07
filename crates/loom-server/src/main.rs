@@ -43,6 +43,57 @@ async fn main() -> anyhow::Result<()> {
         models.clone(),
     );
     sched.spawn_dispatch_loop();
+    // Heartbeat watcher: mark clients offline after 3 missed heartbeats
+    // (default hb = 10s → offline after ~30s silence without TCP close).
+    {
+        let reg = registry.clone();
+        let sess = sessions.clone();
+        let sch = sched.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+            loop {
+                tick.tick().await;
+                let mut c = reg.rt.conn.clone();
+                for cid in sess.connected_ids().await {
+                    let last: Option<String> = redis::cmd("HGET")
+                        .arg(reg.rt.k(&format!("client:{cid}")))
+                        .arg("last_hb")
+                        .query_async(&mut c)
+                        .await
+                        .unwrap_or(None);
+                    let stale = last
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .map(|t| crate::client_registry::now_ms() - t > 45_000)
+                        .unwrap_or(false);
+                    if stale {
+                        // control loop ended without proper cleanup
+                        match reg.client_offline(&cid).await {
+                            Ok((requeue, fail)) => {
+                                for rid in &requeue {
+                                    sch.handle_assign_ack(rid, false, "client_offline").await;
+                                    sch.drop_expectation(rid).await;
+                                }
+                                for rid in &fail {
+                                    sch.complete_end(
+                                        rid,
+                                        scheduler::EndMeta {
+                                            status: "failed".into(),
+                                            error_code: "client_offline".into(),
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await;
+                                }
+                            }
+                            Err(e) => tracing::warn!(client = %cid, error = %e, "hb watcher offline failed"),
+                        }
+                        sess.unregister(&cid).await;
+                        sch.wake();
+                    }
+                }
+            }
+        });
+    }
     let usage = usage::UsageWriter::new(pool.clone(), cfg.history_retention_days);
     let auth = Arc::new(auth::Auth {
         db: pool.clone(),
@@ -92,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
         scheduler: sched.clone(),
         models: models.clone(),
         usage: usage.clone(),
+        request_deadline_ms: cfg.scheduler.request_deadline_secs as i64 * 1000,
     });
     let adm = admin::router(admin::AdminState {
         db: pool.clone(),
