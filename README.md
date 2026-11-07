@@ -43,6 +43,19 @@ the moment its owner needs the GPU, the offered capacity collapses to zero
 
 ---
 
+
+---
+
+## 🖼️ Screenshots
+
+<div align="center">
+<img src="docs/screenshots/login.png" width="31%" alt="Login"/>
+<img src="docs/screenshots/overview.png" width="31%" alt="Dashboard overview"/>
+<img src="docs/screenshots/client.png" width="31%" alt="Client UI"/>
+<br/>
+<sub>Login · Admin dashboard · Workstation client UI — all dark-only, one codebase, two build variants</sub>
+</div>
+
 ## 🏗️ Architecture
 
 ```mermaid
