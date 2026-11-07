@@ -14,7 +14,8 @@ use tracing::{info, warn};
 pub struct DeploymentInfo {
     pub cfg: DeploymentConfig,
     pub backend_id: String,
-    pub capabilities: Capabilities,
+    /// None = not yet probed (treated permissively).
+    pub capabilities: Option<Capabilities>,
     pub health: Health,
 }
 
@@ -40,7 +41,7 @@ struct BackendEntry {
 struct DeploymentEntry {
     cfg: DeploymentConfig,
     backend_id: String,
-    caps: Arc<RwLock<Capabilities>>,
+    caps: Arc<RwLock<Option<Capabilities>>>,
     health: Arc<RwLock<Health>>,
 }
 
@@ -96,7 +97,7 @@ impl BackendManager {
                 let caps = deployments
                     .remove(&d.id)
                     .map(|e| e.caps)
-                    .unwrap_or_else(|| Arc::new(RwLock::new(Capabilities::default())));
+                    .unwrap_or_else(|| Arc::new(RwLock::new(None)));
                 next_deployments.insert(
                     d.id.clone(),
                     DeploymentEntry {
@@ -158,7 +159,7 @@ impl BackendManager {
                 *de.health.write().await = adapter_health;
                 // Probe capabilities once (or when empty) unless overridden.
                 let needs_probe = !de.cfg.capability_overrides
-                    && de.caps.read().await.context_length == 0
+                    && de.caps.read().await.is_none()
                     && adapter_health != Health::Down;
                 if needs_probe {
                     let backends = self.inner.backends.read().await;
@@ -167,7 +168,7 @@ impl BackendManager {
                             Ok(mut probed) => {
                                 // Manual capability fields from config merge in.
                                 merge_overrides(&mut probed, &de.cfg.capabilities);
-                                *de.caps.write().await = probed;
+                                *de.caps.write().await = Some(probed);
                             }
                             Err(e) => {
                                 warn!(deployment = %did, error = %e, "capability probe failed");
@@ -196,7 +197,7 @@ impl BackendManager {
                         if de.cfg.capability_overrides {
                             merge_overrides(&mut probed, &de.cfg.capabilities);
                         }
-                        *de.caps.write().await = probed;
+                        *de.caps.write().await = Some(probed);
                         info!(deployment = %did, "re-probed capabilities");
                     }
                 }
@@ -295,7 +296,7 @@ impl BackendManager {
                     .map(|b| b.cfg.endpoint.clone())
                     .unwrap_or_default(),
                 model_name: d.cfg.model_name.clone(),
-                capabilities: Some(caps_to_pb(&caps)),
+                capabilities: caps.as_ref().map(caps_to_pb),
                 enabled: d.cfg.enabled,
                 health: health.as_str().into(),
             });
@@ -306,9 +307,10 @@ impl BackendManager {
     /// List exposed model names for the local OpenAI API (deployment names).
     pub async fn local_models(&self) -> Vec<String> {
         let deps = self.inner.deployments.read().await;
+        let mut seen = std::collections::BTreeSet::new();
         deps.values()
             .filter(|d| d.cfg.enabled)
-            .map(|d| d.cfg.name.clone())
+            .filter_map(|d| seen.insert(d.cfg.model_name.clone()).then(|| d.cfg.model_name.clone()))
             .collect()
     }
 
@@ -318,8 +320,9 @@ impl BackendManager {
             let deps = self.inner.deployments.read().await;
             deps.get(dep_id)?.caps.clone()
         };
+        // None covers both "missing" and "not yet probed" (permissive).
         let v = caps.read().await.clone();
-        Some(v)
+        v
     }
 
     /// Health of a deployment.

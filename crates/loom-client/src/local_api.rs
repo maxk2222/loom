@@ -138,7 +138,7 @@ async fn openai_embeddings(State(s): State<AppState>, headers: HeaderMap, Json(b
 
 async fn openai_models(State(s): State<AppState>) -> Json<Value> {
     let models = s.backends.local_models().await;
-    Json(serde_json::to_value(ModelList::of(models, "ccl-local")).unwrap_or(json!({"object":"list","data":[]})))
+    Json(serde_json::to_value(ModelList::of(models, "loom-local")).unwrap_or(json!({"object":"list","data":[]})))
 }
 
 async fn openai_inference(
@@ -157,13 +157,16 @@ async fn openai_inference(
     };
 
     // Capability check.
-    let caps = s.backends.capabilities(&dep_id).await.unwrap_or_default();
+    // Capability check — only enforced when probing succeeded; unknown caps
+    // defer to the backend (its own error surfaces upstream).
     let req_caps = required_caps_from_request(&body);
-    if !caps.supports_api(api) {
-        return err(ErrorCode::InvalidRequest, "model does not support this endpoint", &request_id);
-    }
-    if !caps.satisfies(&req_caps) {
-        return err(ErrorCode::InvalidRequest, "deployment lacks required capabilities (tools/vision/json_mode)", &request_id);
+    if let Some(caps) = s.backends.capabilities(&dep_id).await {
+        if !caps.supports_api(api) {
+            return err(ErrorCode::InvalidRequest, "model does not support this endpoint", &request_id);
+        }
+        if !caps.satisfies(&req_caps) {
+            return err(ErrorCode::InvalidRequest, "deployment lacks required capabilities (tools/vision/json_mode)", &request_id);
+        }
     }
     if let Some(h) = s.backends.health_of(&dep_id).await {
         if h == crate::adapters::Health::Down {

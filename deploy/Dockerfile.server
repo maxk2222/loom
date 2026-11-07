@@ -1,0 +1,33 @@
+# LOOM server image: Rust binary + embedded dashboard + migrations.
+FROM rust:1.88-slim AS rust-build
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev protobuf-compiler && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY proto proto
+COPY migrations migrations
+COPY frontend/dist frontend/dist
+RUN cargo build --release -p loom-server && cp target/release/loom-server /out-server
+
+FROM node:22-slim AS ui-build
+WORKDIR /ui
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ .
+RUN npm run build
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN useradd -r -u 10001 loom
+COPY --from=rust-build /out-server /usr/local/bin/loom-server
+COPY --from=ui-build /ui/dist /var/lib/loom/dashboard
+COPY migrations /opt/loom/migrations
+USER loom
+ENV LOOM_HTTP_BIND=0.0.0.0:8080 \
+    LOOM_GRPC_BIND=0.0.0.0:9443 \
+    LOOM_DATA_DIR=/var/lib/loom \
+    LOOM_DASHBOARD_DIR=/var/lib/loom/dashboard \
+    LOOM_REDIS_PREFIX=loom:prod:
+EXPOSE 8080 9443
+HEALTHCHECK --interval=10s --timeout=3s --retries=5 CMD curl -fsS http://localhost:8080/healthz || exit 1
+ENTRYPOINT ["/usr/local/bin/loom-server"]

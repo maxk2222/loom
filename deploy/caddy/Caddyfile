@@ -1,0 +1,15 @@
+# LOOM dashboard + OpenAI API over HTTPS.
+# Set LOOM_DOMAIN env (default: local dev on :443).
+{$LOOM_DOMAIN:localhost}
+
+{$LOOM_DOMAIN:localhost} {
+	reverse_proxy server:8080
+
+	# Security headers
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy same-origin
+		-Server
+	}
+}

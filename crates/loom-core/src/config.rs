@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::capability::{BackendType, Capabilities, SharingMode};
+pub use crate::capability::{BackendType, Capabilities, SharingMode};
 
 // ---------------------------------------------------------------------------
 // Client local configuration (TOML file, editable via local admin API)

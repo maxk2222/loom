@@ -21,10 +21,13 @@ rust-version = "1.80"
 loom-core = { path = "crates/loom-core" }
 loom-protocol = { path = "crates/loom-protocol" }
 loom-testkit = { path = "crates/loom-testkit" }
+loom-client = { path = "crates/loom-client" }
+loom-server = { path = "crates/loom-server" }
 
 # async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
+tempfile = "3"
 tokio-stream = { version = "0.1", features = ["net"] }
 futures = "0.3"
 futures-util = "0.3"

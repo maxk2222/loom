@@ -1,0 +1,22 @@
+[Unit]
+Description=LOOM Client (local inference node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=loom-client
+Group=loom-client
+EnvironmentFile=-/etc/loom-client/enroll.env
+Environment=LOOM_CONFIG=/etc/loom-client/config.toml
+ExecStart=/usr/local/bin/loom-client
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/loom-client
+
+[Install]
+WantedBy=multi-user.target

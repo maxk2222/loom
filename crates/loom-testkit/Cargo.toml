@@ -28,3 +28,11 @@ rand.workspace = true
 reqwest.workspace = true
 async-trait.workspace = true
 http = "1"
+
+[dev-dependencies]
+loom-client.workspace = true
+loom-server.workspace = true
+tokio-util.workspace = true
+redis.workspace = true
+sqlx.workspace = true
+tempfile.workspace = true

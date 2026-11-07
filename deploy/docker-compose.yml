@@ -7,9 +7,9 @@ services:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-ccl}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ccl}
-      POSTGRES_DB: ${POSTGRES_DB:-ccl}
+      POSTGRES_USER: ${POSTGRES_USER:-loom}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-loom}
+      POSTGRES_DB: ${POSTGRES_DB:-loom}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
@@ -51,7 +51,7 @@ services:
       redis:
         condition: service_healthy
     environment:
-      LOOM_DATABASE_URL: postgres://${POSTGRES_USER:-ccl}:${POSTGRES_PASSWORD:-ccl}@postgres:5432/${POSTGRES_DB:-ccl}
+      LOOM_DATABASE_URL: postgres://${POSTGRES_USER:-loom}:${POSTGRES_PASSWORD:-loom}@postgres:5432/${POSTGRES_DB:-loom}
       LOOM_REDIS_URL: redis://default:${REDIS_PASSWORD:-}@redis:6379/0
       LOOM_REDIS_PREFIX: ${LOOM_REDIS_PREFIX:-loom:prod:}
       LOOM_HTTP_BIND: 0.0.0.0:8080
@@ -62,6 +62,7 @@ services:
       - serverdata:/data
     ports:
       - "127.0.0.1:50051:50051"
+      - "127.0.0.1:8080:8080"
 
   caddy:
     profiles: ["full"]
