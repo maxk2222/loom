@@ -4,7 +4,14 @@ import { AreaChart, Area, BarChart, Bar, ResponsiveContainer, XAxis, YAxis, Tool
 import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { LiveBadge, PageHeader, Stat } from "../components/ui";
-import type { ClientRow, Overview } from "../lib/types";
+import type { ClientRow, Overview, VirtualModel } from "../lib/types";
+
+const API_ENDPOINTS = [
+  { m: "POST", p: "/v1/chat/completions", d: "chat · stream · tools · vision" },
+  { m: "POST", p: "/v1/completions", d: "legacy completions" },
+  { m: "POST", p: "/v1/embeddings", d: "embeddings" },
+  { m: "GET", p: "/v1/models", d: "OpenAI model list" },
+];
 
 export default function OverviewPage() {
   const ov = useQuery({ queryKey: ["overview"], queryFn: () => api.get<Overview>("/api/overview"), refetchInterval: 5000 });
@@ -33,6 +40,7 @@ export default function OverviewPage() {
   const lat = [...(hist.data?.requests ?? [])].map(h => h.duration_ms ?? 0).filter(Boolean).sort((a, b) => a - b);
   const pct = (p: number) => lat.length ? Math.round(lat[Math.min(lat.length - 1, Math.floor(p * lat.length))]) : 0;
   const depCap = useQuery({ queryKey: ["deps"], queryFn: () => api.get<{ deployments: any[] }>("/api/deployments") });
+  const vms = useQuery({ queryKey: ["ov-vms"], queryFn: () => api.get<{ models: VirtualModel[] }>("/api/models") });
   const latChart = (() => {
     const m = new Map<string, { t: string; ms: number; n: number }>();
     for (const h of [...(hist.data?.requests ?? [])].reverse()) {
@@ -90,6 +98,33 @@ export default function OverviewPage() {
         <Stat label="Queued (5m)" value={<span className="flex items-center gap-2"><ListOrdered size={18} className="text-warn" />{d?.queued_5m ?? 0}</span>} />
         <Stat label="Active (5m)" value={<span className="flex items-center gap-2"><Activity size={18} className="text-accent" />{d?.active_5m ?? 0}</span>} />
         <Stat label="Requests (24h)" value={<span className="flex items-center gap-2"><Zap size={18} className="text-ok" />{d?.requests_24h ?? 0}</span>} />
+      </div>
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="card p-4">
+          <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted">API endpoints</div>
+          <div className="space-y-1.5">
+            {API_ENDPOINTS.map(e => (
+              <div key={e.p} className="flex items-center gap-2.5 text-xs">
+                <span className={`w-10 rounded px-1.5 py-0.5 text-center font-mono text-[10px] ${e.m === "GET" ? "bg-ok/10 text-ok" : "bg-accent/10 text-accent"}`}>{e.m}</span>
+                <code className="font-mono text-text">{e.p}</code>
+                <span className="ml-auto text-[10px] text-muted">{e.d}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="card p-4">
+          <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted">Virtual models</div>
+          {(vms.data?.models ?? []).length === 0 && <div className="text-xs text-muted">No virtual models configured.</div>}
+          <div className="space-y-1.5">
+            {(vms.data?.models ?? []).map(m => (
+              <div key={m.id} className="flex items-center gap-2.5 text-xs">
+                <span className={`h-1.5 w-1.5 rounded-full ${m.enabled ? "bg-ok" : "bg-muted"}`} />
+                <code className="font-mono text-text">{m.api_name}</code>
+                <span className="rounded bg-surface px-1.5 py-0.5 text-[10px] text-muted">{m.api_type}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
       {chart.length > 1 && (
         <div className="card p-4">

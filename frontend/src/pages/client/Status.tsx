@@ -10,12 +10,29 @@ function fmtUptime(s: number): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
 }
 
+const LOCAL_ENDPOINTS = [
+  { m: "POST", p: "/v1/chat/completions", d: "chat · stream · tools" },
+  { m: "POST", p: "/v1/completions", d: "legacy completions" },
+  { m: "POST", p: "/v1/embeddings", d: "embeddings" },
+  { m: "GET", p: "/v1/models", d: "OpenAI model list" },
+];
+
+interface LocalBackend { id: string; name: string; backend_type: string; deployments: { id: string; name: string; model_name: string; enabled: boolean }[] }
+
 export default function ClientStatusPage() {
   const q = useQuery({
     queryKey: ["client-status"],
     queryFn: () => api.get<ClientStatus>("/local/api/status"),
     refetchInterval: 3000,
   });
+  const backends = useQuery({
+    queryKey: ["client-backends"],
+    queryFn: () => api.get<{ backends: LocalBackend[] }>("/local/api/backends"),
+    refetchInterval: 8000,
+  });
+  const models = (backends.data?.backends ?? []).flatMap(b =>
+    (b.deployments ?? []).filter(x => x.enabled).map(x => ({ ...x, backend: b.name }))
+  );
   const d = q.data;
   const totalFree = (d?.capacities ?? []).reduce((a, c) => a + c.tier2_free, 0);
   const totalCap = (d?.capacities ?? []).reduce((a, c) => a + c.tier2_total, 0);
@@ -34,6 +51,29 @@ export default function ClientStatusPage() {
         <div className="flex justify-between"><span className="text-muted">Version</span><span>{d?.version ?? "—"}</span></div>
         <div className="flex justify-between"><span className="text-muted">Server</span><span className="font-mono text-xs">{d?.server_url || "not configured"}</span></div>
       </Card>
+      <div className="grid gap-4 md:grid-cols-2">
+        <Card className="space-y-1.5">
+          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">Local API <span className="normal-case text-muted/70">(port 8391)</span></div>
+          {LOCAL_ENDPOINTS.map(e => (
+            <div key={e.p} className="flex items-center gap-2.5 text-xs">
+              <span className={`w-10 rounded px-1.5 py-0.5 text-center font-mono text-[10px] ${e.m === "GET" ? "bg-ok/10 text-ok" : "bg-accent/10 text-accent"}`}>{e.m}</span>
+              <code className="font-mono text-text">{e.p}</code>
+              <span className="ml-auto text-[10px] text-muted">{e.d}</span>
+            </div>
+          ))}
+        </Card>
+        <Card className="space-y-1.5">
+          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">Available models</div>
+          {models.length === 0 && <div className="text-xs text-muted">No enabled deployments.</div>}
+          {models.map(m => (
+            <div key={m.id} className="flex items-center gap-2.5 text-xs">
+              <span className="h-1.5 w-1.5 rounded-full bg-ok" />
+              <code className="truncate font-mono text-text">{m.model_name}</code>
+              <span className="ml-auto shrink-0 text-[10px] text-muted">{m.backend}</span>
+            </div>
+          ))}
+        </Card>
+      </div>
       <ClientCharts />
       <Card className="overflow-hidden p-0">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Per-deployment capacity</div>

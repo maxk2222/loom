@@ -764,6 +764,26 @@ fn inspect_sse_tail(
     let Ok(text) = std::str::from_utf8(bytes) else {
         return;
     };
+    // Non-streaming responses arrive as one raw JSON object — parse it whole.
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') && !trimmed.contains("\ndata:") {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(u) = v.get("usage") {
+                if let Ok(parsed) = serde_json::from_value::<loom_core::openai::Usage>(u.clone()) {
+                    *usage = parsed;
+                }
+            }
+            if let Some(fr) = v
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("finish_reason"))
+                .and_then(|f| f.as_str())
+            {
+                *finish_reason = fr.to_string();
+            }
+        }
+        return;
+    }
     for line in text.split("\n\n") {
         let line = line.trim();
         let Some(data) = line.strip_prefix("data:") else {

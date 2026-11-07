@@ -135,12 +135,29 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
 
     let required = required_caps_from_request(&body);
     let streaming = request_stream(&body);
+    // Ask streaming backends to emit a final `usage` chunk so the client can
+    // report real token counts (LM Studio, vLLM, OpenAI all honor this;
+    // backends that ignore it fall back to estimation server-side).
+    let body = if streaming {
+        let mut b = body;
+        let needs = b
+            .get("stream_options")
+            .and_then(|o| o.get("include_usage"))
+            .is_none();
+        if needs {
+            b["stream_options"]["include_usage"] = Value::Bool(true);
+        }
+        b
+    } else {
+        body
+    };
+    let out_bytes = serde_json::to_vec(&body).unwrap_or_else(|_| body_bytes.to_vec());
     let now = crate::client_registry::now_ms();
     let pending = PendingRequest {
         request_id: RequestId::parse(&request_id).unwrap_or_default(),
         api,
         model: model.clone(),
-        body: body_bytes.to_vec(),
+        body: out_bytes,
         required,
         project_id: c.project_id.clone(),
         prio: c.priority_class,
@@ -173,6 +190,9 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
     let started2 = started;
     let is_sse = streaming;
     let cancel2 = cancel.clone();
+    // Token estimate for backends that omit `usage` (some streaming modes,
+    // error paths) — keeps history/stats non-zero. Real backend usage wins.
+    let est_prompt = loom_core::tokens::estimate_request_tokens(&body);
 
     // Finalizer task: ALWAYS runs (also when the HTTP caller disconnects —
     // axum drops the body stream but this task lives on). Awaits RequestEnd,
@@ -183,6 +203,17 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         let cancel_f = cancel.clone();
         tokio::spawn(async move {
             let meta = end_rx.await.unwrap_or_default();
+            let prompt_tokens = if meta.prompt_tokens > 0 {
+                meta.prompt_tokens
+            } else {
+                est_prompt
+            };
+            let completion_tokens = if meta.completion_tokens > 0 {
+                meta.completion_tokens
+            } else {
+                // Heuristic: ~1 output token per 25ms of decode after TTFT.
+                (meta.duration_ms.saturating_sub(meta.ttft_ms).max(0) / 25) as u32
+            };
             usage
                 .record(crate::usage::UsageRecord {
                     request_id: rid_f,
@@ -199,8 +230,8 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                     queue_wait_ms: 0,
                     ttft_ms: meta.ttft_ms,
                     duration_ms: started2.elapsed().as_millis() as i64,
-                    prompt_tokens: meta.prompt_tokens,
-                    completion_tokens: meta.completion_tokens,
+                    prompt_tokens,
+                    completion_tokens,
                     error_code: meta.error_code,
                     routing_trace: trace,
                 })

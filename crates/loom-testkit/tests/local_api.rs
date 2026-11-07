@@ -63,6 +63,7 @@ async fn spawn_client_api(cfg: ClientConfig) -> String {
         connector,
         started: Instant::now(),
         requests: Arc::new(std::sync::RwLock::new(Default::default())),
+        history: Arc::new(std::sync::RwLock::new(Default::default())),
     };
     let app = local_api::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
