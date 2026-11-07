@@ -213,12 +213,16 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
     let stream = async_stream::stream! {
         let mut rx = rx;
         let mut first = true;
+        let mut saw_done = false;
         loop {
             match rx.recv().await {
                 Some(Ok(b)) => {
                     if first {
                         first = false;
                         crate::metrics::ttft(started2.elapsed().as_secs_f64());
+                    }
+                    if is_sse && b.windows(6).any(|w| w == b"[DONE]") {
+                        saw_done = true;
                     }
                     yield Ok::<Bytes, std::io::Error>(b);
                 }
@@ -237,7 +241,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                 None => break,
             }
         }
-        if is_sse {
+        if is_sse && !saw_done {
             yield Ok(Bytes::from(SSE_DONE));
         }
         let _ = cancel2;

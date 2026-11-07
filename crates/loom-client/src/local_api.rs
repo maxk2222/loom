@@ -84,7 +84,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }));
 
     let api = if state.cfg_blocking().local_api.serve_ui {
-        api.nest("/ui", crate::local_ui::router()).route(
+        api.merge(crate::local_ui::router()).route(
             "/",
             get(|| async { axum::response::Redirect::permanent("/ui/") }),
         )

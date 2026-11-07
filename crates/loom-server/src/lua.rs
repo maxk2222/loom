@@ -1,8 +1,8 @@
 //! Atomic Redis Lua scripts. Keys/args are always fully-qualified (prefix
 //! applied by caller).
 
-/// queue_enqueue: KEYS=[queue:{prio}, req:{id}, stats:live]
-/// ARGV=[request_id, enqueue_ts, max_queue_global, meta fields..., watch_key, deadline_ts]
+/// queue_enqueue: KEYS=[queue:{prio}, req:{id}, queue:count, req:watchdog]
+/// ARGV=[request_id, enqueue_ts, max_queue, project_id, vm_id, prio, deadline_ts]
 /// -> "OK" | "QUEUE_FULL"
 pub const QUEUE_ENQUEUE: &str = r#"
 local qkey = KEYS[1]
@@ -10,11 +10,10 @@ local rkey = KEYS[2]
 local rqid = ARGV[1]
 local ets  = tonumber(ARGV[2])
 local maxq = tonumber(ARGV[3])
-local total = 0
--- count across all class queues is approximated via a global counter key
-local cnt = tonumber(redis.call('GET', KEYS[4]) or '0')
+-- global queued-request counter across all class queues
+local cnt = tonumber(redis.call('GET', KEYS[3]) or '0')
 if cnt >= maxq then return 'QUEUE_FULL' end
-redis.call('INCR', KEYS[4])
+redis.call('INCR', KEYS[3])
 redis.call('ZADD', qkey, ets, rqid)
 redis.call('HSET', rkey,
   'state', 'queued',
@@ -25,7 +24,7 @@ redis.call('HSET', rkey,
   'deadline', ARGV[7],
   'attempts', '0')
 redis.call('EXPIRE', rkey, 7200)
-redis.call('ZADD', KEYS[5], tonumber(ARGV[7]), rqid)
+redis.call('ZADD', KEYS[4], tonumber(ARGV[7]), rqid)
 return 'OK'
 "#;
 

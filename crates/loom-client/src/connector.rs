@@ -562,19 +562,26 @@ async fn run_request(
     let started = std::time::Instant::now();
     telemetry::req_admitted("tier2");
 
+    let (data_tx, data_rx) = mpsc::channel::<DataFrame>(32);
+    // Head BEFORE the RPC call: the server reads it to correlate the stream
+    // before sending response headers — sending it after `request_data().await`
+    // would deadlock both sides.
+    let head_res = data_tx
+        .send(frames::head(&request_id, &lease_id, fencing))
+        .await;
+    let mut inbound = match head_res {
+        Err(_) => None,
+        Ok(()) => match agent.request_data(ReceiverStream::new(data_rx)).await {
+            Ok(r) => Some(r.into_inner()),
+            Err(e) => {
+                warn!(req = %request_id, error = %e, "open data stream failed");
+                None
+            }
+        },
+    };
+    let mut inbound_ref = inbound.as_mut();
     let result = async {
-        let (data_tx, data_rx) = mpsc::channel::<DataFrame>(32);
-        let resp = agent
-            .request_data(ReceiverStream::new(data_rx))
-            .await
-            .map_err(|e| format!("open data stream: {e}"))?;
-        let mut inbound = resp.into_inner();
-
-        // Head frame.
-        data_tx
-            .send(frames::head(&request_id, &lease_id, fencing))
-            .await
-            .map_err(|_| "send head".to_string())?;
+        let inbound = inbound_ref.as_mut().ok_or("open data stream")?;
 
         // Assemble request payload from request_json frames.
         let mut payload = Vec::with_capacity(a.payload_bytes as usize);
@@ -635,6 +642,7 @@ async fn run_request(
                         ttft_ms = started.elapsed().as_millis() as i64;
                         telemetry::ttft(started.elapsed().as_secs_f64());
                     }
+                    debug!(req = %request_id, n = bytes.len(), "upstream chunk → data stream");
                     // Opportunistically parse usage/finish from SSE tail.
                     inspect_sse_tail(&bytes, &mut usage, &mut finish_reason);
                     if data_tx
@@ -670,23 +678,33 @@ async fn run_request(
     let (status, err, usage, ttft_ms) = match result {
         Ok(v) => v,
         Err(e) => {
-            if e == "cancelled" {
-                (
-                    "cancelled".to_string(),
-                    Some(e),
-                    loom_core::openai::Usage::default(),
-                    0,
-                )
-            } else {
-                (
-                    "failed".to_string(),
-                    Some(e),
-                    loom_core::openai::Usage::default(),
-                    0,
-                )
+            if e != "cancelled" {
+                warn!(req = %request_id, error = %e, "tier2 request failed");
+                let _ = data_tx
+                    .send(frames::error("upstream_error", &e, false))
+                    .await;
             }
+            (
+                if e == "cancelled" { "cancelled" } else { "failed" }.to_string(),
+                Some(e),
+                loom_core::openai::Usage::default(),
+                0,
+            )
         }
     };
+
+    // Flush: half-close the request stream, then drain the server's response
+    // stream so all queued frames are consumed BEFORE the RPC object drops.
+    // Dropping it earlier issues RST_STREAM and silently discards our final
+    // response_chunk/end frames — the root cause of empty bodies on fast
+    // (non-streaming) backends.
+    drop(data_tx);
+    if let Some(inbound) = inbound.as_mut() {
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while inbound.next().await.is_some() {}
+        })
+        .await;
+    }
 
     let _ = ctrl_tx
         .send(client_msgs::request_end(

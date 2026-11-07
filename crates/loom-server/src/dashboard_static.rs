@@ -12,14 +12,16 @@ use axum::{
 #[exclude = "*.map"]
 struct Dash;
 
+/// Mount at app level (not via `nest`) — an axum nest can let `/ui/` fall
+/// through into the admin router's middleware before route resolution.
 pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
-        .route("/", get(index))
-        .route("/{*path}", get(asset))
-        .fallback(get(index))
+        .route("/ui", get(index))
+        .route("/ui/", get(index))
+        .route("/ui/{*path}", get(asset))
 }
 
-async fn index() -> Html<String> {
+pub async fn index() -> Html<String> {
     Html(serve("index.html"))
 }
 

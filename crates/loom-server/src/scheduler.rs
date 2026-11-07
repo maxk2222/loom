@@ -508,15 +508,18 @@ impl Scheduler {
                 Ok(outcome) => {
                     trace["deployment_id"] = json!(member.deployment_id);
                     trace["client_id"] = json!(member.client_id);
-                    return Ok(RequestOutcome {
-                        routing_trace: trace,
-                        ..outcome
-                    });
+                    return Ok(RequestOutcome { routing_trace: trace, ..outcome });
                 }
-                Err(SchedErr::NoCapacity)
-                | Err(SchedErr::Rejected(_))
-                | Err(SchedErr::ClientOffline) => continue,
-                Err(e) => return Err(e),
+                Err(e @ (SchedErr::NoCapacity
+                | SchedErr::Rejected(_)
+                | SchedErr::ClientOffline)) => {
+                    tracing::debug!(req = %req.request_id, dep = %member.deployment_id, err = %e, "candidate failed, trying next");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(req = %req.request_id, dep = %member.deployment_id, error = %e, "dispatch error");
+                    return Err(e);
+                }
             }
         }
         Err(SchedErr::NoCapacity)
@@ -685,15 +688,18 @@ impl Scheduler {
                     }
                 }
                 // 2) forward client response chunks until End/Error/cancel
+                tracing::debug!(req = %rid_for_release, "bridge: payload sent, reading inbound");
                 loop {
                     let next = tokio::select! {
                         _ = cancel2.cancelled() => break,
                         v = inbound.next() => v,
                     };
+                    tracing::debug!(req = %rid_for_release, frame = ?next.as_ref().map(|r| r.as_ref().map(|f| std::mem::discriminant(&f.frame))), "bridge inbound");
                     match next {
                         Some(Ok(loom_protocol::pb::DataFrame {
                             frame: Some(loom_protocol::pb::data_frame::Frame::ResponseChunk(b)),
                         })) => {
+                            tracing::debug!(req = %rid_for_release, n = b.len(), "response_chunk");
                             if resp_tx.send(Ok(b.into())).await.is_err() {
                                 // caller gone: cancel upstream by closing outbound
                                 break;
@@ -707,7 +713,10 @@ impl Scheduler {
                         }
                         Some(Ok(loom_protocol::pb::DataFrame {
                             frame: Some(loom_protocol::pb::data_frame::Frame::End(_)),
-                        })) => break,
+                        })) => {
+                            tracing::debug!(req = %rid_for_release, "end frame");
+                            break;
+                        }
                         Some(Ok(_)) => continue,
                         Some(Err(e)) => {
                             let _ = resp_tx.send(Err(SchedErr::Backend(e.to_string()))).await;

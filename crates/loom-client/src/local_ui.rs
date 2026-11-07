@@ -19,8 +19,9 @@ where
     S: Clone + Send + Sync + 'static,
 {
     Router::new()
-        .route("/", get(index))
-        .route("/{*path}", get(asset))
+        .route("/ui", get(index))
+        .route("/ui/", get(index))
+        .route("/ui/{*path}", get(asset))
         .fallback(get(index))
 }
 

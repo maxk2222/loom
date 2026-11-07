@@ -165,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
     let app = axum::Router::new()
         .merge(gw)
         .merge(adm)
-        .nest("/ui", dashboard_static::router())
+        .merge(dashboard_static::router())
         .route("/healthz", get(|| async { "ok" }))
         .route(
             "/readyz",
