@@ -162,9 +162,16 @@ impl ModelRegistry {
             .members
             .iter()
             .filter(|m| {
-                m.enabled
-                    && m.capabilities.supports_api(api)
-                    && m.capabilities.satisfies(&merged)
+                if !m.enabled {
+                    return false;
+                }
+                // Unknown capabilities (never probed, reported as all-false) are
+                // permissive for the api-type filter — the client's admission
+                // control remains authoritative; required extras still enforced.
+                let unknown = m.capabilities == Capabilities::default();
+                (unknown || m.capabilities.supports_api(api))
+                    && (unknown && merged == RequiredCaps::default()
+                        || m.capabilities.satisfies(&merged))
             })
             .cloned()
             .collect();

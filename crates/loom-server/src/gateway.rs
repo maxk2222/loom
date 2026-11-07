@@ -153,18 +153,50 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         }
     };
 
-    let RequestOutcomeParts { rx, end_rx, trace, dep, client, lease, cancel } = split(outcome);
+    let RequestOutcomeParts { rx, end_rx, trace, dep, client, lease: _lease, cancel } = split(outcome);
     let rid = request_id.clone();
-    let auth2 = s.auth.clone();
     let key_id = c.api_key_id.clone();
     let usage = s.usage.clone();
+    let auth2 = s.auth.clone();
     let started2 = started;
     let is_sse = streaming;
+    let cancel2 = cancel.clone();
+
+    // Finalizer task: ALWAYS runs (also when the HTTP caller disconnects —
+    // axum drops the body stream but this task lives on). Awaits RequestEnd,
+    // records usage/history, releases the rate-limit inflight slot, and
+    // drops the lease if anything is still held.
+    {
+        let rid_f = rid.clone();
+        let cancel_f = cancel.clone();
+        tokio::spawn(async move {
+            let meta = end_rx.await.unwrap_or_default();
+            usage
+                .record(crate::usage::UsageRecord {
+                    request_id: rid_f,
+                    api_key_id: key_id.clone(),
+                    project_id: String::new(),
+                    virtual_model_id: String::new(),
+                    deployment_id: dep,
+                    client_id: client,
+                    status: if meta.status.is_empty() { "aborted".into() } else { meta.status },
+                    queue_wait_ms: 0,
+                    ttft_ms: meta.ttft_ms,
+                    duration_ms: started2.elapsed().as_millis() as i64,
+                    prompt_tokens: meta.prompt_tokens,
+                    completion_tokens: meta.completion_tokens,
+                    error_code: meta.error_code,
+                    routing_trace: trace,
+                })
+                .await;
+            auth2.rl_release(&key_id).await;
+            let _ = cancel_f;
+        });
+    }
 
     let stream = async_stream::stream! {
         let mut rx = rx;
         let mut first = true;
-        let mut end_meta: Option<EndMeta> = None;
         loop {
             match rx.recv().await {
                 Some(Ok(b)) => {
@@ -192,28 +224,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         if is_sse {
             yield Ok(Bytes::from(SSE_DONE));
         }
-        // finalize
-        if let Ok(m) = end_rx.await { end_meta = Some(m); }
-        let meta = end_meta.unwrap_or_default();
-        usage.record(crate::usage::UsageRecord {
-            request_id: rid.clone(),
-            api_key_id: key_id.clone(),
-            project_id: String::new(),
-            virtual_model_id: String::new(),
-            deployment_id: dep,
-            client_id: client,
-            status: meta.status.clone(),
-            queue_wait_ms: 0,
-            ttft_ms: meta.ttft_ms,
-            duration_ms: started2.elapsed().as_millis() as i64,
-            prompt_tokens: meta.prompt_tokens,
-            completion_tokens: meta.completion_tokens,
-            error_code: meta.error_code.clone(),
-            routing_trace: trace,
-        }).await;
-        auth2.rl_release(&key_id).await;
-        let _ = lease;
-        let _ = cancel;
+        let _ = cancel2;
     };
 
     let content_type = if is_sse { "text/event-stream" } else { "application/json" };

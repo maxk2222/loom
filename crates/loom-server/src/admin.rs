@@ -424,7 +424,7 @@ async fn issue_enroll_token(State(s): State<AdminState>, req: Request) -> Respon
         .bind(b["label"].as_str().unwrap_or(""))
         .bind(b["max_uses"].as_i64().unwrap_or(1) as i32)
         .bind(b["expires_hours"].as_i64().unwrap_or(24).to_string())
-        .bind(user.map(|u| u.user_id).unwrap_or_default())
+        .bind(user.and_then(|u| uuid::Uuid::parse_str(&u.user_id).ok()))
         .fetch_one(&s.db).await;
     match res {
         Ok(row) => {

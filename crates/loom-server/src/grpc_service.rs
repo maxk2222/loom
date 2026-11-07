@@ -154,7 +154,17 @@ impl Agent for AgentSvc {
             this.sessions.unregister(&client_id).await;
             match this.registry.client_offline(&client_id).await {
                 Ok((requeue, fail)) => {
-                    for rid in requeue.iter().chain(fail.iter()) {
+                    // reserved leases → nudge the awaiting dispatcher to retry
+                    // the next candidate immediately (reject ack + drop the
+                    // data-stream expectation so its oneshot resolves).
+                    for rid in &requeue {
+                        this.scheduler
+                            .handle_assign_ack(rid, false, "client_offline")
+                            .await;
+                        this.scheduler.drop_expectation(rid).await;
+                    }
+                    // active leases → controlled failure for the caller.
+                    for rid in &fail {
                         this.scheduler
                             .complete_end(
                                 rid,
@@ -193,6 +203,37 @@ impl Agent for AgentSvc {
             })) => h,
             _ => return Err(Status::invalid_argument("missing head frame")),
         };
+        // Fencing check: head must present a live lease for this request —
+        // guards against stale data streams after reconnect/retry.
+        let mut conn = self.registry.rt.conn.clone();
+        let lf: Option<String> = redis::cmd("HGET")
+            .arg(self.registry.rt.k(&format!("lease:{}", head.lease_id)))
+            .arg("fencing")
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(None);
+        let lrq: Option<String> = redis::cmd("HGET")
+            .arg(self.registry.rt.k(&format!("lease:{}", head.lease_id)))
+            .arg("request_id")
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(None);
+        let stale = match (lrq, lf) {
+            (Some(rq), Some(f)) => rq != head.request_id || f != head.fencing_token.to_string(),
+            _ => true,
+        };
+        if stale {
+            let (tx, rx) = mpsc::channel::<DataFrame>(1);
+            let _ = tx
+                .send(loom_protocol::frames::error(
+                    "stale_fencing",
+                    "lease fencing token mismatch",
+                    false,
+                ))
+                .await;
+            drop(tx);
+            return Ok(Response::new(Box::pin(ReceiverStream::new(rx).map(Ok))));
+        }
         let delivered = sched
             .deliver_data(&head.request_id, inbound, out_tx)
             .await;

@@ -141,6 +141,12 @@ impl Scheduler {
         self.wake();
     }
 
+    /// Drop a pending data-stream expectation so the awaiting dispatcher
+    /// unblocks immediately (e.g. client went offline before opening it).
+    pub async fn drop_expectation(&self, request_id: &str) {
+        self.inner.sessions.drop_expectation(request_id).await;
+    }
+
     /// Deliver an incoming client RequestData stream to the waiting dispatcher.
     pub async fn deliver_data(
         &self,
@@ -280,6 +286,58 @@ impl Scheduler {
                 sched.dispatch_pending().await;
             }
         });
+        // Watchdog: sweep expired reserved leases + queued-request deadlines.
+        let sched2 = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                tick.tick().await;
+                sched2.watchdog_pass().await;
+            }
+        });
+    }
+
+    /// 1) Expired reserved leases → free slot + nudge dispatcher to retry.
+    /// 2) Queued requests past their deadline → remove + fail with timeout.
+    async fn watchdog_pass(&self) {
+        let now = crate::client_registry::now_ms();
+        // a) expired queue entries (deadline score in req:watchdog)
+        let mut c = self.inner.rt.conn.clone();
+        let expired: Vec<String> = redis::cmd("ZRANGEBYSCORE")
+            .arg(self.inner.rt.k("req:watchdog"))
+            .arg(0)
+            .arg(now)
+            .query_async(&mut c)
+            .await
+            .unwrap_or_default();
+        for rid in expired {
+            let removed = self.queue_remove(&rid).await.unwrap_or(false);
+            if removed {
+                let _ = self
+                    .finish_pending(&rid, Err(SchedErr::Timeout))
+                    .await;
+            }
+        }
+        // b) expired reserved leases on all known deployments
+        let dep_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id::text FROM deployments WHERE enabled = true",
+        )
+        .fetch_all(&self.inner.registry.db)
+        .await
+        .unwrap_or_default();
+        for dep in dep_ids {
+            let swept: Vec<String> = redis::Script::new(crate::lua::LEASE_SWEEP)
+                .key(self.inner.rt.k(&format!("dep:{dep}")))
+                .key(self.inner.rt.k(&format!("dep:{dep}:leases")))
+                .arg(now)
+                .invoke_async(&mut c)
+                .await
+                .unwrap_or_default();
+            for rid in swept {
+                // reserved lease died → dispatcher retries next candidate
+                self.handle_assign_ack(&rid, false, "lease_expired").await;
+            }
+        }
     }
 
     async fn dispatch_pending(&self) {
