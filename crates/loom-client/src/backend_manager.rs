@@ -45,6 +45,11 @@ struct DeploymentEntry {
     caps: Arc<RwLock<Option<Capabilities>>>,
     health: Arc<RwLock<Health>>,
     warmed_at: Arc<RwLock<Option<std::time::Instant>>>,
+    /// Consecutive health passes where a previously-warmed model is absent
+    /// from the loaded set — i.e. it loaded then got evicted (LM Studio LRU
+    /// under memory pressure). Backs the re-warm cadence off exponentially
+    /// instead of hammering a model that cannot stay resident.
+    evict_misses: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl Default for BackendManager {
@@ -136,6 +141,7 @@ impl BackendManager {
                     d.id.clone(),
                     DeploymentEntry {
                         warmed_at: Arc::new(RwLock::new(None)),
+                        evict_misses: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                         cfg: d.clone(),
                         backend_id: b.id.clone(),
                         caps,
@@ -254,7 +260,26 @@ impl BackendManager {
                 // Not-loaded retries run on a 60s cadence — fast enough to
                 // re-warm real evictions, but not a 10s hammer against a
                 // model the backend refuses to load.
-                let rewarm_secs = if loaded_ok { 240 } else { 60 };
+                // Eviction ping-pong: a warm that "succeeded" but left the
+                // model absent (evicted by a co-resident model's warm/load)
+                // doubles the retry cadence up to 30min — otherwise two
+                // auto_load models fight over limited memory forever.
+                let misses = de.evict_misses.load(std::sync::atomic::Ordering::Relaxed);
+                let warmed_before = de.warmed_at.read().await.is_some();
+                if de.cfg.auto_load && warmed_before && !loaded_ok {
+                    de.evict_misses
+                        .store(misses.saturating_add(1), std::sync::atomic::Ordering::Relaxed);
+                    if misses == 2 {
+                        warn!(deployment = %model, "model keeps getting evicted after warm — backing off auto-load");
+                    }
+                } else if loaded_ok {
+                    de.evict_misses
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                }
+                let base = if loaded_ok { 240u64 } else { 60 };
+                let rewarm_secs = base
+                    .saturating_mul(1u64 << de.evict_misses.load(std::sync::atomic::Ordering::Relaxed).min(5))
+                    .min(1800);
                 let mut w = de.warmed_at.write().await;
                 if adapter_health != Health::Healthy {
                     *w = None;
