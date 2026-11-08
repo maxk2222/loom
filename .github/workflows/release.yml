@@ -67,7 +67,8 @@ jobs:
           set -euo pipefail
           ver="${GITHUB_REF_NAME#v}"
           out="out"; mkdir -p "$out"
-          bin="target/${{ matrix.zigtarget || matrix.target }}/release"
+          # zigbuild strips the glibc suffix — artifacts land under the base triple.
+          bin="target/${{ matrix.target }}/release"
           ext=""; case "${{ matrix.arch }}" in windows-*) ext=".exe";; esac
           for kind in server client; do
             name="loom-${kind}-${ver}-${{ matrix.arch }}"
