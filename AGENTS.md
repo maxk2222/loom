@@ -31,6 +31,18 @@ cargo run -p loom-server            # gateway :8080, grpc :50051, ui /ui
 cargo run -p loom-client            # local api + ui on 127.0.0.1:8391
 ```
 
+Agent-channel TLS/mTLS (production-style, all outbound client-initiated):
+```bash
+# listeners: strict mTLS + cert-issuance bootstrap + optional plaintext migration
+LOOM_GRPC_BIND=0.0.0.0:50052 LOOM_GRPC_TLS_CERT=…/server.crt \
+  LOOM_GRPC_TLS_KEY=…/server.key LOOM_MTLS=1 \
+  LOOM_GRPC_BOOTSTRAP_BIND=0.0.0.0:50053 LOOM_GRPC_PLAIN_BIND=0.0.0.0:50051 \
+  cargo run -p loom-server
+# internal CA lives at $LOOM_DATA_DIR/tls/ca.{crt,key} (auto-created/reused);
+# clients auto-issue+renew certs via CSR in Hello — config.toml only needs
+# connector.tls="require" + ca_cert_path; leave client_cert_path empty.
+```
+
 ## Frontend
 ```bash
 cd frontend
@@ -67,4 +79,6 @@ platform (otherwise aarch64 → `203/EXEC` on the nodes):
 - Server NEVER connects to backend endpoints; inference data flows only over the client-initiated gRPC channel.
 - All scheduling mutations via Redis Lua scripts (atomic).
 - Request bodies live only in server memory; queued entries carry metadata only.
+- Certs are transport-level fleet proof; the device credential still gates session identity. Cert CN/SAN is always bound to the *authenticated* client_id, never the CSR's claimed DN.
+- rustls: call `rustls::crypto::aws_lc_rs::default_provider().install_default()` at process start (dep tree has both providers — without it rustls panics on first TLS config).
 - Dark-only UI. English everywhere (code, docs, UI, commits).

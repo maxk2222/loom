@@ -32,11 +32,23 @@ The persistent control channel. Exactly one per client session.
      or the stored device credential.
    - `capabilities`: supported request-content features.
    - `inventory`: known deployments/capacities (recovery after restart).
+   - `client_csr_pem` — optional PKCS#10 CSR (PEM). Sent whenever the
+     client needs an mTLS certificate: first enroll (over the bootstrap
+     listener, which requires no client cert), inline renewal on the
+     strict port while the current cert still handshakes, or
+     re-issuance after CA rotation.
 2. Server replies `HelloAck`:
    - `accepted=false` → close + abort (reason in `error`).
    - On success returns `session_id`, assigned `client_id` and, after
      enrollment, a one-time `device_credential` that the client must persist
      (the enrollment token is burned).
+   - When `client_csr_pem` was present and a server-side CA is configured:
+     `client_cert_pem` (signed ~180-day cert whose CN/SAN is bound to the
+     *authenticated* `client_id` — the CSR's claimed DN is discarded),
+     `ca_cert_pem` (the issuing CA, which the client pins for subsequent
+     connections) and `client_cert_expires_unix`. The cert is
+     transport-level proof of fleet membership; the device credential
+     still gates session identity.
 3. Heartbeat: client sends `Heartbeat{session_id}` every `hb_interval_secs`
    (default 10 s, server may override). Server marks the client offline after
    3 missed heartbeats.

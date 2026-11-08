@@ -11,153 +11,124 @@
 [![CI](https://github.com/maxk2222/loom/actions/workflows/ci.yml/badge.svg)](https://github.com/maxk2222/loom/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/maxk2222/loom?logo=github&label=release)](https://github.com/maxk2222/loom/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-
 [![Rust](https://img.shields.io/badge/rust-2024-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![gRPC](https://img.shields.io/badge/gRPC-tonic-5c4d9c?logo=grpc&logoColor=white)](docs/protocol.md)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org)
-[![Redis](https://img.shields.io/badge/Redis-7-dc382d?logo=redis&logoColor=white)](https://redis.io)
-[![React](https://img.shields.io/badge/React-18-61dafb?logo=react&logoColor=black)](https://react.dev)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![OpenAI compatible](https://img.shields.io/badge/API-OpenAI--compatible-412991)](docs/protocol.md)
 
 </div>
 
 ---
 
-## ⚡ Quick Overview
+## What is LOOM
 
-Research labs are full of powerful workstations that sit idle most of the time.
-**LOOM** pools that scattered capacity into one OpenAI-compatible inference
-endpoint — without taking anything away from the people using the machines:
+Research labs are full of powerful workstations that sit idle most of the
+time. LOOM pools that scattered capacity behind **one OpenAI-compatible
+endpoint** — without taking anything away from the people using the machines.
 
 ```text
-curl https://loom.example.com/v1/chat/completions -H "Authorization: Bearer sk-…"
-    ↓
-central server (routing, queueing, auth, billing-grade metering)
-    ↓
-your request lands on whichever workstation has a free tier-2 slot —
-the moment its owner needs the GPU, the offered capacity collapses to zero
+POST /v1/chat/completions  →  loom-server (route · queue · auth · meter)
+                           →  whichever workstation has a free tier-2 slot
+                              (collapses to zero the moment its owner needs it)
 ```
 
 | | |
 |---|---|
-| 🏠 **Local-first** | Workstation workloads are *always* prioritized — shared capacity is opportunistic spare, never guaranteed |
-| 🔀 **Smart routing** | 5 strategies, capability-aware filtering, fallback chains, per-request routing traces |
-| 🛡️ **Fence-protected** | Fencing tokens + atomic Redis Lua leases kill split-brain double-execution |
-| 📊 **Full observability** | Dark dashboard, live SSE, TTFT p50/p99, per-user usage, audit trail |
-| 🔌 **Real OpenAI API** | Chat · Completions · Embeddings · streaming · tools · vision |
-| 🧩 **Any backend** | vLLM, Ollama, llama.cpp, LM Studio, or any OpenAI-compatible server — capabilities auto-probed |
-| ☁️ **Hosted providers** | Azure OpenAI, Anthropic (translated), OpenRouter/Groq/Together presets — as remote backends (no local compute) |
+| 🏠 **Local-first** | Workstation workloads always win — shared capacity is opportunistic spare, never guaranteed |
+| 🔀 **Smart routing** | Virtual models, 5 strategies, capability filters, heuristic/hybrid/LLM routers, routing traces |
+| 🛡️ **Fence-protected** | Fencing tokens + atomic Redis Lua leases — no split-brain double-execution |
+| 📊 **Observable** | Dark dashboard, live SSE, TTFT p50/p99, per-user usage, audit trail |
+| 🔌 **Real OpenAI API** | Chat · completions · embeddings · streaming · tools · vision · media (images/audio/video) |
+| 🧩 **Any backend** | Ollama, vLLM, llama.cpp, LM Studio, generic OpenAI-compatible; Azure/Anthropic/OpenRouter as remote backends |
+| 🔐 **mTLS by default** | Automatic PKI: certs issued and renewed with zero tooling |
 
----
-
-
----
-
-## 🖼️ Screenshots
+## Screenshots
 
 <div align="center">
 <img src="docs/screenshots/login.png" width="31%" alt="Login"/>
 <img src="docs/screenshots/overview.png" width="31%" alt="Dashboard overview"/>
 <img src="docs/screenshots/client.png" width="31%" alt="Client UI"/>
 <br/>
-<sub>Login · Admin dashboard · Workstation client UI — all dark-only, one codebase, two build variants</sub>
+<sub>Login · Admin dashboard · Workstation client UI — dark-only, one codebase, two build variants</sub>
 </div>
 
-## 🏗️ Architecture
+## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Callers["API Callers"]
+    subgraph Callers["API callers"]
         A1["OpenAI SDKs"]
-        A2["LangChain / LlamaIndex"]
-        A3["Custom tools"]
+        A2["Custom tools"]
     end
-
-    subgraph Server["🖥️ loom-server — central control plane"]
-        GW["OpenAI Gateway<br/><code>/v1/*</code>"]
-        AUTH["AuthN/Z<br/>API keys · scopes · limits"]
-        REG["Model Registry<br/>virtual models"]
-        RTR["Router<br/>5 strategies + caps filter"]
-        Q["Tier-2 Scheduler<br/>priority queues · DRR fairness"]
-        ADM["Admin REST +<br/>Dashboard"]
-        GW --> AUTH --> RTR
-        RTR --> Q
-        REG --> RTR
+    subgraph Server["loom-server — control plane"]
+        GW["/v1 gateway"]
+        AUTH["AuthN/Z · limits"]
+        RTR["Router"]
+        Q["Tier-2 scheduler"]
+        ADM["Admin REST + dashboard"]
+        GW --> AUTH --> RTR --> Q
     end
-
     subgraph Data["Runtime state"]
-        PG[("PostgreSQL<br/>identity · config ·<br/>history · audit")]
-        RD[("Redis<br/>queues · leases ·<br/>fencing · rate limits")]
+        PG[("PostgreSQL<br/>identity · config · history")]
+        RD[("Redis<br/>queues · leases · fencing")]
     end
-
-    subgraph WS1["💻 Workstation — loom-client"]
+    subgraph WS1["Workstation — loom-client"]
         CL1["Local admission<br/><b>owner always wins</b>"]
-        BE1["vLLM / Ollama /<br/>OpenAI-compatible"]
+        BE1["Ollama / vLLM / LM Studio"]
         CL1 --- BE1
     end
-
-    subgraph WS2["💻 Workstation — loom-client"]
+    subgraph WS2["Workstation — loom-client"]
         CL2["Local admission"]
-        BE2["vLLM / Ollama"]
+        BE2["Backends"]
         CL2 --- BE2
     end
-
-    A1 & A2 & A3 -->|HTTPS| GW
-    Q -.->|"AssignRequest<br/>(fencing token)"| CL1
-    Q -.->|"AssignRequest"| CL2
-    CL1 & CL2 -->|"control stream<br/>hello · heartbeat · capacity"| Server
-    CL1 & CL2 -->|"RequestData stream<br/>payload ⇄ response chunks"| Q
+    A1 & A2 -->|HTTPS| GW
+    Q -.->|AssignRequest + fencing| CL1
+    Q -.->|AssignRequest| CL2
+    CL1 & CL2 -->|"control stream (mTLS)<br/>hello · heartbeat · capacity"| Server
+    CL1 & CL2 -->|"RequestData stream<br/>payload ⇄ chunks"| Q
     Q --> RD
-    AUTH --> RD
+    AUTH --> RD & PG
     ADM --> PG
-    REG --> PG
-    AUTH --> PG
 ```
 
-**Key design invariant:** the server *never* talks to inference backends.
-It only ever talks to clients — over a client-initiated, TLS-secured gRPC
-channel — and the client's local admission control has the final word on
-every single request.
+**Design invariants**
 
-> [!IMPORTANT]
-> Local-first is an invariant, not a configuration: the workstation owner
-> always wins. Central requests only ever consume *offered* tier-2 slots,
-> and the offer shrinks to zero automatically under local CPU/RAM pressure.
+- The server **never talks to inference backends** — all payload traffic
+  rides client-initiated gRPC streams (no inbound ports on workstations;
+  the only client listener is the loopback UI on `127.0.0.1:8391`)
+- **Local-first is not a setting**: the client's admission control has the
+  final word on every request; the tier-2 offer shrinks to zero under
+  local CPU/RAM pressure automatically
+- **Prompts and responses are never persisted** — not in Postgres, Redis,
+  logs or metrics; metadata only
 
 <details>
-<summary><b>📡 The channel split (click to expand)</b></summary>
+<summary><b>Channel split detail</b></summary>
 
 ```mermaid
 sequenceDiagram
     participant C as loom-client
     participant S as loom-server
-    participant B as Backend (vLLM)
-
-    C->>S: Control stream: Hello (credential, inventory)
-    S-->>C: HelloAck (session_id, client_id, device_cred)
-    loop every 10s
+    participant B as Backend
+    C->>S: Control: Hello (credential, inventory, optional CSR)
+    S-->>C: HelloAck (session, device_cred, issued cert)
+    loop
         C->>S: Heartbeat + CapacityReport (tier2_free)
     end
     S-->>C: ConfigPush (desired state, versioned)
-
-    Note over S: caller submits /v1/chat/completions<br/>→ route → queue → lease acquired
-    S-->>C: AssignRequest (metadata only,<br/>request_id + lease + fencing)
+    Note over S: /v1/chat/completions → route → queue → lease
+    S-->>C: AssignRequest (request_id + lease + fencing)
     C->>S: AssignAck.accepted (local admission OK)
-    C->>S: RequestData stream: head (fencing)
-    S-->>C: request_json frames (payload, ≤4 MiB)
+    C->>S: RequestData stream (head + frames ≤4 MiB)
     C->>B: POST /v1/chat/completions
     B-->>C: SSE chunks
-    C->>S: response_chunk frames (streamed)
-    C->>S: end + Control: RequestEnd (usage, ttft)
+    C->>S: response_chunk frames + RequestEnd (usage, ttft)
 ```
+
 </details>
 
----
+## Quickstart
 
-## 🚀 Quickstart
-
-### Server (Docker Compose — 2 minutes)
+### Server (Docker Compose)
 
 ```bash
 git clone https://github.com/maxk2222/loom.git && cd loom
@@ -165,438 +136,252 @@ cd deploy && cp .env.example .env      # set POSTGRES_PASSWORD, LOOM_DOMAIN
 docker compose --profile full up -d
 ```
 
-Open `https://localhost/` → the setup wizard creates your first admin.
+Open `https://localhost/` → the setup wizard creates the first admin.
 
 > [!TIP]
-> The split ports are deliberate: the dashboard/API live on the HTTP port
-> (`8080` by default, behind your TLS proxy), while clients connect to the
-> gRPC port (`50051`) — only the gRPC port needs to be reachable from
-> workstations.
+> Split ports are deliberate: dashboard/API live on the HTTP port (`8080`,
+> behind your TLS proxy), clients dial the gRPC ports — only those need to
+> be reachable from workstations.
 
 ### Workstation (one command)
 
-In the dashboard: **Clients → Issue enroll token**, then on the workstation:
+Dashboard → **Clients → Issue enroll token**, then:
 
 ```bash
 curl -fsSL https://loom.example.com/install-client.sh | \
-  sudo bash -s -- --server https://loom.example.com:9443 --token enroll_…
+  sudo bash -s -- --server https://loom.example.com --token enroll_…
 ```
 
-The client registers, reports its backends, and appears online within seconds.
+The client registers, reports its backends and appears online within
+seconds — with an auto-issued mTLS certificate (see *Security*).
 
-### Workstation (Docker)
-
-No native install wanted? The client also ships as a container image — it only
-proxies HTTP to your inference backends, so the GPU stays wherever Ollama,
-llama.cpp or LM Studio actually runs (host, sidecar container, another machine).
-
-```bash
-docker run -d --name loom-client --restart unless-stopped \
-  -e LOOM_SERVER_URL=http://loom.example.com:50051 \
-  -e LOOM_ENROLL_TOKEN=enroll_… \
-  -e LOOM_CLIENT_NAME=docker-node \
-  -e LOOM_BACKEND_URL=http://host.docker.internal:11434 \
-  -e LOOM_MODELS="qwen2.5:0.5b" \
-  --add-host=host.docker.internal:host-gateway \
-  -v loom-client-data:/etc/loom-client \
-  -p 127.0.0.1:8391:8391 \
-  loom-client:latest
-```
-
-On first start the container renders `config.toml` from env vars; afterwards
-the persisted config (incl. the issued device credential) is authoritative —
-edit backends/limits in the dashboard or mount your own `config.toml` instead.
-See `deploy/docker-compose.client.yml` for a ready-made stack incl. an
-optional Ollama sidecar.
-
-> **Pressure gating inside Docker:** the monitor reads procfs, so on a Linux
-> Docker host CPU/RAM stats reflect the *real* host — pressure gating works as
-> intended. Two caveats: a `mem_limit` scopes `ram_pct` to the container's
-> cgroup share, and under Docker Desktop (macOS/Windows) stats measure the
-> Docker VM, not your actual machine — set pressure limits accordingly or use
-> a native client for precise host-pressure behaviour.
+A container variant exists too (`deploy/docker-compose.client.yml`): the
+client only proxies to wherever Ollama/vLLM actually runs.
 
 ### First request
 
 ```bash
 curl -N https://loom.example.com/v1/chat/completions \
   -H "Authorization: Bearer sk-your-api-key" \
-  -H 'content-type: application/json' \
-  -d '{
-    "model": "vm-llama",
-    "messages": [{"role": "user", "content": "Summarize the Higgs mechanism."}],
-    "stream": true
-  }'
+  -d '{"model": "vm-llama", "stream": true,
+       "messages": [{"role": "user", "content": "Summarize the Higgs mechanism."}]}'
 ```
 
 <details>
-<summary><b>Build from source instead</b></summary>
+<summary><b>Build from source</b></summary>
 
 ```bash
-# Server
 docker compose -f deploy/docker-compose.yml up -d postgres redis
-export LOOM_DATABASE_URL=postgres://loom:loom@localhost:5432/loom
-export LOOM_REDIS_URL=redis://localhost:6379/0
-cargo run -p loom-server
-
-# Dashboard dev server → http://localhost:5173
-cd frontend && npm install && npm run dev
-
-# Client
-cargo run -p loom-client
+cargo run -p loom-server     # gateway :8080, grpc :50051+
+cd frontend && npm run dev   # dashboard dev server :5173
+cargo run -p loom-client     # local api + ui :8391
 ```
+
 </details>
 
----
+## Features
 
-## ✨ Feature Deep-Dive
+### Virtual models & routing
 
-### 🧠 Virtual models & capability-aware routing
+Operators define **virtual models** (`vm-llama`) mapping to deployments
+across the fleet. Members are filtered by api type (chat / completions /
+embeddings), required capabilities (tools, vision, streaming, json_mode,
+media flags) and liveness (client online, deployment enabled,
+`tier2_free > 0`), then ranked by `priority`, `least_in_flight`,
+`weighted`, `round_robin` or `manual`. Every request persists a **routing
+trace**.
 
-Operators define **virtual models** (`vm-llama`) that map to one or more
-deployments across the fleet. Members are filtered by:
+**Auto routers** (`kind='router'`) pick the best member per request:
 
-- **api type** — chat / completions / embeddings
-- **required capabilities** — tools, vision, streaming, json_mode
-- **liveness** — client online, deployment enabled, `tier2_free > 0`
-- **homogeneity** — optionally pin to identical model names
+| Mode | How | Latency |
+|---|---|---|
+| `heuristic` | Deterministic `when`-rules over request metrics — `chars`, `est_tokens`, `msgs`, `code`, `images`, `audio`, `system`, `tools`, `json_mode`, `reasoning`, `nonascii`, `effort`, with `any`/`not` combinators | ~0 ms |
+| `hybrid` | Rule pre-pass for obvious cases, LLM classifier only for the ambiguous rest | rules ~0 ms, else classifier cost |
+| `llm` | A small engine model classifies into member names/descriptions | engine-dependent |
 
-Then ranked by one of five strategies:
+Members can be other virtual models (`vm:…`) or deployments (`dep:…`), and
+carry `set` overrides merged into the request — e.g.
+`{"ref":"vm:qwq","set":{"reasoning_effort":"high"}}` for escalation
+ladders (`effort_gte`, `reasoning` intent, `tools`). Routed responses
+carry `x-loom-routed-model` / `x-loom-route-reason`; failed classifications
+fall back to a configured member. A dashboard test console dry-runs
+classification on any prompt.
 
-| Strategy | Behavior |
-|----------|----------|
-| `priority` | Lowest member priority wins |
-| `least_in_flight` | Most free tier-2 slots first |
-| `weighted` | Weighted shuffle by member weight |
-| `round_robin` | Rotating fair share |
-| `manual` | Pinned member first |
+**Readiness-aware**: clients probe backends every ~10 s — health,
+installed models, the actually-*loaded* set. A deployment whose model was
+evicted stops `accepting` immediately and `auto_load` deployments re-warm
+in the background (backoff on repeated evictions).
 
-Every request carries a persisted **routing trace** — inspect *why* a request
-went where it went.
+**Media endpoints**: `/v1/images/generations`, `/v1/audio/speech`,
+`/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/videos` — gated
+by explicit per-deployment capability flags, same grants/scopes/limits as
+chat.
 
-**Auto routers.** A `kind='router'` virtual model classifies each incoming
-request with a small, fast *router engine* model and forwards it to the
-best-matching member — pick by speed, task fit or language. Members can be
-other virtual models (`vm:…`) or single deployments (`dep:…`, materialized as
-hidden direct models). Configure the engine, member names/descriptions,
-fallback and an optional custom prompt template (`{{models}}` / `{{request}}`
-placeholders) under **Auto Router** in the dashboard; a built-in test console
-dry-runs classification on any prompt. Routed responses carry
-`x-loom-routed-model` / `x-loom-route-reason` headers; unparsable or failed
-classifications fall back to the configured fallback model. The API key's
-grant on the router name transparently covers all members.
+### Fairness under contention
 
-**Deterministic routing.** Routers also support `mode: "heuristic"` — no
-engine model, zero added latency. Each member gets `when` rules over request
-metrics: `chars`, `est_tokens` (chars/4), `msgs`, `code`, `images`, `audio`,
-`system`, `tools`, `json_mode`, `reasoning` (intent keywords) and `effort`
-(the caller's `reasoning_effort` / `reasoning.effort`, levels `none`…`max`).
-Rule keys are `chars_lt/gte`, `tokens_lt/gte`, `msgs_lt/gte`, the booleans by
-name, `effort_gte`/`effort_lt` (number or level name), plus `any: [rules]`
-(OR) and `not: {rule}` combinators. The first matching member in list order
-wins, with a catch-all member or fallback model behind it.
+- Strict priority classes per API user, FIFO inside each class, weighted
+  DRR between users
+- Global queue cap → clean `429 overloaded` (+ `Retry-After`) instead of
+  collapse
+- *Busy* members wait out the request deadline; *unreachable* members
+  (offline) fail fast — `draining` counts as busy since pressure-gated
+  members typically return
+- At most 2 candidate retries before stream start; none after (a replayed
+  stream would duplicate already-delivered tokens)
 
-**Reasoning escalation.** Any member may carry `set` overrides merged into
-the request before dispatch — e.g.
-`{"name":"deep","ref":"vm:qwq","set":{"reasoning_effort":"high"}}` routes to a
-reasoning model *and* raises its effort. Typical escalation ladders:
-`effort_gte: "high"` → reasoning member, `reasoning: true` (detected intent)
-→ reasoning member, `tools: true` → tool-capable member. Allowed `set` keys:
-`reasoning_effort`, `temperature`, `top_p`, `max_tokens`, `top_k`,
-`repetition_penalty`, `presence_penalty`, `frequency_penalty`, `seed`,
-`stop`. Member `tags` (e.g. `["reasoning","vision"]`) are also shown to the
-LLM engine as `[tags]` in its model menu. LLM-mode classifications are
-cached ~2 min per identical prompt+config, and member matching uses
-word-boundary containment to avoid noise misfires.
+### Security
 
-**Media endpoints.** Beyond chat, virtual models can serve the wider OpenAI
-surface: `POST /v1/images/generations`, `/v1/audio/speech`,
-`/v1/audio/transcriptions`, `/v1/audio/translations` and `/v1/videos`
-(multipart bodies pass through verbatim). Deployments advertise these via
-capability flags (`images`, `audio_speech`, `audio_transcription`,
-`audio_translation`, `video` — settable per deployment in the client
-config); routing, grants, scopes and rate limits apply exactly like chat.
-Generic OpenAI-compatible and vLLM adapters forward media requests; async
-video *job polling* is not routed yet — creation requests only.
-
-> [!NOTE]
-> Media capabilities are opt-in and strict: a vision/image/audio/video
-> request is never routed to a deployment without the explicit flag —
-> unknown or probed-default capabilities only open the text APIs.
-
-**Readiness-aware routing.** Clients probe their backends every ~10s —
-endpoint health, installed models, and (for Ollama, vLLM, llama.cpp) the
-*actually loaded* set. A deployment whose backend is down or whose model was
-evicted stops `accepting` immediately, the scheduler removes it from
-candidates, and traffic fails over to the remaining members. `auto_load`
-deployments re-warm right away and rejoin once resident again.
-
-### ⚖️ Fairness under contention
-
-- Priority classes (per API user) with **strict class ordering**
-- **FIFO inside each class** — no request bypasses an older one; requeues keep
-  their original position
-- Weighted DRR share between API users inside a class
-- Global queue cap → clean `429 overloaded` instead of collapse
-- `429` responses carry **`Retry-After`** — `1s` for concurrency limits,
-  `60s / rpm_limit` for per-minute windows
-- Structural vs. transient shortage: requests whose members are *all*
-  unreachable fail fast (`all deployments unavailable`, `max_attempts`
-  counted) instead of head-of-line blocking their class queue; requests
-  behind merely-*busy* members wait for their deadline
-- At most **2 candidate retries** before stream start — none after (no
-  double-generation ever)
-
-### 🔒 Security by default
-
-- Enrollment tokens are **one-time, short-lived** — exchanged for a rotatable
-  device credential on first contact
-- API keys SHA-256 hashed, scoped per endpoint family, with
-  RPM/TPM/concurrency ceilings and per-user model grants — managed under
-  **API Users** in the dashboard (one key per user, auto-generated, shown
-  once; grants, scopes and limits editable at any time)
-- Dashboard users get Argon2 + HttpOnly session cookies + roles
-  (`admin` / `operator` / `viewer`), failed-login lockout with exponential
-  backoff, and `Secure` cookies when served over HTTPS
-  (`LOOM_SECURE_COOKIES=1` or `X-Forwarded-Proto: https`)
-- The workstation admin API (`:8391`) is loopback-only. On first start the
-  local UI offers a **setup wizard** to create a local admin user
-  (Argon2 + HttpOnly session cookie) — or to keep the API open for local use.
-  Alternatively set `local_api.api_key` in `config.toml` (written `0600`) to
-  require a Bearer key; both auth paths are optional
-
-> [!WARNING]
-> Treat device credentials and `sk-…` API keys as secrets: they are only
-> shown once at issue time, stored hashed server-side, and a leaked device
-> credential enrolls *workloads*, not people — revoke it in the dashboard
-> (Clients → Suspend) rather than rotating config files.
-- **Prompts and responses are never persisted** — not in Postgres, Redis,
-  logs, or metrics
-- gRPC fencing tokens make stale assignments harmless after reconnects
-- The agent channel is **outbound-only on the client** (no inbound ports;
-  the only client listener is the loopback UI) and supports **TLS 1.3
-  server-auth** — see *Agent-channel TLS* below
-
-#### Agent-channel TLS
+**Agent channel (client ↔ server) — mTLS with automatic PKI:**
 
 ```bash
-# Server — TLS on the agent port (cert signed by your CA, SAN must cover
-# the address clients dial)
-LOOM_GRPC_BIND=0.0.0.0:50051 \
+# Server: strict agent port + issuance port
+LOOM_GRPC_BIND=0.0.0.0:50052 \
 LOOM_GRPC_TLS_CERT=/etc/loom/server.crt \
 LOOM_GRPC_TLS_KEY=/etc/loom/server.key \
-loom-server
-
-# Optional during fleet migration: keep a plaintext listener for legacy
-# clients while they switch over — remove once all clients use TLS.
-LOOM_GRPC_PLAIN_BIND=0.0.0.0:50052
-```
-
-```toml
-# Client — config.toml
-server_url = "https://loom.example.com:50051"   # https:// => TLS
-[connector]
-tls = "require"          # off | auto | require
-ca_cert_path = "/etc/loom/ca.crt"   # empty = system roots
-```
-
-`auto` follows the URL scheme (a bare `host:port` defaults to `https`),
-`require` upgrades any `http://` URL to TLS, `off` forces plaintext for
-lab setups. Self-signed deployments can point `ca_cert_path` at the
-issuing CA — or at the server certificate itself (pinning).
-
-#### Mutual TLS with automatic PKI
-
-For fleets reachable over untrusted networks, require client certificates:
-
-```bash
-# Server — strict agent port demands a cert signed by the CA, plus a
-# separate bootstrap listener that issues certs without requiring one
-LOOM_GRPC_TLS_CLIENT_CA=/etc/loom/ca.crt \
 LOOM_MTLS=1 \
 LOOM_GRPC_BOOTSTRAP_BIND=0.0.0.0:50053 \
 loom-server
 ```
 
-The server keeps an internal CA at `data/tls/ca.{crt,key}` (created on
-first boot — or point `LOOM_DATA_DIR` at a directory already holding a CA
-you trust; an existing CA is reused for issuance). Clients handle
-everything else automatically:
+The server keeps an internal CA at `data/tls/ca.{crt,key}` (auto-created,
+or reuse an existing CA dir via `LOOM_DATA_DIR`). Clients handle the rest:
 
-- **Issuance**: with `client_cert_path` unset, the client generates a
-  keypair, sends its CSR inside `Hello` over the bootstrap listener
-  (TLS server-auth only — no client cert needed), receives a signed
-  ~180-day cert bound to its enrolled device id, then connects to the
-  strict port. The whole flow needs only the CA file + enroll token.
-- **Renewal**: under 30 days remaining, the client attaches a fresh CSR
-  to its regular `Hello` on the strict port (the old cert still
-  handshakes) or re-bootstraps if it already expired.
-- **Recovery**: if a stored cert no longer chains to the live CA
-  (rotation), the client drops it after repeated TLS failures and
-  re-bootstraps.
+- **Issuance** — the client generates a keypair, sends a CSR inside
+  `Hello` over the bootstrap listener (TLS server-auth, no client cert
+  needed), receives a ~180-day cert bound to its authenticated device id,
+  then connects to the strict port. Setup needs only the CA file +
+  enroll token.
+- **Renewal** — under 30 days left, a fresh CSR rides the regular `Hello`
+  (old cert still handshakes); expired → re-bootstrap.
+- **Recovery** — a stored cert that no longer chains to the live CA is
+  dropped after repeated TLS failures and re-issued automatically.
+- Manual `client_cert_path`/`client_key_path` remain supported;
+  `connector.bootstrap_url` overrides the issuance endpoint (default:
+  server port + 1). `LOOM_GRPC_PLAIN_BIND` keeps a legacy plaintext
+  listener for zero-downtime migrations — remove once the fleet is over.
 
-`connector.bootstrap_url` overrides the bootstrap endpoint (default:
-`server_url` port + 1). The device credential still authenticates the
-session — the cert is a transport-level proof of fleet membership, so a
-leaked cert alone cannot impersonate a device. HTTP surface hardening:
-every response (dashboard, `/api`, `/v1`) carries CSP,
-`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and HSTS.
+TLS policy on the client: `[connector] tls = "require"` upgrades any
+`http://` URL, `"off"` forces plaintext, `"auto"` follows the scheme;
+`ca_cert_path` pins the CA (or system roots when empty — the client also
+pins the CA received at issuance).
 
-### 🔄 Auto-updates (server-triggered, signature-verified)
+**HTTP surface:** CSP, `X-Content-Type-Options`, `X-Frame-Options`,
+`Referrer-Policy` and HSTS on every response; per-IP token bucket +
+per-account lockout on login; Argon2 password hashing; HttpOnly +
+`Secure` session cookies (`LOOM_SECURE_COOKIES` or behind HTTPS).
 
-Tagged releases (`v*`) build signed binaries for Linux/macOS/Windows on
-x86-64 and ARM64 via `.github/workflows/release.yml`. Artifacts are
-`loom-{client,server}-{version}-{os-arch}` + `.sha256` + `.minisig`
-(minisign/ed25519) — clients refuse unsigned or mismatched payloads.
+**Credentials:** enrollment tokens are one-time/short-lived; device
+credentials are revocable (Clients → Suspend); `sk-…` API keys are
+SHA-256 hashed, scoped per endpoint family, with RPM/TPM/concurrency
+ceilings and per-user model grants — managed under **API Users**.
 
-- **Clients**: `updater.enabled` in `config.toml` polls the server's public
-  `/api/releases/manifest?channel&arch` every 30 min (manifest is a cached
-  GitHub-release proxy; `release_repo` setting overrides the repo).
-  `updater.auto_apply` applies automatically; otherwise use **Update** on
-  the admin Clients page or `POST /local/api/update`. Roll-out is pushed
-  live over the control stream (`ConfigPush` → `update_now`) and also lands
-  via `GetConfig` on the next session.
-- **Apply**: download → sha256 + minisign verify → staged `--version`
-  smoke test (rejects corrupt/wrong-arch artifacts pre-swap) → atomic
-  binary swap (`.prev` backup kept) → exit; systemd/launchd
-  `Restart=always` brings the new version up.
-- **Boot watchdog**: after a swap the client boots under a
-  `.loom-update-pending` marker. A boot is confirmed by the first
-  successful server registration or by 120 s of uptime (covers offline
-  operation). If the marker survives more than 3 starts — the new binary
-  kept crashing — the watchdog restores `.prev` automatically and exits,
-  ending the crash loop. `last_rollback` details show up under
-  `update` in `/local/api/status`. Self-update is refused on Windows
-  and inside containers (pull a newer image there instead).
-- **Server**: `POST /api/server/update` runs the same verify+swap+exit on
-  the server binary (not on Windows — replace the binary manually there).
-- Keys: the built-in release public key is embedded; pin your own via
-  `updater.public_key` / `LOOM_UPDATE_PUBKEY`. CI signs when the
-  `MINISIGN_SECRET_KEY` repo secret is set (generate with
-  `minisign -G -p loom-release.pub -s loom-release.key -W`).
+> [!WARNING]
+> A leaked device credential or client cert enrolls *workloads*, not
+> people — but a cert without its private key does nothing, and both are
+> revocable in the dashboard.
+
+### Auto-updates
+
+Tagged releases build signed binaries for Linux/macOS/Windows
+(`x86-64`/`arm64`, minisign/ed25519). Clients poll the server's release
+manifest and self-update: sha256 + signature verify → staged `--version`
+smoke test → atomic swap with `.prev` backup → exit; the service manager
+restarts it. A boot watchdog rolls back to `.prev` if the new binary
+fails to register within 3 boots. Server self-updates the same way via
+`POST /api/server/update`.
 
 > [!CAUTION]
-> Always swap client binaries **through the updater** — a manual binary
-> replacement bypasses the pending-boot marker, so the watchdog can neither
-> count the boots nor auto-rollback on a crash loop (e.g. a binary built
-> for a newer glibc than the host's).
+> Always swap binaries **through the updater** — manual replacement
+> bypasses the pending-boot marker and disables the crash-loop rollback.
 
-### 📟 The dashboard
+### Dashboard
 
-Dark-only, zero build config needed at deploy time: live client status, queue
-depths, virtual-model editor with member management, API user/key admin, usage charts, request history with routing traces, config history,
-audit log — and **runtime branding** (name, logo, accent color) that applies
-without a rebuild.
+Dark-only, zero build config at deploy time: live client status, queue
+depths, virtual-model editor, API user/key admin, usage charts, request
+history with routing traces, audit log, runtime branding. The workstation
+client embeds a minimal variant of the same React codebase.
 
-The **workstation client** embeds a minimal variant of the *same* React
-codebase: connection state, backends with probed capabilities, live request
-table, sharing controls.
-
----
-
-## 🧬 How sharing actually works
+## How sharing works
 
 ```mermaid
 flowchart TB
-    subgraph Local["local priority path"]
-        LQ["local request<br/>→ admit or 429<br/><b>never queued</b>"]
-    end
-    subgraph Slots["per-deployment slots"]
-        M["max_concurrent = 4"]
-        R["local_reserve = 1  (untouchable)"]
-        T["tier2_max = 2  (offered)"]
-    end
-    subgraph Pressure["under local pressure"]
-        P["tier2 offered → 0<br/>automatic, no admin action"]
-    end
+    LQ["local request → admit or 429<br/><b>never queued</b>"]
+    M["max_concurrent = 4"]
+    R["local_reserve = 1 (untouchable)"]
+    T["tier2_max = 2 (offered)"]
+    P["under pressure:<br/>tier2 offer → 0"]
     LQ --> M
-    T -.->|"sharing mode: auto"| P
+    T -.->|"sharing_mode: auto"| P
 ```
 
-- `auto` — tier-2 offer shrinks toward zero as local load rises
-- `fixed` — constant offer
-- `manual` / `private` — explicit control
-- The central lease is a **reservation request**, not a grant — the client
-  may reject any assignment, and the server simply tries the next candidate
+- `auto` — offer shrinks toward zero as local load rises · `fixed` —
+  constant offer · `manual`/`private` — explicit control
+- The central lease is a *reservation request*, not a grant — the client
+  may reject any assignment and the server tries the next candidate
+- Pressure offload unloads warmed models under sustained load and re-warms
+  them when the pressure clears (verified end-to-end on real load)
 
----
+## Measured overhead
 
-## � Measured overhead
+Live fleet (Mac Studio + 2 Proxmox VM clients over mTLS, smollm2:135m /
+qwen3.8-27b), median of 5+ runs:
 
-Numbers from a live two-node deployment (Mac Studio client over TLS +
-Proxmox VM client, smollm2:135m / qwen3.8-27b backends), median of 5+ runs:
+| Path | Latency |
+|---|---|
+| Stream TTFB, same-host client | ~15–50 ms |
+| Non-stream, same-host client (27B) | +~50 ms vs direct (0.96 s vs 0.91 s) |
+| Non-stream, LAN client (tiny model) | ~180–205 ms total |
+| `heuristic`/hybrid router rule hit | ~14 ms |
+| LLM-classified `loom-auto` pick (27B classifier) | ~7–30 s cold — use heuristic/hybrid when latency matters |
 
-| Path | Latency | vs. direct backend |
-|---|---|---|
-| Dispatch → first token (stream TTFB, same-host client) | ~15–50 ms | router + scheduler + TLS hop |
-| Non-streamed completion, same-host client (27B model) | +~50 ms | 0.96 s vs 0.91 s direct |
-| Non-streamed completion, LAN client (tiny model) | ~180–205 ms total | includes LAN RTT + remote node |
-| Deterministic `loom-rules` router pick | ~14 ms | no classifier call |
-| Hybrid rule hit (code/reasoning/nonascii) | ~15 ms | classifier skipped |
-| LLM-classified `loom-auto` pick (27B classifier) | ~7–30 s cold | use `loom-rules`/`hybrid` for latency-critical paths |
+Scheduling itself (lease + candidate fan-out) is ~1–5 ms; TTFB is
+dominated by client→backend first-byte time, not the control plane.
 
-Scheduling itself (lease + candidate fan-out) is ~1–5 ms; the dominant cost
-in TTFB is the client→backend first-byte time, not the control plane.
-
----
-
-## �📦 What's inside
+## Repository layout
 
 ```
 crates/
-  loom-core        shared types: OpenAI API, capabilities, errors, config
+  loom-core        shared types: OpenAI API, capabilities, config
   loom-protocol    gRPC codegen (loom.agent.v1) + helpers
-  loom-client      workstation daemon (local API :8391, connector, updater)
-  loom-server      central server (gateway, scheduler, admin, gRPC)
-  loom-cli         `loom` — enroll, status, diagnostics, admin ops
-  loom-testkit     mocks + harness (mock backend, mock agent server)
+  loom-client      workstation daemon (connector, local API :8391, updater, PKI)
+  loom-server      gateway, scheduler, admin, gRPC listeners, internal CA
+  loom-cli         `loom` — enroll, status, diagnostics
+  loom-testkit     mock backend + mock agent server
 proto/             agent.proto — the wire contract
 migrations/        PostgreSQL schema (sqlx)
 frontend/          React + Vite + Tailwind — dark-only, 2 build variants
-deploy/            compose stack, Dockerfile, installer, systemd, Caddy
+deploy/            compose, Dockerfiles, installer, systemd, Caddy
 docs/              ADRs, protocol spec, security model, runbooks
 ```
 
----
-
-## 📚 Documentation
+## Documentation
 
 | Doc | Contents |
 |-----|----------|
-| [protocol.md](docs/protocol.md) | Full wire spec — messages, fencing, bounds, reconnect |
-| [security.md](docs/security.md) | Threat model, credentials, isolation invariants |
+| [protocol.md](docs/protocol.md) | Wire spec — messages, fencing, bounds, reconnect, CSR fields |
+| [security.md](docs/security.md) | Threat model, credentials, TLS/mTLS, isolation invariants |
 | [development.md](docs/development.md) | Dev loop, conventions, adding adapters |
-| [runbooks/install.md](docs/runbooks/install.md) | Server + client install, enrollment, smoke test |
+| [runbooks/install.md](docs/runbooks/install.md) | Server + client install, enrollment, TLS/mTLS setup, smoke test |
 | [runbooks/operations.md](docs/runbooks/operations.md) | Monitoring, backups, upgrades, failure playbook |
-| [adr/](docs/adr/) | Why gRPC-split channels, why Redis Lua, SMG evaluation, local-first |
+| [adr/](docs/adr/) | gRPC split channels, Redis Lua, SMG evaluation, local-first |
 
----
+## Status & roadmap
 
-## 🧪 Status & Roadmap
-
-- [x] Control plane + data plane over client-initiated gRPC
-- [x] Local-first admission + dynamic tier-2 sharing
-- [x] OpenAI gateway: chat, completions, embeddings, streaming, tools, vision
-- [x] Full admin dashboard + embedded client UI
-- [x] Atomic leases, fencing, watchdogs, heartbeat detection
-- [x] Backend management from the client UI (add/edit/delete + live probe)
-- [x] Model auto-load/keep-warm for JIT backends (Ollama, LM Studio)
-- [x] Update-check chip in both UIs (compares against latest release)
-- [x] Native client install: systemd (Linux), `.app` bundle + launchd + menu-bar tray (macOS)
-- [x] Installer + self-update pipeline
-- [x] Signed release artifacts (minisign) + staged smoke test + boot-failure
-  watchdog with automatic `.prev` rollback
-- [x] Media endpoints: image generation, TTS/STT/translation, video creation
-- [x] Auto routers: LLM-classified, deterministic `when`-rules and
-  `reasoning_effort` escalation via member `set` overrides
-- [x] API Users: per-user keys, model grants, scopes, RPM/TPM/concurrency
-- [x] mTLS for agent channel (automatic PKI, cert issuance + renewal)
+- [x] Client-initiated gRPC control + data plane
+- [x] Local-first admission + dynamic tier-2 sharing (pressure offload +
+  auto re-warm verified on real load)
+- [x] OpenAI gateway incl. streaming, tools, vision, media endpoints
+- [x] Virtual models + heuristic/hybrid/LLM routers + `set` escalation
+- [x] API Users: keys, grants, scopes, RPM/TPM/concurrency limits
+- [x] Admin dashboard + embedded client UI
+- [x] Signed auto-updates + boot watchdog rollback
+- [x] TLS 1.3 + **mTLS by default**: automatic PKI, issuance via bootstrap
+  listener, inline renewal, CA-rotation recovery
+- [x] HTTP security headers on dashboard + API
 - [ ] TPM metering (best-effort), API-user quotas
 - [ ] Multi-replica scheduler coordination
 
----
-
-## 📄 License
+## License
 
 MIT — see [LICENSE](LICENSE).
 

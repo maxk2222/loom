@@ -276,24 +276,21 @@ impl Connector {
         let identity = if cfg.connector.client_cert_path.is_empty() {
             self.state.cert_store.handshake_material()
         } else {
-            let cert = std::fs::read(&cfg.connector.client_cert_path).with_context(|| {
-                format!(
-                    "reading connector.client_cert_path {}",
-                    cfg.connector.client_cert_path
-                )
-            })?;
-            let key = std::fs::read(&cfg.connector.client_key_path).with_context(|| {
-                format!(
-                    "reading connector.client_key_path {}",
-                    cfg.connector.client_key_path
-                )
-            })?;
-            Some((cert, key)).map(|(c, k)| {
-                (
-                    String::from_utf8_lossy(&c).into_owned(),
-                    String::from_utf8_lossy(&k).into_owned(),
-                )
-            })
+            let cert =
+                std::fs::read_to_string(&cfg.connector.client_cert_path).with_context(|| {
+                    format!(
+                        "reading connector.client_cert_path {}",
+                        cfg.connector.client_cert_path
+                    )
+                })?;
+            let key =
+                std::fs::read_to_string(&cfg.connector.client_key_path).with_context(|| {
+                    format!(
+                        "reading connector.client_key_path {}",
+                        cfg.connector.client_key_path
+                    )
+                })?;
+            Some((cert, key))
         };
         // CA precedence: explicit ca_cert_path > pinned server CA > system roots.
         let ca_override = if cfg.connector.ca_cert_path.is_empty() {
@@ -442,25 +439,37 @@ impl Connector {
     }
 
     async fn session(&self, cfg: &ClientConfig) -> anyhow::Result<()> {
+        // Own a mutable copy — a successful bootstrap may deliver a fresh
+        // client_id + device_credential that the strict-port Hello needs.
+        let mut cfg = cfg.clone();
         // Auto-PKI: TLS + no manual cert paths → ensure a valid cert exists.
-        // Expiring-but-valid certs renew inline (pending_csr rides in Hello);
-        // missing/expired certs go through the bootstrap listener first.
+        // Effective scheme matters: bare host:port and Require both end up
+        // on TLS — a literal starts_with("https") check would skip PKI for
+        // them and wedge the client against a client-cert-strict port.
         let auto_pki = cfg.connector.tls != TlsMode::Off
             && cfg.connector.client_cert_path.is_empty()
-            && cfg.server_url.starts_with("https");
+            && match cfg.connector.tls {
+                TlsMode::Require => true,
+                _ => cfg.server_url.starts_with("https") || !cfg.server_url.contains("://"),
+            };
         if auto_pki && self.state.cert_store.needs_renewal() {
             if self.state.cert_store.handshake_material().is_some() {
+                // Expiring-but-valid: renew inline — the CSR rides in Hello.
                 let cid = if cfg.client_id.is_empty() {
                     "new".into()
                 } else {
                     cfg.client_id.clone()
                 };
                 *self.state.pending_csr.lock().await = Some(self.state.cert_store.csr_pem(&cid)?);
-            } else if let Err(e) = self.bootstrap_cert(cfg).await {
+            } else if let Err(e) = self.bootstrap_cert(&cfg).await {
                 warn!(error = %e, "cert bootstrap failed — connecting without cert");
+            } else {
+                // Fresh enrollment may have assigned client_id/credential —
+                // re-read before dialing the strict endpoint.
+                cfg = self.state.cfg_store.get().await;
             }
         }
-        let ep = self.endpoint(cfg).await?;
+        let ep = self.endpoint(&cfg).await?;
         let channel = ep.connect().await?;
         let mut agent = AgentClient::new(channel);
         *self.state.agent.lock().await = Some(agent.clone());
@@ -470,7 +479,7 @@ impl Connector {
         let mut inbound = response.into_inner();
 
         // Hello
-        let hello = self.build_hello(cfg).await;
+        let hello = self.build_hello(&cfg).await;
         ctrl_tx
             .send(ClientEnvelope {
                 msg: Some(client_envelope::Msg::Hello(hello)),
@@ -490,7 +499,7 @@ impl Connector {
         info!(session = %ack.session_id, client_id = %ack.client_id, "registered with server");
 
         // Persist assigned client id / device credential / issued cert.
-        self.persist_issued(&ack, cfg).await;
+        self.persist_issued(&ack, &cfg).await;
 
         *self.state.session_id.write().unwrap() = ack.session_id.clone();
         *self.state.ctrl_tx.write().unwrap() = Some(ctrl_tx.clone());

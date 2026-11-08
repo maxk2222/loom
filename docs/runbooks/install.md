@@ -10,7 +10,48 @@ docker compose --profile full up -d
 
 - Dashboard: `https://<domain>/` (first visit → admin setup wizard)
 - OpenAI API: `https://<domain>/v1`
-- gRPC agent port: `50051` (configure TLS for production)
+- gRPC agent port: `50051` (see *TLS & mTLS* below for production)
+
+## TLS & mTLS (agent channel)
+
+Recommended production layout — three listeners:
+
+```bash
+LOOM_GRPC_BIND=0.0.0.0:50052          # strict agent port (TLS + mTLS)
+LOOM_GRPC_TLS_CERT=/etc/loom/server.crt
+LOOM_GRPC_TLS_KEY=/etc/loom/server.key
+LOOM_MTLS=1                            # require client certs signed by the CA
+LOOM_GRPC_BOOTSTRAP_BIND=0.0.0.0:50053 # cert issuance (TLS, no client cert)
+# optional during migration only:
+LOOM_GRPC_PLAIN_BIND=0.0.0.0:50051     # legacy plaintext — remove once done
+```
+
+The server creates an internal CA at `$LOOM_DATA_DIR/tls/ca.{crt,key}` on
+first boot (or reuses an existing CA directory — e.g. one generated with
+openssl). Distribute `ca.crt` + an enroll token to each workstation; the
+client mints its keypair, obtains a signed cert via the bootstrap port,
+and renews automatically — no cert tooling on clients.
+
+Client `config.toml`:
+
+```toml
+server_url = "https://loom.example.com:50052"
+
+[connector]
+tls = "require"                                   # require | auto | off
+ca_cert_path = "/etc/loom-client/ca.crt"
+# client_cert_path / client_key_path — leave unset for automatic PKI;
+# set both to use externally-issued certs instead.
+# bootstrap_url = "https://loom.example.com:50053" # default: server port+1
+```
+
+Verify issuance:
+
+```bash
+ls /etc/loom-client/tls/                 # client.{crt,key,meta} + server-ca.crt
+openssl x509 -in /etc/loom-client/tls/client.crt -noout -subject -issuer
+# subject=CN=loom-client-<client-id>  issuer=CN=LOOM Internal CA
+```
 
 First admin can also be created headless:
 

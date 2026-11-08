@@ -77,6 +77,8 @@ in release notes.
 | Symptom | Check |
 |---------|-------|
 | Client offline | `journalctl -u loom-client`, server URL/TLS, credential status |
+| Client won't connect (TLS/mTLS) | `ca_cert_path` readable? `tls` mode matches server? For auto-PKI: bootstrap port reachable (`server_port+1` or `connector.bootstrap_url`)? `~/.loom/tls/` — `client.crt` subject must be `loom-client-<client_id>`, issuer must match the CA in `ca_cert_path`/`server-ca.crt`. After CA rotation the client self-heals: it drops a non-chaining cert after ~5 TLS failures and re-bootstraps |
+| Bootstrap issues no cert | Server `client_ca` loaded? (`data/tls/ca.{crt,key}` must both exist and parse — a corrupt pair regenerates both and invalidates issued certs) |
 | Requests 503 `no deployment available` | deployments online? capabilities? tier2_free? |
 | Requests 429 `overloaded` | queue depth (Scheduler page), class caps |
 | `rate_limited` | API key limits; raise or add key |

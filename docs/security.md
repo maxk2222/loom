@@ -22,8 +22,27 @@ device credentials, prompt contents, client compute capacity.
 ## Transport
 
 - `/v1/*` + `/api/*` + dashboard: HTTPS via Caddy (or terminated LB).
-- gRPC agent endpoint: TLS (server cert) in production; mTLS-ready credential
-  abstraction — a device credential is required regardless of TLS mode.
+  Every response also carries CSP, `X-Content-Type-Options`,
+  `X-Frame-Options`, `Referrer-Policy` and HSTS headers in-app.
+- gRPC agent endpoint: TLS 1.3 server-auth as baseline; **mTLS** with
+  `LOOM_MTLS=1` or `grpc_tls.client_ca_path` — clients without a trusted
+  cert cannot open a TLS session at all.
+- **Automatic PKI**: the server keeps an internal CA
+  (`data/tls/ca.{crt,key}`, `0600`; an existing CA directory is reused)
+  and signs client CSRs carried in `Hello`. A dedicated bootstrap
+  listener (`LOOM_GRPC_BOOTSTRAP_BIND`, TLS server-auth only) issues
+  ~180-day certs to authenticated clients — no cert tooling on the
+  workstation. Issued certs are bound to the *authenticated* device id
+  (the CSR's claimed DN is discarded), so a leaked CSR/cert pair cannot
+  mint credentials for another device. Clients renew under 30 days
+  remaining — inline via CSR on the strict port while the old cert still
+  handshakes, or by re-bootstrapping after expiry or CA rotation.
+- Regardless of TLS mode, the app-layer device credential is still
+  required to open a session — the cert is transport-level proof of
+  fleet membership, not identity.
+- Optional plaintext migration listener (`LOOM_GRPC_PLAIN_BIND`) for
+  zero-downtime fleet transitions — remove it once all clients are on
+  TLS/mTLS.
 - Local client API: binds `127.0.0.1` only; optional local bearer token.
 
 ## Authorization
@@ -67,12 +86,16 @@ device credentials, prompt contents, client compute capacity.
   writable path limited to data dir.
 - Compose binds Postgres/Redis to `127.0.0.1` by default; server container
   runs as non-root (uid 10001).
-- Security headers via Caddy (nosniff, DENY framing, no Server header).
+- Security headers are set in-app on all HTTP responses (CSP, nosniff,
+  frame deny, referrer policy, HSTS) — Caddy/LB headers are additive.
+- Release artifacts are minisign/ed25519-signed; clients refuse unsigned
+  or mismatched payloads and roll back automatically on crash loops.
 
 ## Known limitations / roadmap
 
-- mTLS not yet enabled by default (TLS + device credential today).
 - Audit log records admin actions; request-level audit intentionally omits
   content for privacy.
-- Update signing via minisign planned for release artifacts (updater already
-  verifies SHA-256 checksums over HTTPS).
+- Client certs are ~180-day; there is no CRL — a leaked cert+key remains
+  valid until expiry, though the device credential behind it can be
+  suspended independently (cert gates transport, credential gates
+  identity).
