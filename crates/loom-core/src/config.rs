@@ -410,6 +410,10 @@ pub struct ServerConfig {
     /// TLS config for the gRPC listener (optional; Caddy can terminate instead).
     #[serde(default)]
     pub grpc_tls: Option<GrpcTlsConfig>,
+    /// Optional extra plaintext gRPC listener kept alive during a TLS
+    /// migration — legacy clients reconnect here until they switch to TLS.
+    #[serde(default)]
+    pub grpc_plain_bind: Option<String>,
     /// Directory for mutable data (logo uploads, release artifacts).
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
@@ -455,6 +459,7 @@ impl Default for ServerConfig {
             redis_url: default_redis_url(),
             redis_prefix: default_redis_prefix(),
             grpc_tls: None,
+            grpc_plain_bind: None,
             data_dir: default_data_dir(),
             dashboard_dir: String::new(),
             scheduler: SchedulerConfig::default(),

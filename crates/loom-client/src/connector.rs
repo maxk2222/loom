@@ -11,6 +11,7 @@ use crate::backend_manager::BackendManager;
 use crate::config::ConfigStore;
 use crate::scheduler::{LocalScheduler, RequestClass};
 use crate::telemetry;
+use anyhow::Context;
 use futures_util::StreamExt;
 use loom_core::capability::ApiType;
 use loom_core::config::{ClientConfig, DesiredClientConfig, TlsMode};
@@ -244,10 +245,25 @@ impl Connector {
         }
     }
 
-    async fn endpoint(cfg: &ClientConfig) -> Result<Endpoint, tonic::transport::Error> {
+    async fn endpoint(cfg: &ClientConfig) -> anyhow::Result<Endpoint> {
         let mut url = cfg.server_url.clone();
         if !url.contains("://") {
             url = format!("https://{url}");
+        }
+        // TLS policy: Require upgrades any explicit http scheme, Off forces
+        // plaintext (dev/lab), Auto honours the configured scheme.
+        match cfg.connector.tls {
+            TlsMode::Require => {
+                if let Some(rest) = url.strip_prefix("http://") {
+                    url = format!("https://{rest}");
+                }
+            }
+            TlsMode::Off => {
+                if let Some(rest) = url.strip_prefix("https://") {
+                    url = format!("http://{rest}");
+                }
+            }
+            TlsMode::Auto => {}
         }
         let mut ep = Endpoint::from_shared(url)?;
         ep = ep
@@ -256,17 +272,23 @@ impl Connector {
             .tcp_keepalive(Some(Duration::from_secs(30)))
             .http2_keep_alive_interval(Duration::from_secs(20))
             .keep_alive_while_idle(true);
-        let require_tls = cfg.connector.tls == TlsMode::Require
-            || (cfg.connector.tls == TlsMode::Auto && ep.uri().scheme_str() == Some("https"));
-        if require_tls && ep.uri().scheme_str() != Some("https") {
-            // Endpoint was built from http; rebuild as https is handled by URL.
-        }
         if ep.uri().scheme_str() == Some("https") {
+            // Provider ambiguity (aws-lc-rs + ring both in the dep tree) —
+            // Once-guard covers tests and non-main entry points; main.rs
+            // installs it eagerly too.
+            static TLS_PROVIDER_INIT: std::sync::Once = std::sync::Once::new();
+            TLS_PROVIDER_INIT.call_once(|| {
+                let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            });
             let mut tls = ClientTlsConfig::new().with_enabled_roots();
             if !cfg.connector.ca_cert_path.is_empty() {
-                if let Ok(pem) = std::fs::read(&cfg.connector.ca_cert_path) {
-                    tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(pem));
-                }
+                let pem = std::fs::read(&cfg.connector.ca_cert_path).with_context(|| {
+                    format!(
+                        "reading connector.ca_cert_path {}",
+                        cfg.connector.ca_cert_path
+                    )
+                })?;
+                tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(pem));
             }
             ep = ep.tls_config(tls)?;
         }
@@ -1015,5 +1037,61 @@ pub(crate) fn inspect_sse_tail(
         {
             *finish_reason = fr.to_string();
         }
+    }
+}
+
+#[cfg(test)]
+mod tls_policy_tests {
+    use super::*;
+    use loom_core::config::ConnectorConfig;
+
+    fn cfg(url: &str, tls: TlsMode) -> ClientConfig {
+        ClientConfig {
+            server_url: url.into(),
+            connector: ConnectorConfig {
+                tls,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_bare_host_defaults_https() {
+        let ep = Connector::endpoint(&cfg("host.local:50051", TlsMode::Auto))
+            .await
+            .unwrap();
+        assert_eq!(ep.uri().scheme_str(), Some("https"));
+    }
+
+    #[tokio::test]
+    async fn auto_keeps_explicit_http() {
+        let ep = Connector::endpoint(&cfg("http://host:50051", TlsMode::Auto))
+            .await
+            .unwrap();
+        assert_eq!(ep.uri().scheme_str(), Some("http"));
+    }
+
+    #[tokio::test]
+    async fn require_upgrades_http_to_https() {
+        let ep = Connector::endpoint(&cfg("http://host:50051", TlsMode::Require))
+            .await
+            .unwrap();
+        assert_eq!(ep.uri().scheme_str(), Some("https"));
+    }
+
+    #[tokio::test]
+    async fn off_forces_plaintext() {
+        let ep = Connector::endpoint(&cfg("https://host:50051", TlsMode::Off))
+            .await
+            .unwrap();
+        assert_eq!(ep.uri().scheme_str(), Some("http"));
+    }
+
+    #[tokio::test]
+    async fn missing_ca_cert_path_fails_loudly() {
+        let mut c = cfg("host:50051", TlsMode::Require);
+        c.connector.ca_cert_path = "/nonexistent/ca.pem".into();
+        assert!(Connector::endpoint(&c).await.is_err());
     }
 }

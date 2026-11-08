@@ -26,6 +26,10 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     init_tracing();
+    // Both `aws-lc-rs` and `ring` features land in the dep tree (tonic +
+    // reqwest pull both) — rustls refuses to pick a default provider, so
+    // install one explicitly before any TLS use.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     // Peek at the tray flag before deciding where the runtime lives —
     // on macOS the tray needs the main thread.
     #[cfg(feature = "tray")]

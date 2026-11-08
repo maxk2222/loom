@@ -31,5 +31,28 @@ pub fn load() -> Result<ServerConfig> {
     if let Ok(v) = std::env::var("LOOM_DASHBOARD_DIR") {
         cfg.dashboard_dir = v;
     }
+    // gRPC TLS: cert+key enable TLS on grpc_bind; an optional extra
+    // plaintext listener (LOOM_GRPC_PLAIN_BIND) keeps legacy clients
+    // reachable during a fleet migration.
+    match (
+        std::env::var("LOOM_GRPC_TLS_CERT"),
+        std::env::var("LOOM_GRPC_TLS_KEY"),
+    ) {
+        (Ok(cert_path), Ok(key_path)) => {
+            cfg.grpc_tls = Some(loom_core::config::GrpcTlsConfig {
+                cert_path,
+                key_path,
+            });
+        }
+        (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+            tracing::warn!(
+                "LOOM_GRPC_TLS_CERT and LOOM_GRPC_TLS_KEY must both be set — TLS disabled"
+            );
+        }
+        _ => {}
+    }
+    if let Ok(v) = std::env::var("LOOM_GRPC_PLAIN_BIND") {
+        cfg.grpc_plain_bind = Some(v);
+    }
     Ok(cfg)
 }

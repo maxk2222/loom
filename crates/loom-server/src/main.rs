@@ -16,6 +16,9 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // tonic + reqwest pull in both rustls crypto providers — pick one
+    // explicitly or rustls panics when building the TLS config.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     init_tracing();
     let args = Args::parse();
     let cfg = config::load()?;
@@ -118,29 +121,52 @@ async fn main() -> anyhow::Result<()> {
     };
     let grpc_addr: SocketAddr = cfg.grpc_bind.parse()?;
     let grpc_tls = cfg.grpc_tls.clone();
-    tokio::spawn(async move {
-        // Stream fan-out bound per control connection — a rogue client
-        // cannot exhaust server resources through one session. Must stay
-        // comfortably above a client's legitimate inflight count: every
-        // dispatched request occupies its own RequestData stream — a cap
-        // below that resets the whole control session under load bursts.
-        let mut b = tonic::transport::Server::builder().concurrency_limit_per_connection(512);
-        if let Some(t) = grpc_tls {
-            let cert = std::fs::read(&t.cert_path).unwrap();
-            let key = std::fs::read(&t.key_path).unwrap();
-            b = b
-                .tls_config(
-                    tonic::transport::ServerTlsConfig::new()
-                        .identity(tonic::transport::Identity::from_pem(cert, key)),
-                )
-                .unwrap();
-        }
-        info!(%grpc_addr, "gRPC agent endpoint listening");
-        b.add_service(grpc_service::server(svc))
-            .serve(grpc_addr)
-            .await
-            .ok();
-    });
+    // Shared service instance — a second (plaintext) listener during a TLS
+    // migration serves the same AgentSvc.
+    let svc = std::sync::Arc::new(svc);
+    {
+        let svc = svc.clone();
+        tokio::spawn(async move {
+            // Stream fan-out bound per control connection — a rogue client
+            // cannot exhaust server resources through one session. Must stay
+            // comfortably above a client's legitimate inflight count: every
+            // dispatched request occupies its own RequestData stream — a cap
+            // below that resets the whole control session under load bursts.
+            let tls_on = grpc_tls.is_some();
+            let mut b = tonic::transport::Server::builder().concurrency_limit_per_connection(512);
+            if let Some(t) = grpc_tls {
+                let cert = std::fs::read(&t.cert_path).unwrap();
+                let key = std::fs::read(&t.key_path).unwrap();
+                b = b
+                    .tls_config(
+                        tonic::transport::ServerTlsConfig::new()
+                            .identity(tonic::transport::Identity::from_pem(cert, key)),
+                    )
+                    .unwrap();
+            }
+            info!(%grpc_addr, tls = tls_on, "gRPC agent endpoint listening");
+            b.add_service(grpc_service::server((*svc).clone()))
+                .serve(grpc_addr)
+                .await
+                .ok();
+        });
+    }
+    // Optional extra plaintext listener for migration — removed once every
+    // client speaks TLS.
+    if let (Some(plain), Some(_)) = (cfg.grpc_plain_bind.clone(), cfg.grpc_tls.clone()) {
+        let svc = svc.clone();
+        tokio::spawn(async move {
+            if let Ok(addr) = plain.parse::<SocketAddr>() {
+                info!(%addr, "gRPC plaintext migration listener");
+                tonic::transport::Server::builder()
+                    .concurrency_limit_per_connection(512)
+                    .add_service(grpc_service::server((*svc).clone()))
+                    .serve(addr)
+                    .await
+                    .ok();
+            }
+        });
+    }
 
     if let Some(bind) = args.metrics_bind {
         if let Ok(addr) = bind.parse::<SocketAddr>() {

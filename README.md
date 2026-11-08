@@ -373,6 +373,37 @@ deployments re-warm right away and rejoin once resident again.
 - **Prompts and responses are never persisted** — not in Postgres, Redis,
   logs, or metrics
 - gRPC fencing tokens make stale assignments harmless after reconnects
+- The agent channel is **outbound-only on the client** (no inbound ports;
+  the only client listener is the loopback UI) and supports **TLS 1.3
+  server-auth** — see *Agent-channel TLS* below
+
+#### Agent-channel TLS
+
+```bash
+# Server — TLS on the agent port (cert signed by your CA, SAN must cover
+# the address clients dial)
+LOOM_GRPC_BIND=0.0.0.0:50051 \
+LOOM_GRPC_TLS_CERT=/etc/loom/server.crt \
+LOOM_GRPC_TLS_KEY=/etc/loom/server.key \
+loom-server
+
+# Optional during fleet migration: keep a plaintext listener for legacy
+# clients while they switch over — remove once all clients use TLS.
+LOOM_GRPC_PLAIN_BIND=0.0.0.0:50052
+```
+
+```toml
+# Client — config.toml
+server_url = "https://loom.example.com:50051"   # https:// => TLS
+[connector]
+tls = "require"          # off | auto | require
+ca_cert_path = "/etc/loom/ca.crt"   # empty = system roots
+```
+
+`auto` follows the URL scheme (a bare `host:port` defaults to `https`),
+`require` upgrades any `http://` URL to TLS, `off` forces plaintext for
+lab setups. Self-signed deployments can point `ca_cert_path` at the
+issuing CA — or at the server certificate itself (pinning).
 
 ### 🔄 Auto-updates (server-triggered, signature-verified)
 
