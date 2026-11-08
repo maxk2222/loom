@@ -267,8 +267,10 @@ impl BackendManager {
                 let misses = de.evict_misses.load(std::sync::atomic::Ordering::Relaxed);
                 let warmed_before = de.warmed_at.read().await.is_some();
                 if de.cfg.auto_load && warmed_before && !loaded_ok {
-                    de.evict_misses
-                        .store(misses.saturating_add(1), std::sync::atomic::Ordering::Relaxed);
+                    de.evict_misses.store(
+                        misses.saturating_add(1),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     if misses == 2 {
                         warn!(deployment = %model, "model keeps getting evicted after warm — backing off auto-load");
                     }
@@ -278,7 +280,12 @@ impl BackendManager {
                 }
                 let base = if loaded_ok { 240u64 } else { 60 };
                 let rewarm_secs = base
-                    .saturating_mul(1u64 << de.evict_misses.load(std::sync::atomic::Ordering::Relaxed).min(5))
+                    .saturating_mul(
+                        1u64 << de
+                            .evict_misses
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            .min(5),
+                    )
                     .min(1800);
                 let mut w = de.warmed_at.write().await;
                 if adapter_health != Health::Healthy {
