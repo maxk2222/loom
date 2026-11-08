@@ -372,16 +372,25 @@ impl ClientRegistry {
                 .arg("gpu_mem_used_bytes")
                 .arg("gpu_mem_total_bytes")
                 .arg("stats_at")
+                .arg("last_hb")
                 .query_async(&mut c)
                 .await
                 .unwrap_or_default();
             let f = |i: usize| vals.get(i).and_then(|v| v.clone());
             let num = |i: usize| f(i).and_then(|s| s.parse::<f64>().ok());
+            // Effective liveness: online flag AND a heartbeat younger than
+            // the watcher's stale threshold (45s) — a crashed client can
+            // leave online=1 behind long after its stream died.
+            let hb_fresh = num(11)
+                .map(|t| crate::client_registry::now_ms() - t as i64 <= 45_000)
+                .unwrap_or(false);
+            let live = f(0).as_deref() == Some("1") && hb_fresh;
             out.push(json!({
                 "id": cid,
                 "name": r.name,
-                "status": r.status,
-                "online": f(0).as_deref() == Some("1"),
+                "status": if live { r.status.as_str() } else { "offline" },
+                "enrollment_status": r.status,
+                "online": live,
                 "last_seen_at": r.last_seen_at,
                 "version": r.version,
                 "platform": r.platform,

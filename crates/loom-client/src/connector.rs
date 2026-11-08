@@ -155,11 +155,19 @@ impl Connector {
         // Debounced report tasks: capacity changes → capacity report;
         // probe/capability changes → full inventory (server needs caps for
         // routing filters — without this, probe results only arrived on
-        // reconnect or config writes).
+        // reconnect or config writes). Plus a periodic re-report: if the
+        // server wiped runtime state (restart reconciliation) while this
+        // control stream stayed up, nothing would ever re-trigger a report —
+        // a steady 60s cadence heals the drift.
         let state = self.state.clone();
         tokio::spawn(async move {
+            let mut periodic = tokio::time::interval(Duration::from_secs(60));
+            periodic.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
+                    _ = periodic.tick() => {
+                        state.send_capacity_report().await;
+                    }
                     _ = state.capacity_notify.notified() => {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         state.send_capacity_report().await;

@@ -160,18 +160,21 @@ pub fn spawn(
 }
 
 /// GPU sampler — independent cadence (~15s) because probing shells out.
-/// Linux+NVIDIA: `nvidia-smi` (the dominant inference case). macOS: GPU name
-/// only via `system_profiler` — Metal shares unified RAM and utilization
-/// requires root. Other platforms leave `gpu` unset.
+/// Linux+NVIDIA: `nvidia-smi` (the dominant inference case). macOS: name via
+/// `system_profiler` once, then IOGPU PerformanceStatistics via `ioreg` —
+/// Device Utilization % + in-use/allocated system memory (no root needed on
+/// Apple Silicon). Other platforms leave `gpu` unset.
 fn spawn_gpu_sampler(stats: SharedStats) {
     tokio::spawn(async move {
         if cfg!(target_os = "macos") {
-            if let Some(g) = probe_macos_gpu().await {
-                if let Ok(mut w) = stats.write() {
-                    w.gpu = Some(g);
+            loop {
+                if let Some(g) = probe_macos_gpu().await {
+                    if let Ok(mut w) = stats.write() {
+                        w.gpu = Some(g);
+                    }
                 }
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
             }
-            return;
         }
         if !has_nvidia_smi().await {
             return;
@@ -249,12 +252,49 @@ async fn probe_macos_gpu() -> Option<GpuStats> {
                 .map(|(_, v)| v.trim().to_string())
         })
         .filter(|s| !s.is_empty())?;
+    let (util, used, total) = probe_macos_gpu_perf().await;
     Some(GpuStats {
         name,
-        util_pct: None,
-        mem_used_bytes: None,
-        mem_total_bytes: None,
+        util_pct: util,
+        mem_used_bytes: used,
+        mem_total_bytes: total,
     })
+}
+
+/// IOGPU PerformanceStatistics via ioreg — no root required on Apple Silicon.
+/// Yields (device util %, in-use system memory B, allocated system memory B).
+#[cfg(target_os = "macos")]
+async fn probe_macos_gpu_perf() -> (Option<f32>, Option<u64>, Option<u64>) {
+    let Ok(out) = tokio::process::Command::new("ioreg")
+        .args(["-l", "-w0"])
+        .output()
+        .await
+    else {
+        return (None, None, None);
+    };
+    if !out.status.success() {
+        return (None, None, None);
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut util = None;
+    let mut used = None;
+    let mut total = None;
+    for line in text.lines().filter(|l| l.contains("PerformanceStatistics")) {
+        // Exact key match via closing quote + '=' — avoids e.g.
+        // "In use system memory (driver)" shadowing the real key.
+        let grab = |key: &str| -> Option<u64> {
+            line.split_once(&format!("{key}\"="))?
+                .1
+                .split(|c: char| !(c.is_ascii_digit()))
+                .find(|s| !s.is_empty())?
+                .parse()
+                .ok()
+        };
+        util = util.or_else(|| grab("Device Utilization %").map(|v| v as f32));
+        used = used.or_else(|| grab("In use system memory"));
+        total = total.or_else(|| grab("Alloc system memory"));
+    }
+    (util, used, total)
 }
 
 #[cfg(not(target_os = "macos"))]
