@@ -89,8 +89,13 @@ jobs:
           path: rel
           merge-multiple: true
 
-      - name: Install rsign2 (minisign-compatible signer)
-        run: cargo install rsign2 --locked
+      - name: Install minisign
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/minisign.tgz https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          tar -xzf /tmp/minisign.tgz -C /tmp
+          sudo install -m755 /tmp/minisign-linux/x86_64/minisign /usr/local/bin/minisign
+          minisign -v
 
       - name: Sign artifacts
         env:
@@ -105,7 +110,7 @@ jobs:
           chmod 600 /tmp/loom-release.key
           for f in rel/loom-*; do
             case "$f" in *.sha256|*.minisig) continue;; esac
-            "$HOME/.cargo/bin/rsign" sign "$f" -s /tmp/loom-release.key -W # emits ${f}.minisig
+            minisign -Sm "$f" -s /tmp/loom-release.key -W # emits ${f}.minisig
           done
           ls rel/ | head -30
 
