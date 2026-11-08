@@ -28,6 +28,7 @@ struct Inner {
     http: reqwest::Client,
     backends: RwLock<HashMap<String, BackendEntry>>,
     deployments: RwLock<HashMap<String, DeploymentEntry>>,
+    sys_stats: RwLock<Option<crate::sysmon::SharedStats>>,
     cancel: CancellationToken,
 }
 
@@ -64,9 +65,35 @@ impl BackendManager {
                 http,
                 backends: RwLock::new(HashMap::new()),
                 deployments: RwLock::new(HashMap::new()),
+                sys_stats: RwLock::new(None),
                 cancel: CancellationToken::new(),
             }),
         }
+    }
+
+    /// Wire the sysmon stats handle so auto-load can check GPU headroom.
+    pub async fn set_sys_stats(&self, s: crate::sysmon::SharedStats) {
+        *self.inner.sys_stats.write().await = Some(s);
+    }
+
+    /// True while GPU VRAM is over the configured `gpu_vram_pct` limit —
+    /// warming a model that cannot fit wastes a load cycle. Only counts
+    /// when a real VRAM total exists (dedicated GPUs); unified-memory
+    /// platforms are covered by the RAM gate instead.
+    async fn vram_blocked(&self) -> bool {
+        let Some(arc) = self.inner.sys_stats.read().await.clone() else {
+            return false;
+        };
+        let s = arc.read().unwrap().clone();
+        let limit = s.gpu_vram_limit_pct;
+        if limit == 0 {
+            return false;
+        }
+        let Some(g) = s.gpu else { return false };
+        let (Some(total), Some(used)) = (g.mem_total_bytes, g.mem_used_bytes) else {
+            return false;
+        };
+        total > 0 && (used as f32 * 100.0 / total as f32) >= limit as f32
     }
 
     /// Rebuild backend/deployment registry from config. Preserves probed
@@ -237,6 +264,8 @@ impl BackendManager {
                     // pressure-offloaded model must stay unloaded — the local
                     // path still loads it JIT on demand.
                     && !sched.tier2_gated(&did)
+                    // VRAM full → don't even attempt a load that cannot fit.
+                    && !self.vram_blocked().await
                     && w.map(|t| t.elapsed().as_secs() >= rewarm_secs)
                         .unwrap_or(true)
                 {

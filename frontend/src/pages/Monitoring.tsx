@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, Spinner } from "../components/ui";
 import type { HistoryRow, Project, UsageStat } from "../lib/types";
+import { fmtTs } from "../lib/format";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
@@ -79,7 +80,7 @@ export default function MonitoringPage() {
           <tbody>
             {(versions.data?.versions ?? []).map((v) => (
               <tr key={v.id}>
-                <td className="td text-muted">{new Date(v.created_at).toLocaleString()}</td>
+                <td className="td text-muted">{fmtTs(v.created_at)}</td>
                 <td className="td">{v.entity}</td>
                 <td className="td font-mono text-xs text-muted">{v.entity_id || "—"}</td>
                 <td className="td text-muted">{v.actor}</td>

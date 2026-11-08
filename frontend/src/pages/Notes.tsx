@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { Badge, Card, Field, Modal, Select, Spinner, Toggle } from "../components/ui";
 import type { ClientRow } from "../lib/types";
+import { fmtTs } from "../lib/format";
 
 interface AdminNote {
   id: string;
@@ -90,8 +91,8 @@ export default function NotesPage() {
                 </div>
                 {n.body && <div className="mt-1.5 whitespace-pre-wrap text-xs text-muted">{n.body}</div>}
                 <div className="mt-1.5 text-[10px] text-muted/60">
-                  {new Date(n.created_at).toLocaleString()}
-                  {n.expires_at ? ` · expires ${new Date(n.expires_at).toLocaleString()}` : " · no expiry"}
+                  {fmtTs(n.created_at)}
+                  {n.expires_at ? ` · expires ${fmtTs(n.expires_at)}` : " · no expiry"}
                 </div>
               </div>
               <button className="shrink-0 rounded p-1.5 text-muted hover:bg-err/10 hover:text-err" onClick={() => del(n.id)} title="delete (removes from all clients)">

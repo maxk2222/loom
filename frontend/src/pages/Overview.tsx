@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { LiveBadge, PageHeader, Stat } from "../components/ui";
 import type { ClientRow, Overview, VirtualModel } from "../lib/types";
+import { fmtTs } from "../lib/format";
 
 const API_ENDPOINTS = [
   { m: "POST", p: "/v1/chat/completions", d: "chat · stream · tools · vision" },
@@ -338,7 +339,7 @@ export default function OverviewPage() {
                 <td className="td"><LiveBadge live={c.online} /></td>
                 <td className="td text-muted">{c.version || "—"}</td>
                 <td className="td text-muted">{c.platform || "—"}</td>
-                <td className="td text-muted">{c.last_seen_at ? new Date(c.last_seen_at).toLocaleString() : "—"}</td>
+                <td className="td text-muted">{c.last_seen_at ? fmtTs(c.last_seen_at) : "—"}</td>
               </tr>
             ))}
             {(clients.data?.clients ?? []).length === 0 && (

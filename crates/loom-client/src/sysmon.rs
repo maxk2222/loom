@@ -32,6 +32,8 @@ pub struct SystemStats {
     /// Configured limits in effect (0 = that metric ignored).
     pub cpu_limit_pct: u8,
     pub ram_limit_pct: u8,
+    /// GPU VRAM usage limit consulted by auto-load warm-up (0 = ignore).
+    pub gpu_vram_limit_pct: u8,
     pub enabled: bool,
     /// GPU sample — `None` when no GPU was detected or probing failed.
     /// On Apple Silicon `utilization`/`memory` stay empty: Metal shares the
@@ -149,6 +151,7 @@ pub fn spawn(
                 w.cooldown = !over && gated;
                 w.cpu_limit_pct = cfg.cpu_pct;
                 w.ram_limit_pct = cfg.ram_pct;
+                w.gpu_vram_limit_pct = cfg.gpu_vram_pct;
                 w.enabled = limits_on;
             }
         }

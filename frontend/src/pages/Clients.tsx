@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { Badge, Card, Field, Modal, Spinner } from "../components/ui";
 import type { ClientRow } from "../lib/types";
+import { fmtTs } from "../lib/format";
 
 export default function ClientsPage() {
   const q = useQuery({ queryKey: ["clients"], queryFn: () => api.get<{ clients: ClientRow[] }>("/api/clients"), refetchInterval: 5000 });
@@ -77,7 +78,7 @@ export default function ClientsPage() {
                   <td className="td text-muted">{c.version || "—"}</td>
                   <td className="td text-muted">{c.platform || "—"}</td>
                   <td className="td"><StatsCell c={c} /></td>
-                  <td className="td text-muted">{c.last_seen_at ? new Date(c.last_seen_at).toLocaleString() : "—"}</td>
+                  <td className="td text-muted">{c.last_seen_at ? fmtTs(c.last_seen_at) : "—"}</td>
                   <td className="td text-right">
                     <span className="inline-flex gap-2">
                       {c.online && (

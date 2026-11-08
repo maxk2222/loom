@@ -115,6 +115,7 @@ async fn async_main() -> anyhow::Result<()> {
         std::sync::Arc::new(std::sync::RwLock::new(local_api::load_history_file(
             &history_path,
         )));
+    backends.set_sys_stats(sys_stats.clone()).await;
     connector.set_sys_stats(sys_stats.clone());
     connector.set_history(history.clone());
     {

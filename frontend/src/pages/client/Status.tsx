@@ -4,6 +4,7 @@ import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAx
 import { Badge, Card, Stat } from "../../components/ui";
 import { Megaphone, X } from "lucide-react";
 import type { ClientNote, ClientStatus } from "../../lib/types";
+import { fmtTs } from "../../lib/format";
 
 function fmtUptime(s: number): string {
   const h = Math.floor(s / 3600);
@@ -66,7 +67,7 @@ function NotesCard() {
             </div>
           </div>
           {n.body && <div className="mt-1 whitespace-pre-wrap text-xs text-muted">{n.body}</div>}
-          <div className="mt-1 text-[10px] text-muted/60">{new Date(n.created_at_unix * 1000).toLocaleString()}</div>
+          <div className="mt-1 text-[10px] text-muted/60">{fmtTs(n.created_at_unix * 1000)}</div>
         </div>
       ))}
     </Card>

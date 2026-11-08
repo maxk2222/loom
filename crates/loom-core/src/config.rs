@@ -197,6 +197,11 @@ pub struct PressureConfig {
     /// (hysteresis so the gate does not flap on noisy load).
     #[serde(default = "default_pressure_cooldown")]
     pub cooldown_secs: u64,
+    /// GPU VRAM usage % above which `auto_load` skips warming — a deployment
+    /// whose model would not fit anyway must not even try (0 = ignore).
+    /// Not a tier-2 gate: only the warm-up path consults this.
+    #[serde(default)]
+    pub gpu_vram_pct: u8,
 }
 
 fn default_pressure_cooldown() -> u64 {
@@ -211,6 +216,7 @@ impl Default for PressureConfig {
             ram_pct: 0,
             unload_models: false,
             cooldown_secs: default_pressure_cooldown(),
+            gpu_vram_pct: 0,
         }
     }
 }
