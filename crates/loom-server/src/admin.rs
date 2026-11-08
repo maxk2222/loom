@@ -1127,7 +1127,7 @@ async fn history(State(s): State<AdminState>, Query(q): Query<HistQ>) -> Json<Va
 
 async fn usage_stats(State(s): State<AdminState>) -> Json<Value> {
     let rows: Vec<(uuid::Uuid, i64, i64, i64)> = sqlx::query_as(
-        "SELECT project_id, sum(requests), sum(prompt_tokens), sum(completion_tokens) FROM usage_counters WHERE bucket > now() - interval '24 hours' GROUP BY project_id")
+        "SELECT project_id, sum(requests)::bigint, sum(prompt_tokens)::bigint, sum(completion_tokens)::bigint FROM usage_counters WHERE bucket > now() - interval '24 hours' GROUP BY project_id")
         .fetch_all(&s.db).await.unwrap_or_default();
     Json(
         json!({"usage_24h": rows.iter().map(|(p,r,pt,ct)| json!({"project_id":p,"requests":r,"prompt_tokens":pt,"completion_tokens":ct})).collect::<Vec<_>>()}),
