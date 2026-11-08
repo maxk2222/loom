@@ -66,7 +66,7 @@ local state = redis.call('HGET', dep, 'state')
 if state ~= 'available' then return 'UNAVAILABLE' end
 local existing = redis.call('HGET', lkey, 'request_id')
 if existing == ARGV[1] then
-  return { redis.call('HGET', lkey, 'fencing') }
+  return { tonumber(redis.call('HGET', lkey, 'fencing')) }
 end
 local free = tonumber(redis.call('HGET', dep, 'tier2_free') or '0')
 if free <= 0 then return 'NO_CAPACITY' end

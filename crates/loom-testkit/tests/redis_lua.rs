@@ -132,7 +132,7 @@ async fn lease_acquire_double_and_fencing() {
         .invoke_async(&mut c)
         .await
         .unwrap();
-    assert_eq!(v4, redis::Value::SimpleString("NO_CAPACITY".into()));
+    assert_eq!(redis::from_redis_value::<String>(&v4).unwrap(), "NO_CAPACITY");
 
     // wrong fencing release → STALE, slot kept
     let r: String = redis::Script::new(lua::LEASE_RELEASE)
