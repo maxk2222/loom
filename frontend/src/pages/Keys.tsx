@@ -3,7 +3,7 @@ import { Plus } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { Badge, Card, Field, Modal, Select, Spinner } from "../components/ui";
-import type { ApiKey, Project } from "../lib/types";
+import type { ApiKey, ApiUser } from "../lib/types";
 
 const SCOPES = [
   "chat", "completions", "embeddings", "models",
@@ -13,7 +13,7 @@ const SCOPES = [
 export default function KeysPage() {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["keys"], queryFn: () => api.get<{ keys: ApiKey[] }>("/api/keys") });
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: Project[] }>("/api/projects") });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: ApiUser[] }>("/api/projects") });
   const [open, setOpen] = useState(false);
   const [token, setToken] = useState("");
   const [f, setF] = useState({ project_id: "", name: "", rpm_limit: 60, tpm_limit: 100000, max_concurrent: 4, scopes: new Set(SCOPES) });
@@ -44,7 +44,7 @@ export default function KeysPage() {
       {q.isLoading ? <Spinner /> : (
         <Card className="overflow-x-auto p-0">
           <table className="w-full">
-            <thead><tr><th className="th">Name</th><th className="th">Prefix</th><th className="th">Project</th><th className="th">Limits (rpm/tpm/conc)</th><th className="th">Status</th><th className="th" /></tr></thead>
+            <thead><tr><th className="th">Name</th><th className="th">Prefix</th><th className="th">API user</th><th className="th">Limits (rpm/tpm/conc)</th><th className="th">Status</th><th className="th" /></tr></thead>
             <tbody>
               {(q.data?.keys ?? []).map((k) => (
                 <tr key={k.id}>
@@ -71,7 +71,7 @@ export default function KeysPage() {
           </div>
         ) : (
           <form onSubmit={create} className="space-y-4">
-            <Field label="Project">
+            <Field label="API user">
               <Select value={f.project_id} onChange={(v) => setF({ ...f, project_id: v })}
                 options={[{ value: "", label: "— select —" }, ...(projects.data?.projects ?? []).map((p) => ({ value: p.id, label: p.slug }))]} />
             </Field>

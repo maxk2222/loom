@@ -81,7 +81,7 @@ export interface Member {
   enabled: boolean;
 }
 
-export interface Project {
+export interface ApiUser {
   id: string;
   slug: string;
   name: string;

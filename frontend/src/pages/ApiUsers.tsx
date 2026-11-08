@@ -3,7 +3,7 @@ import { Copy, KeyRound, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { Badge, Card, Field, Modal, Spinner, Toggle } from "../components/ui";
-import type { Project, VirtualModel } from "../lib/types";
+import type { ApiUser, VirtualModel } from "../lib/types";
 
 interface ApiKey {
   id: string;
@@ -41,12 +41,12 @@ function ModelChips({ projectId, vms }: { projectId: string; vms: VirtualModel[]
 
 export default function ApiUsersPage() {
   const qc = useQueryClient();
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: Project[] }>("/api/projects") });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: ApiUser[] }>("/api/projects") });
   const keys = useQuery({ queryKey: ["keys"], queryFn: () => api.get<{ keys: ApiKey[] }>("/api/keys") });
   const vms = useQuery({ queryKey: ["vms"], queryFn: () => api.get<{ models: VirtualModel[] }>("/api/models") });
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [edit, setEdit] = useState<Project | null>(null);
+  const [edit, setEdit] = useState<ApiUser | null>(null);
   const [freshKey, setFreshKey] = useState<{ name: string; token: string } | null>(null);
   const [err, setErr] = useState("");
 
@@ -77,7 +77,7 @@ export default function ApiUsersPage() {
     setErr("");
     try {
       await api.post("/api/projects", { slug: slugify(f.name), name: f.name, priority_class: 1, weight: 1 });
-      const plist = await api.get<{ projects: Project[] }>("/api/projects");
+      const plist = await api.get<{ projects: ApiUser[] }>("/api/projects");
       const p = plist.projects.find((x) => x.slug === slugify(f.name));
       if (!p) throw new Error("project not created");
       if (selModels.size > 0) {
@@ -101,7 +101,7 @@ export default function ApiUsersPage() {
   };
 
   // --- edit flow ---
-  const openEdit = async (p: Project) => {
+  const openEdit = async (p: ApiUser) => {
     setEdit(p);
     setEditName(p.name);
     const pk = primaryKey(p.id);
@@ -137,7 +137,7 @@ export default function ApiUsersPage() {
     }
   };
 
-  const regenerate = async (p: Project) => {
+  const regenerate = async (p: ApiUser) => {
     const pk = primaryKey(p.id);
     if (!pk) return;
     const k = await api.post<{ token: string }>("/api/keys", {
@@ -152,13 +152,13 @@ export default function ApiUsersPage() {
     refresh();
   };
 
-  const del = async (p: Project) => {
+  const del = async (p: ApiUser) => {
     if (!confirm(`Delete API user "${p.name}" and its keys?`)) return;
     await api.del(`/api/projects/${p.id}`);
     refresh();
   };
 
-  const toggle = async (p: Project) => {
+  const toggle = async (p: ApiUser) => {
     await api.put(`/api/projects/${p.id}`, { enabled: !p.enabled });
     refresh();
   };

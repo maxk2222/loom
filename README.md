@@ -44,7 +44,7 @@ the moment its owner needs the GPU, the offered capacity collapses to zero
 | 🏠 **Local-first** | Workstation workloads are *always* prioritized — shared capacity is opportunistic spare, never guaranteed |
 | 🔀 **Smart routing** | 5 strategies, capability-aware filtering, fallback chains, per-request routing traces |
 | 🛡️ **Fence-protected** | Fencing tokens + atomic Redis Lua leases kill split-brain double-execution |
-| 📊 **Full observability** | Dark dashboard, live SSE, TTFT p50/p99, per-project usage, audit trail |
+| 📊 **Full observability** | Dark dashboard, live SSE, TTFT p50/p99, per-user usage, audit trail |
 | 🔌 **Real OpenAI API** | Chat · Completions · Embeddings · streaming · tools · vision |
 | 🧩 **Any backend** | vLLM, Ollama, llama.cpp, LM Studio, or any OpenAI-compatible server — capabilities auto-probed |
 | ☁️ **Hosted providers** | Azure OpenAI, Anthropic (translated), OpenRouter/Groq/Together presets — as remote backends (no local compute) |
@@ -220,7 +220,7 @@ optional Ollama sidecar.
 
 ```bash
 curl -N https://loom.example.com/v1/chat/completions \
-  -H "Authorization: Bearer sk-your-project-key" \
+  -H "Authorization: Bearer sk-your-api-key" \
   -H 'content-type: application/json' \
   -d '{
     "model": "vm-llama",
@@ -333,10 +333,10 @@ deployments re-warm right away and rejoin once resident again.
 
 ### ⚖️ Fairness under contention
 
-- Priority classes (project-level) with **strict class ordering**
+- Priority classes (per API user) with **strict class ordering**
 - **FIFO inside each class** — no request bypasses an older one; requeues keep
   their original position
-- Weighted DRR share between projects inside a class
+- Weighted DRR share between API users inside a class
 - Global queue cap → clean `429 overloaded` instead of collapse
 - `429` responses carry **`Retry-After`** — `1s` for concurrency limits,
   `60s / rpm_limit` for per-minute windows
@@ -447,8 +447,7 @@ x86-64 and ARM64 via `.github/workflows/release.yml`. Artifacts are
 ### 📟 The dashboard
 
 Dark-only, zero build config needed at deploy time: live client status, queue
-depths, virtual-model editor with member management, project/API-key/user
-admin, usage charts, request history with routing traces, config history,
+depths, virtual-model editor with member management, API user/key admin, usage charts, request history with routing traces, config history,
 audit log — and **runtime branding** (name, logo, accent color) that applies
 without a rebuild.
 
@@ -485,7 +484,26 @@ flowchart TB
 
 ---
 
-## 📦 What's inside
+## � Measured overhead
+
+Numbers from a live two-node deployment (Mac Studio client over TLS +
+Proxmox VM client, smollm2:135m / qwen3.8-27b backends), median of 5+ runs:
+
+| Path | Latency | vs. direct backend |
+|---|---|---|
+| Dispatch → first token (stream TTFB, same-host client) | ~15–50 ms | router + scheduler + TLS hop |
+| Non-streamed completion, same-host client (27B model) | +~50 ms | 0.96 s vs 0.91 s direct |
+| Non-streamed completion, LAN client (tiny model) | ~180–205 ms total | includes LAN RTT + remote node |
+| Deterministic `loom-rules` router pick | ~14 ms | no classifier call |
+| Hybrid rule hit (code/reasoning/nonascii) | ~15 ms | classifier skipped |
+| LLM-classified `loom-auto` pick (27B classifier) | ~7–30 s cold | use `loom-rules`/`hybrid` for latency-critical paths |
+
+Scheduling itself (lease + candidate fan-out) is ~1–5 ms; the dominant cost
+in TTFB is the client→backend first-byte time, not the control plane.
+
+---
+
+## �📦 What's inside
 
 ```
 crates/
@@ -536,7 +554,7 @@ docs/              ADRs, protocol spec, security model, runbooks
   `reasoning_effort` escalation via member `set` overrides
 - [x] API Users: per-user keys, model grants, scopes, RPM/TPM/concurrency
 - [ ] mTLS for agent channel (TLS + device credential today)
-- [ ] TPM metering (best-effort), project quotas
+- [ ] TPM metering (best-effort), API-user quotas
 - [ ] Multi-replica scheduler coordination
 
 ---

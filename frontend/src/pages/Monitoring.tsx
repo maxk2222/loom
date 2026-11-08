@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, Spinner } from "../components/ui";
-import type { HistoryRow, Project, UsageStat } from "../lib/types";
+import type { HistoryRow, ApiUser, UsageStat } from "../lib/types";
 import { fmtTs, fmtTimeS } from "../lib/format";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -13,7 +13,7 @@ export default function MonitoringPage() {
   const usage = useQuery({ queryKey: ["usage"], queryFn: () => api.get<{ usage_24h: UsageStat[] }>("/api/stats/usage"), refetchInterval: 10000 });
   const hist = useQuery({ queryKey: ["hist"], queryFn: () => api.get<{ requests: HistoryRow[] }>("/api/history?limit=200"), refetchInterval: 5000 });
   const versions = useQuery({ queryKey: ["cfgvers"], queryFn: () => api.get<{ versions: { id: number; entity: string; entity_id: string; change: unknown; actor: string; created_at: string }[] }>("/api/config-versions"), refetchInterval: 15000 });
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: Project[] }>("/api/projects") });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: ApiUser[] }>("/api/projects") });
   const pname = (id: string) => projects.data?.projects.find((p) => p.id === id)?.name ?? id.slice(0, 8);
 
   const data = (usage.data?.usage_24h ?? []).map((u) => ({
@@ -37,7 +37,7 @@ export default function MonitoringPage() {
         <Card><div className="text-xs text-muted">Failures (recent)</div><div className="mt-1 text-2xl font-semibold text-err">{failures}</div></Card>
       </div>
       <Card>
-        <div className="mb-3 text-sm font-medium">Requests & tokens per project (24h)</div>
+        <div className="mb-3 text-sm font-medium">Requests & tokens per API user (24h)</div>
         {usage.isLoading ? <Spinner /> : data.length === 0 ? (
           <div className="py-10 text-center text-sm text-muted">No usage yet.</div>
         ) : (
