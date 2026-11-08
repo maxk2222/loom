@@ -405,6 +405,43 @@ ca_cert_path = "/etc/loom/ca.crt"   # empty = system roots
 lab setups. Self-signed deployments can point `ca_cert_path` at the
 issuing CA — or at the server certificate itself (pinning).
 
+#### Mutual TLS with automatic PKI
+
+For fleets reachable over untrusted networks, require client certificates:
+
+```bash
+# Server — strict agent port demands a cert signed by the CA, plus a
+# separate bootstrap listener that issues certs without requiring one
+LOOM_GRPC_TLS_CLIENT_CA=/etc/loom/ca.crt \
+LOOM_MTLS=1 \
+LOOM_GRPC_BOOTSTRAP_BIND=0.0.0.0:50053 \
+loom-server
+```
+
+The server keeps an internal CA at `data/tls/ca.{crt,key}` (created on
+first boot — or point `LOOM_DATA_DIR` at a directory already holding a CA
+you trust; an existing CA is reused for issuance). Clients handle
+everything else automatically:
+
+- **Issuance**: with `client_cert_path` unset, the client generates a
+  keypair, sends its CSR inside `Hello` over the bootstrap listener
+  (TLS server-auth only — no client cert needed), receives a signed
+  ~180-day cert bound to its enrolled device id, then connects to the
+  strict port. The whole flow needs only the CA file + enroll token.
+- **Renewal**: under 30 days remaining, the client attaches a fresh CSR
+  to its regular `Hello` on the strict port (the old cert still
+  handshakes) or re-bootstraps if it already expired.
+- **Recovery**: if a stored cert no longer chains to the live CA
+  (rotation), the client drops it after repeated TLS failures and
+  re-bootstraps.
+
+`connector.bootstrap_url` overrides the bootstrap endpoint (default:
+`server_url` port + 1). The device credential still authenticates the
+session — the cert is a transport-level proof of fleet membership, so a
+leaked cert alone cannot impersonate a device. HTTP surface hardening:
+every response (dashboard, `/api`, `/v1`) carries CSP,
+`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and HSTS.
+
 ### 🔄 Auto-updates (server-triggered, signature-verified)
 
 Tagged releases (`v*`) build signed binaries for Linux/macOS/Windows on
@@ -553,7 +590,7 @@ docs/              ADRs, protocol spec, security model, runbooks
 - [x] Auto routers: LLM-classified, deterministic `when`-rules and
   `reasoning_effort` escalation via member `set` overrides
 - [x] API Users: per-user keys, model grants, scopes, RPM/TPM/concurrency
-- [ ] mTLS for agent channel (TLS + device credential today)
+- [x] mTLS for agent channel (automatic PKI, cert issuance + renewal)
 - [ ] TPM metering (best-effort), API-user quotas
 - [ ] Multi-replica scheduler coordination
 

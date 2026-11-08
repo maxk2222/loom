@@ -21,6 +21,8 @@ pub struct AgentSvc {
     pub sessions: Arc<SessionManager>,
     pub registry: ClientRegistry,
     pub scheduler: Scheduler,
+    /// Internal CA for mTLS client-cert issuance (None when PKI disabled).
+    pub client_ca: Option<crate::tls_ca::ClientCa>,
 }
 
 pub fn server(svc: AgentSvc) -> AgentServer<AgentSvc> {
@@ -90,9 +92,23 @@ impl Agent for AgentSvc {
                     "client version skew — semantics may differ"
                 );
             }
+            // mTLS issuance: a client that presented a CSR gets a signed
+            // cert + CA chain back. The transport layer (client_ca_root on
+            // the strict listener) enforces possession of the private key.
+            let (cert_pem, ca_pem, cert_exp) =
+                match (hello.client_csr_pem.is_empty(), &this.client_ca) {
+                    (false, Some(ca)) => match ca.sign_csr(&hello.client_csr_pem, &client_id) {
+                        Ok((p, exp)) => (p, ca.ca_pem().to_string(), exp),
+                        Err(e) => {
+                            warn!(client = %client_id, error = %e, "client CSR signing failed");
+                            (String::new(), String::new(), 0)
+                        }
+                    },
+                    _ => (String::new(), String::new(), 0),
+                };
             let session_id = uuid::Uuid::new_v4().to_string();
             if out_tx
-                .send(server_msgs::hello_ack(
+                .send(server_msgs::hello_ack_pki(
                     true,
                     "",
                     &session_id,
@@ -100,6 +116,9 @@ impl Agent for AgentSvc {
                     &issued_cred,
                     0,
                     10,
+                    &cert_pem,
+                    &ca_pem,
+                    cert_exp,
                 ))
                 .await
                 .is_err()

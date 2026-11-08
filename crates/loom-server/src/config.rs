@@ -62,5 +62,8 @@ pub fn load() -> Result<ServerConfig> {
     if let Ok(v) = std::env::var("LOOM_GRPC_PLAIN_BIND") {
         cfg.grpc_plain_bind = Some(v);
     }
+    if let Ok(v) = std::env::var("LOOM_GRPC_BOOTSTRAP_BIND") {
+        cfg.grpc_bootstrap_bind = Some(v);
+    }
     Ok(cfg)
 }

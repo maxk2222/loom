@@ -10,6 +10,7 @@ pub mod notes;
 pub mod scheduler;
 pub mod sysmon;
 pub mod telemetry;
+pub mod tls_pki;
 #[cfg(feature = "tray")]
 pub mod tray;
 pub mod updater;

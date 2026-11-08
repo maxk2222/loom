@@ -45,6 +45,7 @@ anyhow.workspace = true
 rust-embed.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
+time.workspace = true
 url.workspace = true
 reqwest.workspace = true
 multer.workspace = true
@@ -55,6 +56,7 @@ http = "1"
 [dev-dependencies]
 loom-testkit.workspace = true
 reqwest.workspace = true
+x509-parser = "0.18.1"
 
 [[bin]]
 name = "loom-server"

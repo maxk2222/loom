@@ -65,6 +65,11 @@ pub struct ConnectorState {
     pub history: RwLock<Option<Arc<RwLock<std::collections::VecDeque<crate::local_api::FinReq>>>>>,
     /// Admin notices synced from the server (+ persistence path).
     pub notes: RwLock<Option<(crate::notes::SharedNotes, std::path::PathBuf)>>,
+    /// CSR PEM to include in the next Hello (set when a cert is needed:
+    /// first enroll or renewal). Consumed by build_hello.
+    pub pending_csr: Mutex<Option<String>>,
+    /// mTLS cert store (keypair + issued cert + expiry) next to config.
+    pub cert_store: crate::tls_pki::CertStore,
     shutdown: CancellationToken,
 }
 
@@ -74,6 +79,8 @@ impl Connector {
         backends: BackendManager,
         scheduler: LocalScheduler,
     ) -> Self {
+        let cert_store = crate::tls_pki::CertStore::new(&cfg_store.dir().to_string_lossy())
+            .unwrap_or_else(|_| crate::tls_pki::CertStore::new(".").unwrap());
         Self {
             state: Arc::new(ConnectorState {
                 cfg_store,
@@ -93,6 +100,8 @@ impl Connector {
                 ))),
                 history: RwLock::new(None),
                 notes: RwLock::new(None),
+                pending_csr: Mutex::new(None),
+                cert_store,
                 shutdown: CancellationToken::new(),
             }),
         }
@@ -153,6 +162,7 @@ impl Connector {
     /// Main connector loop: connect → session → reconnect.
     pub async fn run(&self) {
         let mut backoff = Duration::from_secs(1);
+        let mut tls_fail_streak = 0u32;
         // Debounced report tasks: capacity changes → capacity report;
         // probe/capability changes → full inventory (server needs caps for
         // routing filters — without this, probe results only arrived on
@@ -200,10 +210,24 @@ impl Connector {
                         Ok(()) => {
                             info!("control session ended cleanly");
                             backoff = Duration::from_secs(1);
+                            tls_fail_streak = 0;
                         }
                         Err(e) => {
                             warn!(error = %e, "control session failed");
                             backoff = (backoff * 2).min(MAX_BACKOFF);
+                            // Auto-PKI resilience: a stored cert that no
+                            // longer chains to the live CA (rotation/re-issue)
+                            // stays "valid" for ~180d and would fail forever.
+                            // After repeated transport failures, drop it —
+                            // the next attempt re-bootstraps from the live CA.
+                            tls_fail_streak += 1;
+                            if cfg.connector.client_cert_path.is_empty()
+                                && tls_fail_streak >= 5
+                            {
+                                self.state.cert_store.clear_cert();
+                                tls_fail_streak = 0;
+                                warn!("dropping stored mTLS cert after repeated TLS failures — re-bootstrapping");
+                            }
                         }
                     }
                     false
@@ -215,6 +239,7 @@ impl Connector {
             self.set_disconnected().await;
             if reconnect_now {
                 backoff = Duration::from_secs(1);
+                tls_fail_streak = 0;
                 continue;
             }
             tokio::select! {
@@ -245,8 +270,47 @@ impl Connector {
         }
     }
 
-    async fn endpoint(cfg: &ClientConfig) -> anyhow::Result<Endpoint> {
-        let mut url = cfg.server_url.clone();
+    async fn endpoint(&self, cfg: &ClientConfig) -> anyhow::Result<Endpoint> {
+        // Identity: explicit paths take precedence; otherwise the auto-PKI
+        // store supplies cert+key (issued via the bootstrap listener).
+        let identity = if cfg.connector.client_cert_path.is_empty() {
+            self.state.cert_store.handshake_material()
+        } else {
+            let cert = std::fs::read(&cfg.connector.client_cert_path).with_context(|| {
+                format!(
+                    "reading connector.client_cert_path {}",
+                    cfg.connector.client_cert_path
+                )
+            })?;
+            let key = std::fs::read(&cfg.connector.client_key_path).with_context(|| {
+                format!(
+                    "reading connector.client_key_path {}",
+                    cfg.connector.client_key_path
+                )
+            })?;
+            Some((cert, key)).map(|(c, k)| {
+                (
+                    String::from_utf8_lossy(&c).into_owned(),
+                    String::from_utf8_lossy(&k).into_owned(),
+                )
+            })
+        };
+        // CA precedence: explicit ca_cert_path > pinned server CA > system roots.
+        let ca_override = if cfg.connector.ca_cert_path.is_empty() {
+            self.state.cert_store.saved_ca()
+        } else {
+            None
+        };
+        Self::endpoint_tls(cfg, &cfg.server_url.clone(), identity, ca_override).await
+    }
+
+    async fn endpoint_tls(
+        cfg: &ClientConfig,
+        raw_url: &str,
+        identity: Option<(String, String)>,
+        ca_override: Option<String>,
+    ) -> anyhow::Result<Endpoint> {
+        let mut url = raw_url.to_string();
         if !url.contains("://") {
             url = format!("https://{url}");
         }
@@ -289,22 +353,10 @@ impl Connector {
                     )
                 })?;
                 tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(pem));
+            } else if let Some(ca_pem) = ca_override {
+                tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(ca_pem));
             }
-            // mTLS: present a client certificate when configured — required
-            // by listeners with grpc_tls.client_ca_path set.
-            if !cfg.connector.client_cert_path.is_empty() {
-                let cert = std::fs::read(&cfg.connector.client_cert_path).with_context(|| {
-                    format!(
-                        "reading connector.client_cert_path {}",
-                        cfg.connector.client_cert_path
-                    )
-                })?;
-                let key = std::fs::read(&cfg.connector.client_key_path).with_context(|| {
-                    format!(
-                        "reading connector.client_key_path {}",
-                        cfg.connector.client_key_path
-                    )
-                })?;
+            if let Some((cert, key)) = identity {
                 tls = tls.identity(tonic::transport::Identity::from_pem(cert, key));
             }
             ep = ep.tls_config(tls)?;
@@ -312,8 +364,103 @@ impl Connector {
         Ok(ep)
     }
 
+    /// Cert issuance/renewal over the bootstrap listener (server-auth TLS,
+    /// no client cert): send Hello with CSR, persist the returned cert + CA.
+    async fn bootstrap_cert(&self, cfg: &ClientConfig) -> anyhow::Result<()> {
+        let url = if !cfg.connector.bootstrap_url.is_empty() {
+            cfg.connector.bootstrap_url.clone()
+        } else {
+            derive_bootstrap_url(&cfg.server_url)
+        };
+        let ca_override = if cfg.connector.ca_cert_path.is_empty() {
+            self.state.cert_store.saved_ca()
+        } else {
+            None
+        };
+        let ep = Self::endpoint_tls(cfg, &url, None, ca_override).await?;
+        let channel = ep.connect().await?;
+        let mut agent = AgentClient::new(channel);
+        let (tx, rx) = mpsc::channel::<ClientEnvelope>(4);
+        let resp = agent.control(ReceiverStream::new(rx)).await?;
+        let mut inbound = resp.into_inner();
+        let cid = if cfg.client_id.is_empty() {
+            "new"
+        } else {
+            &cfg.client_id
+        };
+        *self.state.pending_csr.lock().await = Some(self.state.cert_store.csr_pem(cid)?);
+        let hello = self.build_hello(cfg).await;
+        tx.send(ClientEnvelope {
+            msg: Some(client_envelope::Msg::Hello(hello)),
+        })
+        .await?;
+        let Some(Ok(ServerEnvelope {
+            msg: Some(server_envelope::Msg::HelloAck(ack)),
+        })) = inbound.next().await
+        else {
+            anyhow::bail!("bootstrap: no HelloAck");
+        };
+        if !ack.accepted {
+            anyhow::bail!("bootstrap rejected: {}", ack.reject_reason);
+        }
+        self.persist_issued(&ack, cfg).await;
+        if ack.client_cert_pem.is_empty() {
+            anyhow::bail!("bootstrap: server issued no cert");
+        }
+        info!("mTLS cert issued/renewed via bootstrap listener");
+        Ok(())
+    }
+
+    /// Save cert + CA + enrollment ids returned in HelloAck (any listener).
+    async fn persist_issued(&self, ack: &loom_protocol::pb::HelloAck, cfg: &ClientConfig) {
+        if !ack.client_cert_pem.is_empty() {
+            if let Err(e) = self
+                .state
+                .cert_store
+                .save(&ack.client_cert_pem, ack.client_cert_expires_unix)
+            {
+                warn!(error = %e, "saving issued client cert failed");
+            }
+        }
+        if !ack.ca_cert_pem.is_empty() {
+            let _ = self.state.cert_store.save_ca(&ack.ca_cert_pem);
+        }
+        if !ack.device_credential.is_empty() || ack.client_id != cfg.client_id {
+            let _ = self
+                .state
+                .cfg_store
+                .update(|c| {
+                    if !ack.device_credential.is_empty() {
+                        c.device_credential = ack.device_credential.clone();
+                    }
+                    if !ack.client_id.is_empty() {
+                        c.client_id = ack.client_id.clone();
+                    }
+                })
+                .await;
+        }
+    }
+
     async fn session(&self, cfg: &ClientConfig) -> anyhow::Result<()> {
-        let ep = Self::endpoint(cfg).await?;
+        // Auto-PKI: TLS + no manual cert paths → ensure a valid cert exists.
+        // Expiring-but-valid certs renew inline (pending_csr rides in Hello);
+        // missing/expired certs go through the bootstrap listener first.
+        let auto_pki = cfg.connector.tls != TlsMode::Off
+            && cfg.connector.client_cert_path.is_empty()
+            && cfg.server_url.starts_with("https");
+        if auto_pki && self.state.cert_store.needs_renewal() {
+            if self.state.cert_store.handshake_material().is_some() {
+                let cid = if cfg.client_id.is_empty() {
+                    "new".into()
+                } else {
+                    cfg.client_id.clone()
+                };
+                *self.state.pending_csr.lock().await = Some(self.state.cert_store.csr_pem(&cid)?);
+            } else if let Err(e) = self.bootstrap_cert(cfg).await {
+                warn!(error = %e, "cert bootstrap failed — connecting without cert");
+            }
+        }
+        let ep = self.endpoint(cfg).await?;
         let channel = ep.connect().await?;
         let mut agent = AgentClient::new(channel);
         *self.state.agent.lock().await = Some(agent.clone());
@@ -342,21 +489,8 @@ impl Connector {
         }
         info!(session = %ack.session_id, client_id = %ack.client_id, "registered with server");
 
-        // Persist assigned client id / device credential on first enroll.
-        if !ack.device_credential.is_empty() || ack.client_id != cfg.client_id {
-            let _ = self
-                .state
-                .cfg_store
-                .update(|c| {
-                    if !ack.device_credential.is_empty() {
-                        c.device_credential = ack.device_credential.clone();
-                    }
-                    if !ack.client_id.is_empty() {
-                        c.client_id = ack.client_id.clone();
-                    }
-                })
-                .await;
-        }
+        // Persist assigned client id / device credential / issued cert.
+        self.persist_issued(&ack, cfg).await;
 
         *self.state.session_id.write().unwrap() = ack.session_id.clone();
         *self.state.ctrl_tx.write().unwrap() = Some(ctrl_tx.clone());
@@ -454,6 +588,13 @@ impl Connector {
             last_config_version: cfg.config_version,
             inventory: Some(inv),
             platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            client_csr_pem: self
+                .state
+                .pending_csr
+                .lock()
+                .await
+                .take()
+                .unwrap_or_default(),
         }
     }
 
@@ -1075,7 +1216,7 @@ mod tls_policy_tests {
 
     #[tokio::test]
     async fn auto_bare_host_defaults_https() {
-        let ep = Connector::endpoint(&cfg("host.local:50051", TlsMode::Auto))
+        let ep = Connector::endpoint_tls(&cfg("x", TlsMode::Auto), "host.local:50051", None, None)
             .await
             .unwrap();
         assert_eq!(ep.uri().scheme_str(), Some("https"));
@@ -1083,7 +1224,7 @@ mod tls_policy_tests {
 
     #[tokio::test]
     async fn auto_keeps_explicit_http() {
-        let ep = Connector::endpoint(&cfg("http://host:50051", TlsMode::Auto))
+        let ep = Connector::endpoint_tls(&cfg("x", TlsMode::Auto), "http://host:50051", None, None)
             .await
             .unwrap();
         assert_eq!(ep.uri().scheme_str(), Some("http"));
@@ -1091,15 +1232,16 @@ mod tls_policy_tests {
 
     #[tokio::test]
     async fn require_upgrades_http_to_https() {
-        let ep = Connector::endpoint(&cfg("http://host:50051", TlsMode::Require))
-            .await
-            .unwrap();
+        let ep =
+            Connector::endpoint_tls(&cfg("x", TlsMode::Require), "http://host:50051", None, None)
+                .await
+                .unwrap();
         assert_eq!(ep.uri().scheme_str(), Some("https"));
     }
 
     #[tokio::test]
     async fn off_forces_plaintext() {
-        let ep = Connector::endpoint(&cfg("https://host:50051", TlsMode::Off))
+        let ep = Connector::endpoint_tls(&cfg("x", TlsMode::Off), "https://host:50051", None, None)
             .await
             .unwrap();
         assert_eq!(ep.uri().scheme_str(), Some("http"));
@@ -1109,6 +1251,19 @@ mod tls_policy_tests {
     async fn missing_ca_cert_path_fails_loudly() {
         let mut c = cfg("host:50051", TlsMode::Require);
         c.connector.ca_cert_path = "/nonexistent/ca.pem".into();
-        assert!(Connector::endpoint(&c).await.is_err());
+        assert!(Connector::endpoint_tls(&c, "host:50051", None, None)
+            .await
+            .is_err());
     }
+}
+
+/// Default bootstrap endpoint: same host as server_url, port+1.
+fn derive_bootstrap_url(server_url: &str) -> String {
+    let u = server_url.trim_end_matches('/');
+    if let Some(idx) = u.rfind(':') {
+        if let Ok(port) = u[idx + 1..].parse::<u16>() {
+            return format!("{}:{}", &u[..idx], port + 1);
+        }
+    }
+    format!("{u}:50053")
 }

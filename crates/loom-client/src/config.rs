@@ -41,6 +41,15 @@ impl ConfigStore {
     }
 
     /// Persist without invoking a mutation closure.
+    /// Directory containing the config file — used for co-located state
+    /// (mTLS cert store, local DB).
+    pub fn dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
     pub async fn persist(&self) -> Result<()> {
         let guard = self.cfg.read().await;
         self.persist_locked(&guard)

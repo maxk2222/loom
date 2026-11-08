@@ -42,6 +42,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 rust-embed.workspace = true
 rustls.workspace = true
+rcgen.workspace = true
 url.workspace = true
 clap.workspace = true
 minisign-verify.workspace = true

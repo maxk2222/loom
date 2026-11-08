@@ -42,6 +42,33 @@ pub mod server_msgs {
         config_version: u64,
         heartbeat_interval_secs: u32,
     ) -> ServerEnvelope {
+        hello_ack_pki(
+            accepted,
+            reject_reason,
+            session_id,
+            client_id,
+            device_credential,
+            config_version,
+            heartbeat_interval_secs,
+            "",
+            "",
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn hello_ack_pki(
+        accepted: bool,
+        reject_reason: &str,
+        session_id: &str,
+        client_id: &str,
+        device_credential: &str,
+        config_version: u64,
+        heartbeat_interval_secs: u32,
+        client_cert_pem: &str,
+        ca_cert_pem: &str,
+        client_cert_expires_unix: i64,
+    ) -> ServerEnvelope {
         ServerEnvelope {
             msg: Some(server_envelope::Msg::HelloAck(HelloAck {
                 accepted,
@@ -51,6 +78,9 @@ pub mod server_msgs {
                 device_credential: device_credential.into(),
                 config_version,
                 heartbeat_interval_secs,
+                client_cert_pem: client_cert_pem.into(),
+                ca_cert_pem: ca_cert_pem.into(),
+                client_cert_expires_unix,
             })),
         }
     }

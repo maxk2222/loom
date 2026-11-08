@@ -90,7 +90,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
 rustls = "0.23"
-rcgen = "0.13"
+rcgen = { version = "0.13", features = ["x509-parser"] }
+time = "0.3"
 url = "2"
 async-once-cell = "0.5"
 

@@ -114,13 +114,33 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // gRPC agent endpoint
+    // Internal CA for client-cert issuance — always present so enrollment/
+    // renewal CSRs can be signed; the strict listener only *requires* client
+    // certs when mTLS is enabled (LOOM_MTLS or explicit client_ca_path).
+    let client_ca = tls_ca::ClientCa::load_or_create(&cfg.data_dir).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "internal CA unavailable — mTLS issuance disabled");
+        None
+    });
     let svc = grpc_service::AgentSvc {
         sessions: sessions.clone(),
         registry: registry.clone(),
         scheduler: sched.clone(),
+        client_ca: client_ca.clone(),
     };
     let grpc_addr: SocketAddr = cfg.grpc_bind.parse()?;
-    let grpc_tls = cfg.grpc_tls.clone();
+    let mut grpc_tls = cfg.grpc_tls.clone();
+    // LOOM_MTLS=1: require client certs signed by the internal CA when no
+    // explicit client_ca_path was configured.
+    let mtls_on = std::env::var("LOOM_MTLS").is_ok_and(|v| v != "0");
+    if mtls_on {
+        if let Some(t) = grpc_tls.as_mut() {
+            if t.client_ca_path.is_none() {
+                if let Some(ca) = &client_ca {
+                    t.client_ca_path = Some(ca.dir().join("ca.crt").to_string_lossy().into());
+                }
+            }
+        }
+    }
     // Shared service instance — a second (plaintext) listener during a TLS
     // migration serves the same AgentSvc.
     let svc = std::sync::Arc::new(svc);
@@ -163,6 +183,29 @@ async fn main() -> anyhow::Result<()> {
                 info!(%addr, "gRPC plaintext migration listener");
                 tonic::transport::Server::builder()
                     .concurrency_limit_per_connection(512)
+                    .add_service(grpc_service::server((*svc).clone()))
+                    .serve(addr)
+                    .await
+                    .ok();
+            }
+        });
+    }
+    // Bootstrap listener: TLS server-auth without client-cert — new/renewing
+    // clients present their CSR in Hello and get a signed cert back.
+    if let (Some(boot), Some(t)) = (cfg.grpc_bootstrap_bind.clone(), cfg.grpc_tls.clone()) {
+        let svc = svc.clone();
+        tokio::spawn(async move {
+            if let Ok(addr) = boot.parse::<SocketAddr>() {
+                let cert = std::fs::read(&t.cert_path).unwrap();
+                let key = std::fs::read(&t.key_path).unwrap();
+                info!(%addr, "gRPC bootstrap listener (cert issuance)");
+                tonic::transport::Server::builder()
+                    .concurrency_limit_per_connection(512)
+                    .tls_config(
+                        tonic::transport::ServerTlsConfig::new()
+                            .identity(tonic::transport::Identity::from_pem(cert, key)),
+                    )
+                    .unwrap()
                     .add_service(grpc_service::server((*svc).clone()))
                     .serve(addr)
                     .await
@@ -231,6 +274,7 @@ async fn main() -> anyhow::Result<()> {
             "/",
             get(|| async { axum::response::Redirect::permanent("/ui/") }),
         )
+        .layer(axum::middleware::from_fn(sec_headers_mw))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         // Slow-loris / slot-exhaustion bounds: bounded overall concurrency
         // plus a wall-clock ceiling per request (LLM requests legitimately
@@ -251,6 +295,41 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
+}
+
+/// Security headers on every HTTP response — dashboard + /api + /v1.
+/// CSP pins scripts to 'self'; style-src needs 'unsafe-inline' for React's
+/// inline style attributes. HSTS is a no-op on plain HTTP and activates
+/// automatically once the surface sits behind TLS.
+async fn sec_headers_mw(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; \
+             object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        ),
+    );
+    h.insert(
+        header::STRICT_TRANSPORT_SECURITY,
+        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+    );
+    res
 }
 
 fn init_tracing() {

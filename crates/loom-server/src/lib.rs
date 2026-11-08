@@ -20,4 +20,5 @@ pub mod router_engine;
 pub mod scheduler;
 pub mod session;
 pub mod settings;
+pub mod tls_ca;
 pub mod usage;

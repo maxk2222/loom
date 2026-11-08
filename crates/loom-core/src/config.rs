@@ -148,11 +148,16 @@ pub struct ConnectorConfig {
     #[serde(default)]
     pub ca_cert_path: String,
     /// Client certificate + key for mTLS — required when the server runs
-    /// with grpc_tls.client_ca_path set.
+    /// with grpc_tls.client_ca_path set. Empty = automatic PKI: the client
+    /// enrolls/renews certs via the server's bootstrap listener.
     #[serde(default)]
     pub client_cert_path: String,
     #[serde(default)]
     pub client_key_path: String,
+    /// TLS bootstrap endpoint for cert issuance/renewal (server-auth only).
+    /// Empty = derive from server_url with port+1.
+    #[serde(default)]
+    pub bootstrap_url: String,
 }
 
 fn default_hb() -> u64 {
@@ -167,6 +172,7 @@ impl Default for ConnectorConfig {
             ca_cert_path: String::new(),
             client_cert_path: String::new(),
             client_key_path: String::new(),
+            bootstrap_url: String::new(),
         }
     }
 }
@@ -422,6 +428,10 @@ pub struct ServerConfig {
     /// migration — legacy clients reconnect here until they switch to TLS.
     #[serde(default)]
     pub grpc_plain_bind: Option<String>,
+    /// Optional TLS bootstrap listener (server-auth only, no client cert):
+    /// clients enroll/renew mTLS certs here via CSR exchange in Hello.
+    #[serde(default)]
+    pub grpc_bootstrap_bind: Option<String>,
     /// Directory for mutable data (logo uploads, release artifacts).
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
@@ -468,6 +478,7 @@ impl Default for ServerConfig {
             redis_prefix: default_redis_prefix(),
             grpc_tls: None,
             grpc_plain_bind: None,
+            grpc_bootstrap_bind: None,
             data_dir: default_data_dir(),
             dashboard_dir: String::new(),
             scheduler: SchedulerConfig::default(),
