@@ -41,15 +41,21 @@ pub struct AdminState {
 }
 
 pub fn router(s: AdminState) -> Router {
+    // Sensitive unauthenticated endpoints get a per-IP token bucket on top
+    // of the per-account login throttle — blocks raw IP floods of guesses.
+    let throttled = Router::new()
+        .route("/api/setup/admin", post(setup_admin))
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/logout", post(logout))
+        .layer(middleware::from_fn(ip_rl_mw))
+        .with_state(s.clone());
     let public = Router::new()
         .route("/api/branding", get(branding))
         .route("/api/update-check", get(update_check))
         .route("/api/releases/manifest", get(release_manifest))
         .route("/api/branding/logo.{ext}", get(brand_logo))
         .route("/api/setup/status", get(setup_status))
-        .route("/api/setup/admin", post(setup_admin))
-        .route("/api/auth/login", post(login))
-        .route("/api/auth/logout", post(logout))
+        .merge(throttled)
         .with_state(s.clone());
 
     let protected = Router::new()
@@ -117,6 +123,40 @@ pub fn router(s: AdminState) -> Router {
 }
 
 // ---------------- auth ----------------
+
+/// Per-IP token bucket: burst 20, refill 2/s. Process-global — protects
+/// unauthenticated endpoints from credential sprays before any per-account
+/// logic even runs. Complements the (ip,email) login lockout.
+fn ip_buckets(
+) -> &'static std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (f64, std::time::Instant)>>
+{
+    static B: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (f64, std::time::Instant)>>,
+    > = std::sync::OnceLock::new();
+    B.get_or_init(Default::default)
+}
+
+async fn ip_rl_mw(req: Request, next: Next) -> Result<Response, StatusCode> {
+    if let Some(ip) = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip())
+    {
+        let now = std::time::Instant::now();
+        let mut map = ip_buckets().lock().unwrap();
+        if map.len() > 10_000 {
+            map.retain(|_, (_, t)| now.duration_since(*t).as_secs() < 300);
+        }
+        let (tokens, last) = map.entry(ip).or_insert((20.0, now));
+        *tokens = (*tokens + now.duration_since(*last).as_secs_f64() * 2.0).min(20.0);
+        *last = now;
+        if *tokens < 1.0 {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        *tokens -= 1.0;
+    }
+    Ok(next.run(req).await)
+}
 
 async fn session_mw(
     State(s): State<AdminState>,

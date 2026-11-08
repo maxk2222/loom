@@ -11,6 +11,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Negative cache for invalid/revoked API keys: sha256 -> first failure
+/// timestamp. A bad key stays bad for 10s — repeated sprays skip the DB
+/// join instead of paying it per request. Key revocation can therefore
+/// take up to 10s to propagate — acceptable vs. a background flush.
+fn bad_key_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static C: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
 /// Failed-login throttle map: "ip|email" -> (failures, locked_until).
 type LoginThrottle = Arc<Mutex<HashMap<String, (u32, Option<Instant>)>>>;
 
@@ -71,6 +83,21 @@ impl Auth {
     /// Validate an OpenAI API key; returns ctx with project + limits.
     pub async fn check_api_key(&self, token: &str) -> Result<Option<ApiKeyCtx>> {
         let hash = sha256_hex(token);
+        // Short negative cache: key-spraying attempts re-hit this same
+        // lookup otherwise — a miss stays a miss for 10s, keyed on the
+        // already-hashed value so no plaintext token is stored.
+        {
+            let mut miss = bad_key_cache().lock().unwrap();
+            let now = std::time::Instant::now();
+            if miss.len() > 10_000 {
+                miss.retain(|_, t| now.duration_since(*t).as_secs() < 10);
+            }
+            if let Some(t) = miss.get(&hash) {
+                if now.duration_since(*t).as_secs() < 10 {
+                    return Ok(None);
+                }
+            }
+        }
         #[derive(sqlx::FromRow)]
         struct Row {
             id: uuid::Uuid,
@@ -95,8 +122,18 @@ impl Auth {
         .bind(&hash)
         .fetch_optional(&self.db)
         .await?;
-        let Some(r) = row else { return Ok(None) };
+        let Some(r) = row else {
+            bad_key_cache()
+                .lock()
+                .unwrap()
+                .insert(hash, std::time::Instant::now());
+            return Ok(None);
+        };
         if !r.project_enabled {
+            bad_key_cache()
+                .lock()
+                .unwrap()
+                .insert(hash, std::time::Instant::now());
             return Ok(None);
         }
         let _ = sqlx::query("UPDATE api_keys SET last_used_at = now() WHERE id = $1")
