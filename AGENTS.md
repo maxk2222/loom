@@ -44,6 +44,24 @@ npm run typecheck && npm run test && npm run build
 buf lint proto/                    # if buf installed; otherwise build via cargo (protoc vendored)
 ```
 
+## Deployment (always via updater, never manual binary copy)
+
+Clients self-update from signed GitHub release artifacts. After a tag
+release completes (`gh run list --workflow release`), push updates from
+the admin dashboard (Clients → Update) or API:
+
+```bash
+# per client
+curl -X POST http://server:8080/api/clients/<id>/update -H "Cookie: loom_session=$TOK"
+# client-side check/apply
+curl http://127.0.0.1:8391/local/api/update-check
+curl -X POST http://127.0.0.1:8391/local/api/update
+```
+
+Building x86_64 binaries from Apple Silicon requires an explicit
+platform (otherwise aarch64 → `203/EXEC` on the nodes):
+`docker build --platform linux/amd64 ...`
+
 ## Conventions
 - No prompt/response bodies in Redis, logs, metrics, or requests_history — metadata only.
 - Server NEVER connects to backend endpoints; inference data flows only over the client-initiated gRPC channel.

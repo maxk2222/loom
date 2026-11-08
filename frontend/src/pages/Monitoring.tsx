@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, Spinner } from "../components/ui";
 import type { HistoryRow, Project, UsageStat } from "../lib/types";
-import { fmtTs } from "../lib/format";
+import { fmtTs, fmtTimeS } from "../lib/format";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
@@ -60,7 +60,7 @@ export default function MonitoringPage() {
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
-                <td className="td text-muted">{new Date(r.created_at).toLocaleTimeString()}</td>
+                <td className="td text-muted">{fmtTimeS(r.created_at)}</td>
                 <td className="td"><span className={r.status === "completed" ? "text-ok" : r.status === "failed" ? "text-err" : "text-warn"}>{r.status}</span></td>
                 <td className="td text-muted">{r.queue_wait_ms}ms</td>
                 <td className="td text-muted">{r.ttft_ms}ms</td>

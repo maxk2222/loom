@@ -4,7 +4,7 @@ import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAx
 import { Badge, Card, Stat } from "../../components/ui";
 import { Megaphone, X } from "lucide-react";
 import type { ClientNote, ClientStatus } from "../../lib/types";
-import { fmtTs } from "../../lib/format";
+import { fmtTs, fmtTimeS } from "../../lib/format";
 
 function fmtUptime(s: number): string {
   const h = Math.floor(s / 3600);
@@ -215,9 +215,9 @@ function ClientCharts() {
     for (const r of rows) m.set(r.class, (m.get(r.class) ?? 0) + 1);
     return [...m.entries()].map(([name, n]) => ({ name: name === "local" ? "tier-1 local" : "tier-2 shared", n }));
   })();
-  const latChart = rows.slice(-30).map((r: any) => ({ t: new Date(r.ended_unix_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), ms: r.duration_ms }));
+  const latChart = rows.slice(-30).map((r: any) => ({ t: fmtTimeS(r.ended_unix_ms), ms: r.duration_ms }));
   const tokRows = rows.slice(-30).map((r: any) => ({
-    t: new Date(r.ended_unix_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+    t: fmtTimeS(r.ended_unix_ms),
     pt: r.prompt_tokens ?? 0,
     ct: r.completion_tokens ?? 0,
     e2e: r.duration_ms > 0 ? +(((r.prompt_tokens ?? 0) + (r.completion_tokens ?? 0)) / (r.duration_ms / 1000)).toFixed(1) : 0,

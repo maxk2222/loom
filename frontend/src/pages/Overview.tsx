@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { LiveBadge, PageHeader, Stat } from "../components/ui";
 import type { ClientRow, Overview, VirtualModel } from "../lib/types";
-import { fmtTs } from "../lib/format";
+import { fmtTs, fmtTime } from "../lib/format";
 
 const API_ENDPOINTS = [
   { m: "POST", p: "/v1/chat/completions", d: "chat · stream · tools · vision" },
@@ -21,7 +21,7 @@ export default function OverviewPage() {
   const chart = (() => {
     const buckets = new Map<string, { t: string; n: number; ok: number }>();
     for (const h of [...(hist.data?.requests ?? [])].reverse()) {
-      const t = new Date(h.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const t = fmtTime(h.created_at);
       const b = buckets.get(t) ?? { t, n: 0, ok: 0 };
       b.n++; if (h.status === "done") b.ok++;
       buckets.set(t, b);
@@ -32,7 +32,7 @@ export default function OverviewPage() {
     const buckets = new Map<string, { t: string; ttft: number; n: number }>();
     for (const h of [...(hist.data?.requests ?? [])].reverse()) {
       if (!h.ttft_ms) continue;
-      const t = new Date(h.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const t = fmtTime(h.created_at);
       const b = buckets.get(t) ?? { t, ttft: 0, n: 0 };
       b.ttft += h.ttft_ms; b.n++; buckets.set(t, b);
     }
@@ -46,7 +46,7 @@ export default function OverviewPage() {
     const m = new Map<string, { t: string; ms: number; n: number }>();
     for (const h of [...(hist.data?.requests ?? [])].reverse()) {
       if (!h.duration_ms) continue;
-      const t = new Date(h.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const t = fmtTime(h.created_at);
       const b = m.get(t) ?? { t, ms: 0, n: 0 };
       b.ms += h.duration_ms; b.n++; m.set(t, b);
     }
@@ -67,7 +67,7 @@ export default function OverviewPage() {
   const tokSeries = (() => {
     const m = new Map<string, { t: string; pt: number; ct: number; tps: number; dur: number }>();
     for (const h of [...(hist.data?.requests ?? [])].reverse()) {
-      const t = new Date(h.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const t = fmtTime(h.created_at);
       const b = m.get(t) ?? { t, pt: 0, ct: 0, tps: 0, dur: 0 };
       b.pt += h.prompt_tokens ?? 0; b.ct += h.completion_tokens ?? 0;
       b.dur += (h.duration_ms ?? 0) / 1000;
