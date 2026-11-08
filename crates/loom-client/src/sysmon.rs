@@ -70,11 +70,14 @@ pub fn spawn(
         let mut sys = sysinfo::System::new();
         let mut below_since: Option<Instant> = None;
         let mut gated = false;
-        // Give sysinfo a tick to produce a meaningful cpu delta.
-        sys.refresh_cpu_usage();
+        // refresh_cpu_all() both discovers the cpu structs and refreshes
+        // usage — refresh_cpu_usage() alone updates only existing entries,
+        // which leaves global_cpu_usage() at 0 on Linux where the list
+        // starts empty. Give sysinfo a tick to produce a meaningful delta.
+        sys.refresh_cpu_all();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(SAMPLE_SECS)).await;
-            sys.refresh_cpu_usage();
+            sys.refresh_cpu_all();
             sys.refresh_memory();
             let cfg = cfg_store.get().await.pressure;
 
