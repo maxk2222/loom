@@ -79,6 +79,10 @@ device credentials, prompt contents, client compute capacity.
 - Sliding-window RPM (Redis), concurrency counters, best-effort TPM.
 - Global queue cap → `overloaded` 429, protecting backends and memory.
 - Per-request deadlines; queue timeouts; bounded retries.
+- Login/IP throttle buckets key on the TCP peer by default; forwarded
+  headers (`CF-Connecting-IP`, `X-Forwarded-*`) are honoured only with
+  `trusted_proxy`/`LOOM_TRUST_PROXY=1` — otherwise spoofable. See
+  [runbooks/cloudflare.md](runbooks/cloudflare.md).
 
 ## Operational hardening
 

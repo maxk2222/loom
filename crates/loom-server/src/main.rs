@@ -174,13 +174,18 @@ async fn main() -> anyhow::Result<()> {
                 .ok();
         });
     }
-    // Optional extra plaintext listener for migration — removed once every
-    // client speaks TLS.
-    if let (Some(plain), Some(_)) = (cfg.grpc_plain_bind.clone(), cfg.grpc_tls.clone()) {
+    // Optional extra plaintext listener — during TLS migrations, or as the
+    // loopback target of a trusted tunnel (Cloudflare/cfr: agent hostname →
+    // h2c). Without any TLS listener it becomes the only agent path, so it
+    // MUST stay on loopback or behind a verified proxy.
+    if let Some(plain) = cfg.grpc_plain_bind.clone() {
+        if cfg.grpc_tls.is_none() && !plain.starts_with("127.") && !plain.starts_with("[::1]") {
+            tracing::warn!(%plain, "plaintext gRPC listener on a non-loopback address without any TLS listener — reachable by any client holding a credential");
+        }
         let svc = svc.clone();
         tokio::spawn(async move {
             if let Ok(addr) = plain.parse::<SocketAddr>() {
-                info!(%addr, "gRPC plaintext migration listener");
+                info!(%addr, "gRPC plaintext listener");
                 tonic::transport::Server::builder()
                     .concurrency_limit_per_connection(512)
                     .add_service(grpc_service::server((*svc).clone()))
@@ -241,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         events: events.clone(),
         sessions: sessions.clone(),
         release_cache: Default::default(),
+        trusted_proxy: cfg.trusted_proxy,
     });
     let pool2 = pool.clone();
     let rt2 = rt.clone();

@@ -362,6 +362,7 @@ docs/              ADRs, protocol spec, security model, runbooks
 | [security.md](docs/security.md) | Threat model, credentials, TLS/mTLS, isolation invariants |
 | [development.md](docs/development.md) | Dev loop, conventions, adding adapters |
 | [runbooks/install.md](docs/runbooks/install.md) | Server + client install, enrollment, TLS/mTLS setup, smoke test |
+| [runbooks/cloudflare.md](docs/runbooks/cloudflare.md) | Cloudflare Tunnel + WAF topology, edge-mTLS, trusted-proxy setup |
 | [runbooks/operations.md](docs/runbooks/operations.md) | Monitoring, backups, upgrades, failure playbook |
 | [adr/](docs/adr/) | gRPC split channels, Redis Lua, SMG evaluation, local-first |
 

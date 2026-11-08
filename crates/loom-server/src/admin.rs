@@ -9,7 +9,7 @@ use crate::scheduler::Scheduler;
 use crate::settings::Settings;
 use axum::{
     body::Body,
-    extract::{Multipart, Path, Query, Request, State},
+    extract::{FromRequest, Multipart, Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse},
@@ -38,6 +38,30 @@ pub struct AdminState {
     /// the GitHub API once per client poll.
     pub release_cache:
         Arc<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Value)>>>,
+    /// Trust CF-Connecting-IP / X-Forwarded-* headers (ServerConfig
+    /// `trusted_proxy`). Only enable behind a proxy every request passes.
+    pub trusted_proxy: bool,
+}
+
+/// Real client IP for rate limiting + audit: prefers Cloudflare's
+/// guaranteed header, then the first X-Forwarded-For hop, and falls back to
+/// the TCP peer. Forwarded headers are honoured ONLY under `trusted_proxy` —
+/// otherwise any client could spoof them to reset its rate-limit bucket.
+fn client_ip(req: &Request, trusted_proxy: bool) -> Option<std::net::IpAddr> {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip());
+    if !trusted_proxy {
+        return peer;
+    }
+    req.headers()
+        .get("cf-connecting-ip")
+        .or_else(|| req.headers().get("x-forwarded-for"))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .and_then(|v| v.trim().parse().ok())
+        .or(peer)
 }
 
 pub fn router(s: AdminState) -> Router {
@@ -47,7 +71,7 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/setup/admin", post(setup_admin))
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
-        .layer(middleware::from_fn(ip_rl_mw))
+        .layer(middleware::from_fn_with_state(s.clone(), ip_rl_mw))
         .with_state(s.clone());
     let public = Router::new()
         .route("/api/branding", get(branding))
@@ -136,12 +160,12 @@ fn ip_buckets(
     B.get_or_init(Default::default)
 }
 
-async fn ip_rl_mw(req: Request, next: Next) -> Result<Response, StatusCode> {
-    if let Some(ip) = req
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|c| c.0.ip())
-    {
+async fn ip_rl_mw(
+    State(s): State<AdminState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if let Some(ip) = client_ip(&req, s.trusted_proxy) {
         let now = std::time::Instant::now();
         let mut map = ip_buckets().lock().unwrap();
         if map.len() > 10_000 {
@@ -190,13 +214,15 @@ fn session_cookie(token: &str, secure: bool) -> String {
 }
 
 /// Whether the session cookie may carry the `Secure` flag: the request arrived
-/// over HTTPS (per proxy header) or the operator opted in via env — set
-/// LOOM_SECURE_COOKIES=1 when serving the admin API behind TLS.
-fn cookie_is_secure(headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.eq_ignore_ascii_case("https"))
+/// over HTTPS (per proxy header, honoured only under `trusted_proxy`) or the
+/// operator opted in via env — set LOOM_SECURE_COOKIES=1 when serving the
+/// admin API behind TLS.
+fn cookie_is_secure(headers: &axum::http::HeaderMap, trusted_proxy: bool) -> bool {
+    (trusted_proxy
+        && headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("https")))
         || std::env::var("LOOM_SECURE_COOKIES")
             .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
             .unwrap_or(false)
@@ -205,14 +231,16 @@ fn cookie_is_secure(headers: &axum::http::HeaderMap) -> bool {
 async fn login(
     State(s): State<AdminState>,
     headers: axum::http::HeaderMap,
-    Json(b): Json<LoginBody>,
+    req: Request,
 ) -> Response {
-    let ip = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let secure = cookie_is_secure(&headers);
+    let ip = client_ip(&req, s.trusted_proxy)
+        .map(|i| i.to_string())
+        .unwrap_or_default();
+    let secure = cookie_is_secure(&headers, s.trusted_proxy);
+    let Json(b): Json<LoginBody> = match Json::from_request(req, &s).await {
+        Ok(j) => j,
+        Err(e) => return e.into_response(),
+    };
     match s.auth.login(&b.email, &b.password, &ip).await {
         Ok(Some((tok, u))) => Response::builder()
             .status(StatusCode::OK)
@@ -2038,13 +2066,54 @@ mod tests {
     #[test]
     fn secure_cookie_only_over_https() {
         let plain = axum::http::HeaderMap::new();
-        assert!(!cookie_is_secure(&plain));
+        assert!(!cookie_is_secure(&plain, true));
         let mut fwd = axum::http::HeaderMap::new();
         fwd.insert("x-forwarded-proto", "https".parse().unwrap());
-        assert!(cookie_is_secure(&fwd));
+        assert!(cookie_is_secure(&fwd, true));
+        // Untrusted mode ignores a spoofed proto header.
+        assert!(!cookie_is_secure(&fwd, false));
         let mut http = axum::http::HeaderMap::new();
         http.insert("x-forwarded-proto", "http".parse().unwrap());
-        assert!(!cookie_is_secure(&http));
+        assert!(!cookie_is_secure(&http, true));
+    }
+
+    fn req_with_ip(peer: &str) -> Request {
+        let mut r = Request::builder().body(Body::empty()).unwrap();
+        r.extensions_mut().insert(axum::extract::ConnectInfo(
+            peer.parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        r
+    }
+
+    #[test]
+    fn client_ip_untrusted_uses_peer_only() {
+        let mut r = req_with_ip("10.0.0.1:9000");
+        r.headers_mut()
+            .insert("cf-connecting-ip", "9.9.9.9".parse().unwrap());
+        r.headers_mut()
+            .insert("x-forwarded-for", "8.8.8.8, 7.7.7.7".parse().unwrap());
+        // Spoofed headers must not leak into the bucket key.
+        assert_eq!(client_ip(&r, false), Some("10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn client_ip_trusted_prefers_cf_header() {
+        let mut r = req_with_ip("127.0.0.1:9000");
+        r.headers_mut()
+            .insert("x-forwarded-for", "8.8.8.8".parse().unwrap());
+        r.headers_mut()
+            .insert("cf-connecting-ip", "9.9.9.9".parse().unwrap());
+        assert_eq!(client_ip(&r, true), Some("9.9.9.9".parse().unwrap()));
+        // XFF fallback when CF header absent; first hop wins.
+        let mut r2 = req_with_ip("127.0.0.1:9000");
+        r2.headers_mut()
+            .insert("x-forwarded-for", "8.8.8.8, 7.7.7.7".parse().unwrap());
+        assert_eq!(client_ip(&r2, true), Some("8.8.8.8".parse().unwrap()));
+        // Garbage header values fall back to the peer, never parsed.
+        let mut r3 = req_with_ip("127.0.0.1:9000");
+        r3.headers_mut()
+            .insert("cf-connecting-ip", "not-an-ip".parse().unwrap());
+        assert_eq!(client_ip(&r3, true), Some("127.0.0.1".parse().unwrap()));
     }
 
     #[test]

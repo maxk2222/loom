@@ -11,6 +11,7 @@ docker compose --profile full up -d
 - Dashboard: `https://<domain>/` (first visit → admin setup wizard)
 - OpenAI API: `https://<domain>/v1`
 - gRPC agent port: `50051` (see *TLS & mTLS* below for production)
+- Behind Cloudflare Tunnel/WAF: see [cloudflare.md](cloudflare.md)
 
 ## TLS & mTLS (agent channel)
 

@@ -65,5 +65,8 @@ pub fn load() -> Result<ServerConfig> {
     if let Ok(v) = std::env::var("LOOM_GRPC_BOOTSTRAP_BIND") {
         cfg.grpc_bootstrap_bind = Some(v);
     }
+    if let Ok(v) = std::env::var("LOOM_TRUST_PROXY") {
+        cfg.trusted_proxy = matches!(v.as_str(), "1" | "true" | "yes");
+    }
     Ok(cfg)
 }
