@@ -328,9 +328,21 @@ impl Scheduler {
         let sched = self.clone();
         tokio::spawn(async move {
             tracing::info!("dispatch loop started");
+            // Periodic sweep alongside event wakes: capacity reports are
+            // change-driven, so without other traffic nothing re-arms a
+            // queued request — it would sit the full queue timeout even
+            // when all members are permanently unavailable. The 2s tick
+            // guarantees attempt counting progresses and busy members get
+            // retried promptly.
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                sched.inner.wake.notified().await;
-                tracing::debug!("dispatch wake fired");
+                tokio::select! {
+                    _ = sched.inner.wake.notified() => {
+                        tracing::debug!("dispatch wake fired");
+                    }
+                    _ = tick.tick() => {}
+                }
                 sched.dispatch_pending().await;
             }
         });
