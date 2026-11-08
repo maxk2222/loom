@@ -105,7 +105,7 @@ jobs:
           chmod 600 /tmp/loom-release.key
           for f in rel/loom-*; do
             case "$f" in *.sha256|*.minisig) continue;; esac
-            rsign2 sign "$f" -s /tmp/loom-release.key -W # emits ${f}.minisig
+            "$HOME/.cargo/bin/rsign" sign "$f" -s /tmp/loom-release.key -W # emits ${f}.minisig
           done
           ls rel/ | head -30
 
