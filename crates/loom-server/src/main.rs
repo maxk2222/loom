@@ -119,7 +119,9 @@ async fn main() -> anyhow::Result<()> {
     let grpc_addr: SocketAddr = cfg.grpc_bind.parse()?;
     let grpc_tls = cfg.grpc_tls.clone();
     tokio::spawn(async move {
-        let mut b = tonic::transport::Server::builder();
+        // Stream fan-out bound per control connection — a rogue client
+        // cannot exhaust server resources through one session.
+        let mut b = tonic::transport::Server::builder().concurrency_limit_per_connection(64);
         if let Some(t) = grpc_tls {
             let cert = std::fs::read(&t.cert_path).unwrap();
             let key = std::fs::read(&t.key_path).unwrap();
@@ -197,7 +199,16 @@ async fn main() -> anyhow::Result<()> {
             "/",
             get(|| async { axum::response::Redirect::permanent("/ui/") }),
         )
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        // Slow-loris / slot-exhaustion bounds: bounded overall concurrency
+        // plus a wall-clock ceiling per request (LLM requests legitimately
+        // take minutes — the scheduler deadline still bounds the work,
+        // this only caps the HTTP layer's patience for truly stuck calls).
+        .layer(tower::limit::ConcurrencyLimitLayer::new(1024))
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(600),
+        ));
 
     let http_addr: SocketAddr = cfg.http_bind.parse()?;
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
