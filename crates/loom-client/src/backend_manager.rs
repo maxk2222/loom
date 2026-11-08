@@ -45,11 +45,15 @@ struct DeploymentEntry {
     caps: Arc<RwLock<Option<Capabilities>>>,
     health: Arc<RwLock<Health>>,
     warmed_at: Arc<RwLock<Option<std::time::Instant>>>,
-    /// Consecutive health passes where a previously-warmed model is absent
-    /// from the loaded set — i.e. it loaded then got evicted (LM Studio LRU
-    /// under memory pressure). Backs the re-warm cadence off exponentially
-    /// instead of hammering a model that cannot stay resident.
+    /// Eviction events where a previously-warmed model went absent from the
+    /// loaded set — i.e. it loaded then got evicted (LM Studio LRU under
+    /// memory pressure). Backs the re-warm cadence off exponentially instead
+    /// of hammering a model that cannot stay resident.
     evict_misses: Arc<std::sync::atomic::AtomicU32>,
+    /// True while the current absent streak already counted its miss — a
+    /// persistently-evicted model must count once per eviction event, not
+    /// once per probe tick, or the backoff hits the 30min cap in ~75s.
+    miss_counted: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for BackendManager {
@@ -142,6 +146,7 @@ impl BackendManager {
                     DeploymentEntry {
                         warmed_at: Arc::new(RwLock::new(None)),
                         evict_misses: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                        miss_counted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                         cfg: d.clone(),
                         backend_id: b.id.clone(),
                         caps,
@@ -264,19 +269,27 @@ impl BackendManager {
                 // model absent (evicted by a co-resident model's warm/load)
                 // doubles the retry cadence up to 30min — otherwise two
                 // auto_load models fight over limited memory forever.
-                let misses = de.evict_misses.load(std::sync::atomic::Ordering::Relaxed);
                 let warmed_before = de.warmed_at.read().await.is_some();
                 if de.cfg.auto_load && warmed_before && !loaded_ok {
-                    de.evict_misses.store(
-                        misses.saturating_add(1),
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    if misses == 2 {
-                        warn!(deployment = %model, "model keeps getting evicted after warm — backing off auto-load");
+                    // Count once per absent streak — a model that stays evicted
+                    // must not escalate the backoff per probe tick.
+                    if !de
+                        .miss_counted
+                        .swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        let misses = de
+                            .evict_misses
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            + 1;
+                        if misses == 2 {
+                            warn!(deployment = %model, "model keeps getting evicted after warm — backing off auto-load");
+                        }
                     }
                 } else if loaded_ok {
                     de.evict_misses
                         .store(0, std::sync::atomic::Ordering::Relaxed);
+                    de.miss_counted
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                 }
                 let base = if loaded_ok { 240u64 } else { 60 };
                 let rewarm_secs = base

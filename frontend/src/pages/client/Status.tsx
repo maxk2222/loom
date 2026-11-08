@@ -131,6 +131,20 @@ export default function ClientStatusPage() {
           </div>
           <Meter label="CPU" pct={d.system.cpu_pct} limit={d.system.cpu_limit_pct} />
           <Meter label={`RAM (${fmtGB(d.system.ram_used_bytes)} / ${fmtGB(d.system.ram_total_bytes)} GB)`} pct={d.system.ram_pct} limit={d.system.ram_limit_pct} />
+          {d.system.gpu && (
+            <>
+              {d.system.gpu.util_pct != null && (
+                <Meter label={`GPU · ${d.system.gpu.name}`} pct={d.system.gpu.util_pct} limit={0} />
+              )}
+              {d.system.gpu.mem_total_bytes != null && d.system.gpu.mem_total_bytes > 0 && (
+                <Meter
+                  label={`VRAM (${fmtGB(d.system.gpu.mem_used_bytes ?? 0)} / ${fmtGB(d.system.gpu.mem_total_bytes)} GB)`}
+                  pct={(d.system.gpu.mem_used_bytes ?? 0) / d.system.gpu.mem_total_bytes * 100}
+                  limit={d.system.gpu_vram_limit_pct ?? 0}
+                />
+              )}
+            </>
+          )}
           <div className="text-[10px] text-muted">When a limit is exceeded, tier-2 gates close until load stays below the limit for the cooldown window.</div>
         </Card>
       )}

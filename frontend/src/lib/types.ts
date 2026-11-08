@@ -160,7 +160,14 @@ export interface SystemStats {
   cooldown: boolean;
   cpu_limit_pct: number;
   ram_limit_pct: number;
+  gpu_vram_limit_pct?: number;
   enabled: boolean;
+  gpu?: {
+    name: string;
+    util_pct: number | null;
+    mem_used_bytes: number | null;
+    mem_total_bytes: number | null;
+  } | null;
 }
 
 export interface ClientNote {
