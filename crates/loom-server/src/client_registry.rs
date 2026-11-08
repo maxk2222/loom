@@ -41,6 +41,9 @@ impl ClientRegistry {
         version: &str,
         platform: &str,
     ) -> Result<Option<(String, String)>> {
+        if credential.is_empty() {
+            return Ok(None);
+        }
         let hash = sha256_hex(credential);
         if !client_id.is_empty() {
             // Existing client: match id + credential hash, must be active.

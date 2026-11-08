@@ -82,6 +82,11 @@ pub struct UserCtx {
 impl Auth {
     /// Validate an OpenAI API key; returns ctx with project + limits.
     pub async fn check_api_key(&self, token: &str) -> Result<Option<ApiKeyCtx>> {
+        // Reject before hashing: a key row minted from an empty token would
+        // otherwise authenticate any request with no Authorization header.
+        if token.is_empty() {
+            return Ok(None);
+        }
         let hash = sha256_hex(token);
         // Short negative cache: key-spraying attempts re-hit this same
         // lookup otherwise — a miss stays a miss for 10s, keyed on the
@@ -317,6 +322,9 @@ impl Auth {
 
     /// Resolve a session cookie → user ctx.
     pub async fn user_for_token(&self, token: &str) -> Result<Option<UserCtx>> {
+        if token.is_empty() {
+            return Ok(None);
+        }
         let th = sha256_hex(token);
         #[derive(sqlx::FromRow)]
         struct SessRow {

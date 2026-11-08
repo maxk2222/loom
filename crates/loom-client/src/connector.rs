@@ -1207,6 +1207,17 @@ pub(crate) fn inspect_sse_tail(
     }
 }
 
+/// Default bootstrap endpoint: same host as server_url, port+1.
+fn derive_bootstrap_url(server_url: &str) -> String {
+    let u = server_url.trim_end_matches('/');
+    if let Some(idx) = u.rfind(':') {
+        if let Ok(port) = u[idx + 1..].parse::<u16>() {
+            return format!("{}:{}", &u[..idx], port + 1);
+        }
+    }
+    format!("{u}:50053")
+}
+
 #[cfg(test)]
 mod tls_policy_tests {
     use super::*;
@@ -1264,15 +1275,4 @@ mod tls_policy_tests {
             .await
             .is_err());
     }
-}
-
-/// Default bootstrap endpoint: same host as server_url, port+1.
-fn derive_bootstrap_url(server_url: &str) -> String {
-    let u = server_url.trim_end_matches('/');
-    if let Some(idx) = u.rfind(':') {
-        if let Ok(port) = u[idx + 1..].parse::<u16>() {
-            return format!("{}:{}", &u[..idx], port + 1);
-        }
-    }
-    format!("{u}:50053")
 }

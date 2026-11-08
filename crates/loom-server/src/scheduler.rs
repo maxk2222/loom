@@ -413,6 +413,11 @@ impl Scheduler {
     }
 
     async fn dispatch_pending(&self) {
+        // Busy entries are deferred to the end of the pass rather than
+        // requeued on the spot: the class queue is shared across virtual
+        // models, so a request whose members are all busy must not
+        // head-of-line-block requests targeting free deployments.
+        let mut deferred: Vec<(PendingEntry, String, bool)> = Vec::new();
         for _ in 0..128 {
             let mut c = self.inner.rt.conn.clone();
             let keys: Vec<String> = (0..self.inner.cfg.priority_classes.max(1))
@@ -426,7 +431,7 @@ impl Scheduler {
                 Err(e) => tracing::warn!(error=%e, "queue_pop failed"),
                 Ok(v) => tracing::debug!(popped=?v, "queue_pop result"),
             }
-            let Ok(Some(rid)) = popped else { return };
+            let Ok(Some(rid)) = popped else { break };
             let _: () = redis::pipe()
                 .cmd("DECR")
                 .arg(self.inner.rt.k("queue:count"))
@@ -440,6 +445,12 @@ impl Scheduler {
                 .unwrap_or(());
             let entry = self.inner.pending.lock().await.remove(&rid);
             let Some(e) = entry else { continue };
+            // Dead waiter: the HTTP request already timed out or the caller
+            // disconnected — dispatching would block the queue head and burn
+            // fleet capacity for a response nobody reads.
+            if e.done_tx.is_closed() {
+                continue;
+            }
             let outcome = tokio::time::timeout(
                 Duration::from_millis(self.inner.cfg.assign_ack_timeout_ms.max(5000) + 30_000),
                 self.try_dispatch(&e.req),
@@ -452,23 +463,20 @@ impl Scheduler {
                     let _ = e.done_tx.send(Ok(outcome));
                 }
                 Err(SchedErr::NoCapacity) => {
-                    // members busy but reachable: requeue preserving FIFO and
-                    // stop — popping further entries would only churn.
-                    if self.requeue(e, &rid, false).await {
-                        return;
-                    }
+                    // Members busy but reachable: defer — the entry keeps its
+                    // FIFO score and is retried next pass, but does not block
+                    // requests behind it that target different members.
+                    deferred.push((e, rid, false));
                     continue;
                 }
                 Err(SchedErr::AllUnavailable) => {
                     // Grace window: freshly enqueued requests (<5s) are
                     // likely seeing a reconnect/report gap — requeue uncounted
-                    // and stop, so a wake (capacity report) retries them
-                    // instead of burning all 3 attempts within one burst.
-                    // Older requests count attempts normally and die bounded.
+                    // so a wake (capacity report) retries them instead of
+                    // burning all attempts within one burst. Older requests
+                    // count attempts normally and die bounded.
                     let fresh = crate::client_registry::now_ms() - e.req.enqueue_ts < 5_000;
-                    if self.requeue(e, &rid, !fresh).await && fresh {
-                        return;
-                    }
+                    deferred.push((e, rid, !fresh));
                     continue;
                 }
                 Err(err) => {
@@ -478,6 +486,9 @@ impl Scheduler {
                     let _ = e.done_tx.send(Err(err));
                 }
             }
+        }
+        for (e, rid, count) in deferred {
+            self.requeue(e, &rid, count).await;
         }
     }
 

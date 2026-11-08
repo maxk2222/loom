@@ -313,6 +313,9 @@ impl Agent for AgentSvc {
     ) -> Result<Response<ConfigSnapshot>, Status> {
         let req = request.into_inner();
         // authorize: device credential check
+        if req.credential.is_empty() {
+            return Err(Status::unauthenticated("bad credential"));
+        }
         let cred_hash = loom_core::ids::sha256_hex(&req.credential);
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT status FROM clients WHERE id = $1::uuid AND credential_hash = $2",

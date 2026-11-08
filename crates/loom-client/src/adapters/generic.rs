@@ -107,7 +107,15 @@ impl BackendAdapter for GenericAdapter {
                 caps.context_length = n as u32;
             }
             match info["type"].as_str() {
-                Some("embeddings") => caps.embeddings = true,
+                // LM Studio reports "embedding" (singular); keep "embeddings"
+                // for other registries' variants.
+                Some("embedding") | Some("embeddings") => {
+                    caps.embeddings = true;
+                    // Pure embedding models appear in /v1/models too, but
+                    // cannot serve chat/completions.
+                    caps.chat = false;
+                    caps.completions = false;
+                }
                 Some("vlm") => {
                     caps.vision = true;
                     caps.modalities.insert("image".into());
@@ -115,7 +123,9 @@ impl BackendAdapter for GenericAdapter {
                 _ => {}
             }
         }
-        // Embeddings: try a cheap request to detect support.
+        // Embeddings: try a cheap request to detect support. Upgrade only —
+        // a probe failure (cold load, transient 500) must not erase a
+        // capability the registry already declared.
         let url = format!("{}/v1/embeddings", self.endpoint());
         let mut req = self
             .http
@@ -126,7 +136,7 @@ impl BackendAdapter for GenericAdapter {
             req = req.bearer_auth(&self.cfg.api_key);
         }
         if let Ok(r) = req.send().await {
-            caps.embeddings = r.status().is_success();
+            caps.embeddings |= r.status().is_success();
         }
         Ok(caps)
     }
@@ -171,7 +181,7 @@ impl BackendAdapter for GenericAdapter {
             .flatten()
             .and_then(|i| i["type"].as_str().map(String::from));
         let (path, body) = match kind.as_deref() {
-            Some("embeddings") => (
+            Some("embedding") | Some("embeddings") => (
                 "/v1/embeddings",
                 serde_json::json!({"model": model, "input": "warmup"}),
             ),
