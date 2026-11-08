@@ -137,12 +137,15 @@ async fn main() -> anyhow::Result<()> {
             if let Some(t) = grpc_tls {
                 let cert = std::fs::read(&t.cert_path).unwrap();
                 let key = std::fs::read(&t.key_path).unwrap();
-                b = b
-                    .tls_config(
-                        tonic::transport::ServerTlsConfig::new()
-                            .identity(tonic::transport::Identity::from_pem(cert, key)),
-                    )
-                    .unwrap();
+                let mut tls_cfg = tonic::transport::ServerTlsConfig::new()
+                    .identity(tonic::transport::Identity::from_pem(cert, key));
+                // mTLS: require client certificates signed by this CA —
+                // unauthenticated clients can't even open a TLS session.
+                if let Some(ca) = &t.client_ca_path {
+                    let pem = std::fs::read(ca).unwrap();
+                    tls_cfg = tls_cfg.client_ca_root(tonic::transport::Certificate::from_pem(pem));
+                }
+                b = b.tls_config(tls_cfg).unwrap();
             }
             info!(%grpc_addr, tls = tls_on, "gRPC agent endpoint listening");
             b.add_service(grpc_service::server((*svc).clone()))

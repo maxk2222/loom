@@ -42,6 +42,7 @@ pub fn load() -> Result<ServerConfig> {
             cfg.grpc_tls = Some(loom_core::config::GrpcTlsConfig {
                 cert_path,
                 key_path,
+                client_ca_path: std::env::var("LOOM_GRPC_TLS_CLIENT_CA").ok(),
             });
         }
         (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
@@ -50,6 +51,13 @@ pub fn load() -> Result<ServerConfig> {
             );
         }
         _ => {}
+    }
+    // mTLS client-CA also applies when grpc_tls came from LOOM_CONFIG.
+    if let (Some(t), Ok(ca)) = (
+        cfg.grpc_tls.as_mut(),
+        std::env::var("LOOM_GRPC_TLS_CLIENT_CA"),
+    ) {
+        t.client_ca_path = Some(ca);
     }
     if let Ok(v) = std::env::var("LOOM_GRPC_PLAIN_BIND") {
         cfg.grpc_plain_bind = Some(v);

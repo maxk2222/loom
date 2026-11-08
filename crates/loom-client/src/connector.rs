@@ -290,6 +290,23 @@ impl Connector {
                 })?;
                 tls = tls.ca_certificate(tonic::transport::Certificate::from_pem(pem));
             }
+            // mTLS: present a client certificate when configured — required
+            // by listeners with grpc_tls.client_ca_path set.
+            if !cfg.connector.client_cert_path.is_empty() {
+                let cert = std::fs::read(&cfg.connector.client_cert_path).with_context(|| {
+                    format!(
+                        "reading connector.client_cert_path {}",
+                        cfg.connector.client_cert_path
+                    )
+                })?;
+                let key = std::fs::read(&cfg.connector.client_key_path).with_context(|| {
+                    format!(
+                        "reading connector.client_key_path {}",
+                        cfg.connector.client_key_path
+                    )
+                })?;
+                tls = tls.identity(tonic::transport::Identity::from_pem(cert, key));
+            }
             ep = ep.tls_config(tls)?;
         }
         Ok(ep)

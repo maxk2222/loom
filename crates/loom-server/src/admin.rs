@@ -286,10 +286,10 @@ async fn overview(State(s): State<AdminState>) -> Json<Value> {
     let clients = s.registry.live_clients().await.unwrap_or_default();
     let online = clients.iter().filter(|c| c["online"] == true).count();
     let vms = s.models.list().await;
-    let (queued, active): (i64, i64) = (
-        sqlx::query_scalar("SELECT count(*) FROM requests_history WHERE created_at > now() - interval '5 min' AND status = 'queued'").fetch_one(&s.db).await.unwrap_or(0),
-        sqlx::query_scalar("SELECT count(*) FROM requests_history WHERE created_at > now() - interval '5 min' AND status = 'streaming'").fetch_one(&s.db).await.unwrap_or(0),
-    );
+    // Live queue depth + in-flight count from the scheduler — history only
+    // stores terminal states, so querying it for 'queued'/'streaming'
+    // always returns 0.
+    let (queued, active) = s.scheduler.live_counts().await;
     let today: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM requests_history WHERE created_at > now() - interval '1 day'",
     )

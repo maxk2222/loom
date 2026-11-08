@@ -145,6 +145,21 @@ impl Scheduler {
         self.inner.rt.clone()
     }
 
+    /// Live (queued, in-flight) request counts for the dashboard overview.
+    /// History only stores terminal states, so it can't supply these.
+    pub async fn live_counts(&self) -> (i64, i64) {
+        let mut c = self.inner.rt.conn.clone();
+        let queued: i64 = redis::cmd("GET")
+            .arg(self.inner.rt.k("queue:count"))
+            .query_async(&mut c)
+            .await
+            .unwrap_or(0);
+        let pending = self.inner.pending.lock().await.len() as i64;
+        // pending covers queued + dispatched-but-unfinished; queued is the
+        // Redis zset depth. Active = dispatched minus still-queued.
+        (queued, (pending - queued).max(0))
+    }
+
     // ---- control-stream event sinks (called by grpc_service) ----
 
     pub async fn handle_assign_ack(&self, request_id: &str, accepted: bool, reason: &str) {
@@ -587,9 +602,14 @@ impl Scheduler {
         // frees up — transient. `ClientOffline` means unavailable; only when
         // every candidate is unreachable is the shortage structural.
         // A member filtered out for `free == 0` while still `available` is
-        // merely busy, not gone — an empty ranked list must then degrade to
-        // NoCapacity (wait for deadline), not AllUnavailable (bounded fail).
-        let any_busy = ranked.is_empty() && runtime.values().any(|(_, st)| st == "available");
+        // merely busy, not gone. `draining` is transient too: a member under
+        // local pressure or mid-rewarm reopens once it recovers — requests
+        // queued behind it must wait (bounded by the request deadline), not
+        // fail fast as if the member were gone. Only `offline` is structural.
+        let any_busy = ranked.is_empty()
+            && runtime
+                .values()
+                .any(|(_, st)| st == "available" || st == "draining");
         let mut saw_transient = false;
         for member in ranked {
             match self.lease_and_assign(req, &member).await {

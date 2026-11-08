@@ -147,6 +147,12 @@ pub struct ConnectorConfig {
     /// Path to a CA bundle to verify the server (empty = system roots).
     #[serde(default)]
     pub ca_cert_path: String,
+    /// Client certificate + key for mTLS — required when the server runs
+    /// with grpc_tls.client_ca_path set.
+    #[serde(default)]
+    pub client_cert_path: String,
+    #[serde(default)]
+    pub client_key_path: String,
 }
 
 fn default_hb() -> u64 {
@@ -159,6 +165,8 @@ impl Default for ConnectorConfig {
             heartbeat_secs: default_hb(),
             tls: TlsMode::Auto,
             ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
         }
     }
 }
@@ -472,6 +480,11 @@ impl Default for ServerConfig {
 pub struct GrpcTlsConfig {
     pub cert_path: String,
     pub key_path: String,
+    /// CA bundle that client certificates are verified against. When set,
+    /// the listener requires mTLS — clients must present a cert signed by
+    /// this CA. Device credentials still authenticate at the app layer.
+    #[serde(default)]
+    pub client_ca_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
