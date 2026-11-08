@@ -311,6 +311,15 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
     } = split(outcome);
     let rid = request_id.clone();
     let key_id = c.api_key_id.clone();
+    let project_id = c.project_id.clone();
+    // virtual_model_id for usage_counters — resolve the dispatched model
+    // (post-router member name) back to its VM row.
+    let vm_id = s
+        .models
+        .resolve(&model)
+        .await
+        .map(|v| v.id)
+        .unwrap_or_default();
     let usage = s.usage.clone();
     let auth2 = s.auth.clone();
     let started2 = started;
@@ -344,8 +353,8 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                 .record(crate::usage::UsageRecord {
                     request_id: rid_f,
                     api_key_id: key_id.clone(),
-                    project_id: String::new(),
-                    virtual_model_id: String::new(),
+                    project_id: project_id.clone(),
+                    virtual_model_id: vm_id.clone(),
                     deployment_id: dep,
                     client_id: client,
                     status: if meta.status.is_empty() {
