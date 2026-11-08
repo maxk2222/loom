@@ -586,6 +586,10 @@ impl Scheduler {
         // `NoCapacity`/`Rejected` mean a member exists and could serve once it
         // frees up — transient. `ClientOffline` means unavailable; only when
         // every candidate is unreachable is the shortage structural.
+        // A member filtered out for `free == 0` while still `available` is
+        // merely busy, not gone — an empty ranked list must then degrade to
+        // NoCapacity (wait for deadline), not AllUnavailable (bounded fail).
+        let any_busy = ranked.is_empty() && runtime.values().any(|(_, st)| st == "available");
         let mut saw_transient = false;
         for member in ranked {
             match self.lease_and_assign(req, &member).await {
@@ -612,7 +616,7 @@ impl Scheduler {
                 }
             }
         }
-        Err(if saw_transient {
+        Err(if saw_transient || any_busy {
             SchedErr::NoCapacity
         } else {
             SchedErr::AllUnavailable
@@ -665,7 +669,11 @@ impl Scheduler {
             redis::Value::SimpleString(s) if s == "NO_CAPACITY" => {
                 return Err(SchedErr::NoCapacity)
             }
+            redis::Value::BulkString(b) if b == b"NO_CAPACITY" => return Err(SchedErr::NoCapacity),
             redis::Value::SimpleString(s) if s == "UNAVAILABLE" => {
+                return Err(SchedErr::ClientOffline)
+            }
+            redis::Value::BulkString(b) if b == b"UNAVAILABLE" => {
                 return Err(SchedErr::ClientOffline)
             }
             _ => 0,
