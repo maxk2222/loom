@@ -120,8 +120,11 @@ async fn main() -> anyhow::Result<()> {
     let grpc_tls = cfg.grpc_tls.clone();
     tokio::spawn(async move {
         // Stream fan-out bound per control connection — a rogue client
-        // cannot exhaust server resources through one session.
-        let mut b = tonic::transport::Server::builder().concurrency_limit_per_connection(64);
+        // cannot exhaust server resources through one session. Must stay
+        // comfortably above a client's legitimate inflight count: every
+        // dispatched request occupies its own RequestData stream — a cap
+        // below that resets the whole control session under load bursts.
+        let mut b = tonic::transport::Server::builder().concurrency_limit_per_connection(512);
         if let Some(t) = grpc_tls {
             let cert = std::fs::read(&t.cert_path).unwrap();
             let key = std::fs::read(&t.key_path).unwrap();

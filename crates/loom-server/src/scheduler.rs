@@ -246,7 +246,12 @@ impl Scheduler {
         if self.class_queue_empty(req.prio).await {
             match self.try_dispatch(&req).await {
                 Ok(o) => return Ok(o),
-                Err(SchedErr::NoCapacity) => {}
+                // AllUnavailable also queues: right after server restarts or
+                // client reconnects the dep hash still reads `draining` until
+                // the first capacity report lands — a brief queue beats an
+                // instant 503. The dispatcher's attempt counter still bounds
+                // genuinely-dead members to ~3 wake cycles.
+                Err(SchedErr::NoCapacity | SchedErr::AllUnavailable) => {}
                 Err(e) => return Err(e),
             }
         }
@@ -428,11 +433,15 @@ impl Scheduler {
                     continue;
                 }
                 Err(SchedErr::AllUnavailable) => {
-                    // no member reachable: counted requeue; the entry stays at
-                    // the head and burns its remaining attempts now, so a
-                    // structurally unservable request dies within this burst
-                    // instead of head-of-line blocking the class queue.
-                    let _ = self.requeue(e, &rid, true).await;
+                    // Grace window: freshly enqueued requests (<5s) are
+                    // likely seeing a reconnect/report gap — requeue uncounted
+                    // and stop, so a wake (capacity report) retries them
+                    // instead of burning all 3 attempts within one burst.
+                    // Older requests count attempts normally and die bounded.
+                    let fresh = crate::client_registry::now_ms() - e.req.enqueue_ts < 5_000;
+                    if self.requeue(e, &rid, !fresh).await && fresh {
+                        return;
+                    }
                     continue;
                 }
                 Err(err) => {
