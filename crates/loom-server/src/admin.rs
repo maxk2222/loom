@@ -1653,6 +1653,7 @@ fn when_keys_valid(when: &Value) -> bool {
         "tools",
         "json_mode",
         "reasoning",
+        "nonascii",
         "effort_gte",
         "effort_lt",
         "any",

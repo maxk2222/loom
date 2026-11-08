@@ -149,7 +149,12 @@ async fn classify(
             {"role": "user", "content": excerpt},
         ],
         "temperature": 0,
-        "max_tokens": 24,
+        // Prefer the classifier quiet: reasoning engines that honor
+        // reasoning_effort skip thinking entirely. Those that ignore it still
+        // need headroom — 24-48 tokens get eaten by chain-of-thought and the
+        // answer (the member name) comes back empty.
+        "reasoning_effort": "none",
+        "max_tokens": 256,
         "stream": false,
     });
     let now = crate::client_registry::now_ms();
@@ -323,6 +328,10 @@ pub struct ReqMetrics {
     /// Reasoning intent detected in the text (step-by-step / proof / math
     /// cues) — the deterministic half of reasoning escalation.
     pub reasoning: bool,
+    /// Substantial non-ASCII text (CJK, Cyrillic, Arabic, …) — a cheap
+    /// deterministic proxy for multilingual routing that no small
+    /// classifier handles reliably.
+    pub nonascii: bool,
 }
 
 /// Compute request metrics from the raw OpenAI body.
@@ -374,6 +383,11 @@ pub fn req_metrics(body: &Value) -> ReqMetrics {
     m.code = looks_like_code(&all_text);
     m.reasoning = looks_like_reasoning(&all_text);
     m.est_tokens = all_text.chars().count() / 4;
+    let total = all_text.chars().count();
+    if total >= 8 {
+        let non = all_text.chars().filter(|c| !c.is_ascii()).count();
+        m.nonascii = non * 5 > total; // >20% non-ASCII
+    }
     m
 }
 
@@ -436,9 +450,9 @@ fn looks_like_reasoning(t: &str) -> bool {
 
 fn metrics_summary(m: &ReqMetrics) -> String {
     format!(
-        "chars={} tokens~={} msgs={} code={} images={} audio={} system={} tools={} json_mode={} effort={} reasoning={}",
+        "chars={} tokens~={} msgs={} code={} images={} audio={} system={} tools={} json_mode={} effort={} reasoning={} nonascii={}",
         m.chars, m.est_tokens, m.msgs, m.code, m.images, m.audio, m.system,
-        m.tools, m.json_mode, m.effort, m.reasoning
+        m.tools, m.json_mode, m.effort, m.reasoning, m.nonascii
     )
 }
 
@@ -464,6 +478,7 @@ fn when_matches(when: &Value, m: &ReqMetrics) -> bool {
             "tools" => v.as_bool().is_some_and(|b| m.tools == b),
             "json_mode" => v.as_bool().is_some_and(|b| m.json_mode == b),
             "reasoning" => v.as_bool().is_some_and(|b| m.reasoning == b),
+            "nonascii" => v.as_bool().is_some_and(|b| m.nonascii == b),
             "effort_gte" => effort_at_least(m.effort, v),
             // Unset effort (0) counts as lowest — matches any positive bound.
             "effort_lt" => effort_level_of(v).is_some_and(|n| (m.effort as u64) < n),
@@ -572,8 +587,25 @@ pub async fn route(
     deadline_ms: i64,
 ) -> Result<RouteChoice> {
     let cfg = &vm.router_config;
-    if cfg_str(cfg, "mode") == "heuristic" {
+    let mode = cfg_str(cfg, "mode");
+    if mode == "heuristic" {
         return heuristic_choice(cfg, &req_metrics(body));
+    }
+    // `mode: "hybrid"`: members carrying explicit `when` rules get a free
+    // deterministic first pass — obvious requests (code, tools, images,
+    // effort) never pay the classifier round-trip. Anything unmatched falls
+    // through to the engine.
+    if mode == "hybrid" {
+        let m = req_metrics(body);
+        if let Some(members) = cfg["members"].as_array() {
+            for mem in members {
+                let when = &mem["when"];
+                let has_rule = when.as_object().map(|o| !o.is_empty()).unwrap_or(false);
+                if has_rule && when_matches(when, &m) {
+                    return Ok(to_choice(mem, &metrics_summary(&m), "hybrid:rule"));
+                }
+            }
+        }
     }
     let max_chars = cfg["max_user_chars"].as_u64().unwrap_or(2000) as usize;
     let excerpt = user_excerpt(body, max_chars);
@@ -622,17 +654,35 @@ pub async fn test_classify(
     deadline_ms: i64,
 ) -> Value {
     let cfg = &vm.router_config;
-    if cfg_str(cfg, "mode") == "heuristic" {
+    let mode = cfg_str(cfg, "mode");
+    if mode == "heuristic" || mode == "hybrid" {
         let body = json!({"messages": [{"role": "user", "content": prompt}]});
         let m = req_metrics(&body);
-        return match heuristic_choice(cfg, &m) {
-            Ok(ch) => json!({
-                "ok": true,
-                "raw": metrics_summary(&m),
-                "pick": {"model": ch.model, "name": ch.name, "reason": ch.reason, "set": ch.set},
-            }),
-            Err(e) => json!({"ok": false, "error": e.to_string(), "raw": metrics_summary(&m)}),
-        };
+        if mode == "heuristic" {
+            return match heuristic_choice(cfg, &m) {
+                Ok(ch) => json!({
+                    "ok": true,
+                    "raw": metrics_summary(&m),
+                    "pick": {"model": ch.model, "name": ch.name, "reason": ch.reason, "set": ch.set},
+                }),
+                Err(e) => json!({"ok": false, "error": e.to_string(), "raw": metrics_summary(&m)}),
+            };
+        }
+        // hybrid: surface the deterministic pre-pass the same way route() does.
+        if let Some(members) = cfg["members"].as_array() {
+            for mem in members {
+                let when = &mem["when"];
+                let has_rule = when.as_object().map(|o| !o.is_empty()).unwrap_or(false);
+                if has_rule && when_matches(when, &m) {
+                    let ch = to_choice(mem, &metrics_summary(&m), "hybrid:rule");
+                    return json!({
+                        "ok": true,
+                        "raw": metrics_summary(&m),
+                        "pick": {"model": ch.model, "name": ch.name, "reason": ch.reason, "set": ch.set},
+                    });
+                }
+            }
+        }
     }
     match classify(sched, models, cfg, prompt, 1, deadline_ms).await {
         Ok(text) => json!({
@@ -880,6 +930,23 @@ mod tests {
         let img = json!({"messages":[{"role":"user","content":[
             {"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"u"}}]}]});
         assert_eq!(heuristic_choice(&c, &req_metrics(&img)).unwrap().model, "b");
+    }
+
+    #[test]
+    fn nonascii_detects_cjk_not_english() {
+        let zh = json!({"messages":[{"role":"user","content":"\u{4f60}\u{597d}\u{4e16}\u{754c}\u{ff0c}\u{8fd9}\u{662f}\u{4e00}\u{4e2a}\u{6d4b}\u{8bd5}\u{95ee}\u{9898}"}]});
+        assert!(req_metrics(&zh).nonascii);
+        let en = json!({"messages":[{"role":"user","content":"explain quantum entanglement"}]});
+        assert!(!req_metrics(&en).nonascii);
+        // Cyrillic crosses the threshold; scattered umlauts in Latin script do not.
+        let ru = json!({"messages":[{"role":"user","content":"\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}\u{42c} \u{43a}\u{430}\u{43a} \u{434}\u{435}\u{43b}\u{430}"}]});
+        assert!(req_metrics(&ru).nonascii);
+        let de =
+            json!({"messages":[{"role":"user","content":"größe hätte müssen lösen schöne übung"}]});
+        assert!(!req_metrics(&de).nonascii);
+        let de2 =
+            json!({"messages":[{"role":"user","content":"was ist die hauptstadt von frankreich"}]});
+        assert!(!req_metrics(&de2).nonascii);
     }
 
     #[test]
