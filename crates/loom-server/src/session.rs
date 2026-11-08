@@ -22,6 +22,11 @@ pub struct SessionManager {
 struct Inner {
     /// client_id -> control stream sender.
     sessions: HashMap<String, mpsc::Sender<ServerEnvelope>>,
+    /// client_id -> one-shot kick handle: firing it makes the control loop
+    /// exit through the normal disconnect path (leases requeued/failed,
+    /// client marked offline). Used for admin suspension so revocation takes
+    /// effect on the live session, not just on the next reconnect.
+    kicks: HashMap<String, oneshot::Sender<()>>,
     /// request_id -> correlator for the incoming RequestData stream pair:
     /// (inbound client stream, outbound server->client sender).
     pending_data: HashMap<String, oneshot::Sender<DataStreamPair>>,
@@ -41,7 +46,32 @@ impl SessionManager {
     }
 
     pub async fn unregister(&self, client_id: &str) {
-        self.inner.lock().await.sessions.remove(client_id);
+        let mut inner = self.inner.lock().await;
+        inner.sessions.remove(client_id);
+        inner.kicks.remove(client_id);
+    }
+
+    /// Arm a kick handle for a session; the control loop should select on the
+    /// returned receiver and break when it resolves.
+    pub async fn register_kick(&self, client_id: &str) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.inner
+            .lock()
+            .await
+            .kicks
+            .insert(client_id.to_string(), tx);
+        rx
+    }
+
+    /// Force a live session into its disconnect path. Returns false when the
+    /// client is not connected or was already kicked.
+    pub async fn kick(&self, client_id: &str) -> bool {
+        if let Some(tx) = self.inner.lock().await.kicks.remove(client_id) {
+            let _ = tx.send(());
+            true
+        } else {
+            false
+        }
     }
 
     pub async fn send(&self, client_id: &str, msg: ServerEnvelope) -> Result<(), &'static str> {

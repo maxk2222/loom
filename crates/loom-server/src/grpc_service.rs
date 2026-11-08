@@ -137,9 +137,18 @@ impl Agent for AgentSvc {
             }
             this.scheduler.wake();
             tracing::info!(client = %client_id, session = %session_id, "client connected");
+            let mut kick_rx = this.sessions.register_kick(&client_id).await;
 
             // --- control loop ---
-            while let Some(item) = inbound.next().await {
+            loop {
+                let item = tokio::select! {
+                    item = inbound.next() => item,
+                    _ = &mut kick_rx => {
+                        tracing::info!(client = %client_id, "session kicked");
+                        break;
+                    }
+                };
+                let Some(item) = item else { break };
                 let Ok(env) = item else { break };
                 let Some(msg) = env.msg else { continue };
                 match msg {

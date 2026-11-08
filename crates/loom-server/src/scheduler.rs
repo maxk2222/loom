@@ -444,11 +444,27 @@ impl Scheduler {
                 .await
                 .unwrap_or(());
             let entry = self.inner.pending.lock().await.remove(&rid);
-            let Some(e) = entry else { continue };
+            let Some(e) = entry else {
+                // Orphaned queue entry (e.g. pending map lost on restart):
+                // drop the tracking hash so it does not linger until TTL.
+                let mut c = self.inner.rt.conn.clone();
+                let _: () = redis::cmd("DEL")
+                    .arg(self.inner.rt.k(&format!("req:{rid}")))
+                    .query_async(&mut c)
+                    .await
+                    .unwrap_or(());
+                continue;
+            };
             // Dead waiter: the HTTP request already timed out or the caller
             // disconnected — dispatching would block the queue head and burn
             // fleet capacity for a response nobody reads.
             if e.done_tx.is_closed() {
+                let mut c = self.inner.rt.conn.clone();
+                let _: () = redis::cmd("DEL")
+                    .arg(self.inner.rt.k(&format!("req:{rid}")))
+                    .query_async(&mut c)
+                    .await
+                    .unwrap_or(());
                 continue;
             }
             let outcome = tokio::time::timeout(

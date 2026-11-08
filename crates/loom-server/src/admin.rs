@@ -737,6 +737,12 @@ async fn client_status(
         .bind(status)
         .execute(&s.db)
         .await;
+    // Suspension must act on the live session, not just the next reconnect:
+    // kicking drops the control stream through the normal disconnect path,
+    // so in-flight work is requeued/failed and the client is marked offline.
+    if status != "active" {
+        s.sessions.kick(&id).await;
+    }
     audit(&s.db, "client", "status", &format!("{id}:{status}")).await;
     Json(json!({"ok":true})).into_response()
 }
@@ -1049,7 +1055,8 @@ async fn update_vm(
     let _ = sqlx::query(
         "UPDATE virtual_models SET description=COALESCE($2,description), api_type=COALESCE($3,api_type),
          routing_strategy=COALESCE($4,routing_strategy), required_capabilities=COALESCE($5,required_capabilities),
-         allow_heterogeneous=COALESCE($6,allow_heterogeneous), fallback_virtual_model_id=$7::uuid,
+         allow_heterogeneous=COALESCE($6,allow_heterogeneous),
+         fallback_virtual_model_id=CASE WHEN $9::bool THEN $7::uuid ELSE fallback_virtual_model_id END,
          enabled=COALESCE($8,enabled), updated_at=now() WHERE id=$1::uuid")
         .bind(&id)
         .bind(b.get("description").and_then(|v| v.as_str()))
@@ -1059,6 +1066,7 @@ async fn update_vm(
         .bind(b.get("allow_heterogeneous").and_then(|v| v.as_bool()))
         .bind(b.get("fallback_virtual_model_id").and_then(|v| v.as_str()))
         .bind(b.get("enabled").and_then(|v| v.as_bool()))
+        .bind(b.get("fallback_virtual_model_id").is_some())
         .execute(&s.db).await;
     if let Some(members) = b.get("members").and_then(|v| v.as_array()) {
         let mut tx = match s.db.begin().await {
