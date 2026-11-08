@@ -158,7 +158,7 @@ export default function ClientStatusPage() {
         </Card>
       </div>
       <ClientCharts />
-      <Card className="overflow-hidden p-0">
+      <Card className="overflow-x-auto p-0">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Per-deployment capacity</div>
         <table className="w-full">
           <thead><tr><th className="th">Deployment</th><th className="th">Mode</th><th className="th">Tier-2</th><th className="th">Local inflight</th><th className="th">Tier-2 inflight</th><th className="th">Accepting</th></tr></thead>

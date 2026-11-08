@@ -30,6 +30,21 @@ export interface ClientRow {
   platform: string;
   labels: Record<string, unknown>;
   config_version: number;
+  stats?: ClientStats | null;
+}
+
+export interface ClientStats {
+  cpu_pct: number | null;
+  ram_pct: number | null;
+  ram_used_bytes: number | null;
+  ram_total_bytes: number | null;
+  gpu?: {
+    name: string;
+    util_pct: number | null;
+    mem_used_bytes: number | null;
+    mem_total_bytes: number | null;
+  } | null;
+  at: number | null;
 }
 
 export interface DeploymentRow {

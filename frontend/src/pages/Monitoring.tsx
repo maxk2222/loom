@@ -52,7 +52,7 @@ export default function MonitoringPage() {
           </ResponsiveContainer>
         )}
       </Card>
-      <Card className="overflow-hidden p-0">
+      <Card className="overflow-x-auto p-0">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Request history</div>
         <table className="w-full">
           <thead><tr><th className="th">Time</th><th className="th">Status</th><th className="th">Queue</th><th className="th">TTFT</th><th className="th">Duration</th><th className="th">Tokens</th><th className="th">Error</th></tr></thead>
@@ -72,7 +72,7 @@ export default function MonitoringPage() {
           </tbody>
         </table>
       </Card>
-      <Card className="overflow-hidden p-0">
+      <Card className="overflow-x-auto p-0">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Config history</div>
         <table className="w-full">
           <thead><tr><th className="th">Time</th><th className="th">Entity</th><th className="th">Entity id</th><th className="th">Actor</th></tr></thead>

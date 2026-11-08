@@ -145,11 +145,15 @@ pub mod client_msgs {
         }
     }
 
-    pub fn capacity_report(capacities: Vec<DeploymentCapacity>) -> ClientEnvelope {
+    pub fn capacity_report(
+        capacities: Vec<DeploymentCapacity>,
+        host: Option<HostStats>,
+    ) -> ClientEnvelope {
         ClientEnvelope {
             msg: Some(client_envelope::Msg::CapacityReport(CapacityReport {
                 capacities,
                 reported_at_unix_ms: now_ms().max(0) as u64,
+                host,
             })),
         }
     }

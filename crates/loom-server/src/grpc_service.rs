@@ -130,7 +130,7 @@ impl Agent for AgentSvc {
                     client_envelope::Msg::CapacityReport(r) => {
                         let _ = this
                             .registry
-                            .apply_capacity(&client_id, &r.capacities)
+                            .apply_capacity(&client_id, &r.capacities, r.host.as_ref())
                             .await;
                         this.scheduler.wake();
                     }

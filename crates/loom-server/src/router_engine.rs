@@ -164,6 +164,7 @@ async fn classify(
         prio,
         enqueue_ts: now,
         deadline_ts: now + deadline_ms.min(10_000), // router calls stay cheap
+        sticky: String::new(),                      // engine calls never take the affinity slot
     };
     let out = sched.submit(pending).await.map_err(sched_msg)?;
     let mut rx = out.response_rx;

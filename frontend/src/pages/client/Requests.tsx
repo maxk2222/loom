@@ -32,7 +32,7 @@ export default function RequestsPage() {
   return (
     <div className="space-y-5">
       <h1 className="text-lg font-semibold">Active requests</h1>
-      <Card className="overflow-hidden p-0">
+      <Card className="overflow-x-auto p-0">
         <table className="w-full">
           <thead><tr><th className="th">Request</th><th className="th">Class</th><th className="th">API</th><th className="th">Deployment</th><th className="th">Running</th><th className="th" /></tr></thead>
           <tbody>

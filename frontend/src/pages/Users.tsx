@@ -28,7 +28,7 @@ export default function UsersPage() {
         <button className="btn-primary" onClick={() => setOpen(true)}><Plus size={16} /> New user</button>
       </div>
       {q.isLoading ? <Spinner /> : (
-        <Card className="overflow-hidden p-0">
+        <Card className="overflow-x-auto p-0">
           <table className="w-full">
             <thead><tr><th className="th">Email</th><th className="th">Name</th><th className="th">Role</th><th className="th">Status</th></tr></thead>
             <tbody>

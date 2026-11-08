@@ -31,6 +31,31 @@ export default function ClientsPage() {
     q.refetch();
   };
 
+  const Bar = ({ pct, title }: { pct: number | null | undefined; title: string }) =>
+    pct == null ? <span className="text-muted text-xs">—</span> : (
+      <div className="w-20" title={`${title} ${pct.toFixed(0)}%`}>
+        <div className="flex justify-between text-[10px] text-muted"><span>{title}</span><span>{pct.toFixed(0)}%</span></div>
+        <div className="h-1.5 rounded bg-white/10">
+          <div className={`h-1.5 rounded ${pct >= 85 ? "bg-rose-400" : pct >= 65 ? "bg-amber-300" : "bg-emerald-400"}`} style={{ width: `${Math.min(100, pct)}%` }} />
+        </div>
+      </div>
+    );
+
+  const StatsCell = ({ c }: { c: ClientRow }) => {
+    const s = c.stats;
+    if (!c.online || !s || s.cpu_pct == null) return <span className="text-muted text-xs">—</span>;
+    const g = s.gpu;
+    const gp = g?.mem_total_bytes ? (g.mem_used_bytes ?? 0) / g.mem_total_bytes * 100 : g?.util_pct ?? null;
+    return (
+      <div className="flex flex-col gap-1">
+        <Bar pct={s.cpu_pct} title="CPU" />
+        <Bar pct={s.ram_pct} title="RAM" />
+        {g && <Bar pct={gp} title={g.util_pct != null ? "GPU" : "VRAM"} />}
+        {g && <span className="text-[10px] text-muted" title={g.name}>{g.name.length > 22 ? g.name.slice(0, 22) + "…" : g.name}</span>}
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
@@ -40,9 +65,9 @@ export default function ClientsPage() {
         </button>
       </div>
       {q.isLoading ? <Spinner /> : (
-        <Card className="overflow-hidden p-0">
+        <Card className="overflow-x-auto p-0">
           <table className="w-full">
-            <thead><tr><th className="th">Name</th><th className="th">State</th><th className="th">Status</th><th className="th">Version</th><th className="th">Platform</th><th className="th">Last seen</th><th className="th" /></tr></thead>
+            <thead><tr><th className="th">Name</th><th className="th">State</th><th className="th">Status</th><th className="th">Version</th><th className="th">Platform</th><th className="th">Load</th><th className="th">Last seen</th><th className="th" /></tr></thead>
             <tbody>
               {(q.data?.clients ?? []).map((c) => (
                 <tr key={c.id}>
@@ -51,6 +76,7 @@ export default function ClientsPage() {
                   <td className="td"><Badge tone={c.status === "active" ? "accent" : "warn"}>{c.status}</Badge></td>
                   <td className="td text-muted">{c.version || "—"}</td>
                   <td className="td text-muted">{c.platform || "—"}</td>
+                  <td className="td"><StatsCell c={c} /></td>
                   <td className="td text-muted">{c.last_seen_at ? new Date(c.last_seen_at).toLocaleString() : "—"}</td>
                   <td className="td text-right">
                     <span className="inline-flex gap-2">
@@ -69,7 +95,7 @@ export default function ClientsPage() {
                   </td>
                 </tr>
               ))}
-              {(q.data?.clients ?? []).length === 0 && <tr><td className="td text-center text-muted" colSpan={7}>No clients yet — issue an enroll token and run `loom enroll` on a workstation.</td></tr>}
+              {(q.data?.clients ?? []).length === 0 && <tr><td className="td text-center text-muted" colSpan={8}>No clients yet — issue an enroll token and run `loom enroll` on a workstation.</td></tr>}
             </tbody>
           </table>
         </Card>

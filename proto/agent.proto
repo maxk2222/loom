@@ -128,9 +128,23 @@ message InventoryReport {
   uint64 reported_at_unix_ms = 3;
 }
 
+message HostStats {
+  float cpu_pct = 1;                 // whole-system CPU 0-100
+  float ram_pct = 2;                 // whole-system RAM 0-100
+  uint64 ram_used_bytes = 3;
+  uint64 ram_total_bytes = 4;
+  bool pressure = 5;                 // a configured limit is exceeded
+  bool has_gpu = 6;
+  string gpu_name = 7;
+  float gpu_util_pct = 8;            // 0 = unknown/unreported
+  uint64 gpu_mem_used_bytes = 9;
+  uint64 gpu_mem_total_bytes = 10;
+}
+
 message CapacityReport {
   repeated DeploymentCapacity capacities = 1;
   uint64 reported_at_unix_ms = 2;
+  HostStats host = 3;                // latest system sample (optional)
 }
 
 // ---------------------------------------------------------------------------

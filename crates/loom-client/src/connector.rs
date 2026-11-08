@@ -58,6 +58,8 @@ pub struct ConnectorState {
     ctrl_tx: RwLock<Option<mpsc::Sender<ClientEnvelope>>>,
     agent: Mutex<Option<AgentClient<Channel>>>,
     active_requests: RwLock<HashMap<String, ActiveRequest>>,
+    /// Latest host sample from sysmon — piggybacked on capacity reports.
+    pub sys_stats: RwLock<crate::sysmon::SharedStats>,
     /// Shared finished-request history (wired to local_api::AppState).
     pub history: RwLock<Option<Arc<RwLock<std::collections::VecDeque<crate::local_api::FinReq>>>>>,
     /// Admin notices synced from the server (+ persistence path).
@@ -85,11 +87,19 @@ impl Connector {
                 ctrl_tx: RwLock::new(None),
                 agent: Mutex::new(None),
                 active_requests: RwLock::new(HashMap::new()),
+                sys_stats: RwLock::new(std::sync::Arc::new(RwLock::new(
+                    crate::sysmon::SystemStats::default(),
+                ))),
                 history: RwLock::new(None),
                 notes: RwLock::new(None),
                 shutdown: CancellationToken::new(),
             }),
         }
+    }
+
+    /// Wire the sysmon stats handle so capacity reports carry host load.
+    pub fn set_sys_stats(&self, s: crate::sysmon::SharedStats) {
+        *self.state.sys_stats.write().unwrap() = s;
     }
 
     /// Wire the finished-request history ring shared with the local API.
@@ -667,7 +677,27 @@ impl ConnectorState {
                 .iter()
                 .map(capacity_to_pb)
                 .collect();
-            let _ = tx.send(client_msgs::capacity_report(caps)).await;
+            let host = {
+                let arc = self.sys_stats.read().unwrap().clone();
+                let s = arc.read().unwrap().clone();
+                Some(loom_protocol::pb::HostStats {
+                    cpu_pct: s.cpu_pct,
+                    ram_pct: s.ram_pct,
+                    ram_used_bytes: s.ram_used_bytes,
+                    ram_total_bytes: s.ram_total_bytes,
+                    pressure: s.pressure,
+                    has_gpu: s.gpu.is_some(),
+                    gpu_name: s.gpu.as_ref().map(|g| g.name.clone()).unwrap_or_default(),
+                    gpu_util_pct: s.gpu.as_ref().and_then(|g| g.util_pct).unwrap_or(0.0),
+                    gpu_mem_used_bytes: s.gpu.as_ref().and_then(|g| g.mem_used_bytes).unwrap_or(0),
+                    gpu_mem_total_bytes: s
+                        .gpu
+                        .as_ref()
+                        .and_then(|g| g.mem_total_bytes)
+                        .unwrap_or(0),
+                })
+            };
+            let _ = tx.send(client_msgs::capacity_report(caps, host)).await;
         }
     }
 

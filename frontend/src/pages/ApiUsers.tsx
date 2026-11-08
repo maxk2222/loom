@@ -176,7 +176,7 @@ export default function ApiUsersPage() {
       </div>
 
       {projects.isLoading ? <Spinner /> : (
-        <Card className="overflow-hidden p-0">
+        <Card className="overflow-x-auto p-0">
           <table className="w-full">
             <thead>
               <tr>

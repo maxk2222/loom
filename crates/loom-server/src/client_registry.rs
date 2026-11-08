@@ -194,17 +194,47 @@ impl ClientRegistry {
                 .patch_deployment(dep_id, None, Some(false))
                 .await;
         }
-        self.apply_capacity(client_id, &inv.capacities).await?;
+        self.apply_capacity(client_id, &inv.capacities, None)
+            .await?;
         Ok(())
     }
 
     /// Update runtime capacity hashes.
     pub async fn apply_capacity(
         &self,
-        _client_id: &str,
+        client_id: &str,
         caps: &[DeploymentCapacity],
+        host: Option<&loom_protocol::pb::HostStats>,
     ) -> Result<()> {
         let mut c = self.rt.conn.clone();
+        if let Some(h) = host {
+            let _: () = redis::cmd("HSET")
+                .arg(self.rt.k(&format!("client:{client_id}")))
+                .arg("cpu_pct")
+                .arg(h.cpu_pct)
+                .arg("ram_pct")
+                .arg(h.ram_pct)
+                .arg("ram_used_bytes")
+                .arg(h.ram_used_bytes)
+                .arg("ram_total_bytes")
+                .arg(h.ram_total_bytes)
+                .arg("pressure")
+                .arg(h.pressure as u32)
+                .arg("has_gpu")
+                .arg(h.has_gpu as u32)
+                .arg("gpu_name")
+                .arg(&h.gpu_name)
+                .arg("gpu_util_pct")
+                .arg(h.gpu_util_pct)
+                .arg("gpu_mem_used_bytes")
+                .arg(h.gpu_mem_used_bytes)
+                .arg("gpu_mem_total_bytes")
+                .arg(h.gpu_mem_total_bytes)
+                .arg("stats_at")
+                .arg(now_ms())
+                .query_async(&mut c)
+                .await?;
+        }
         for cap in caps {
             let key = self.rt.k(&format!("dep:{}", cap.deployment_id));
             let state = if cap.accepting {
@@ -329,22 +359,47 @@ impl ClientRegistry {
         for r in rows {
             let cid = r.id.to_string();
             let mut c = self.rt.conn.clone();
-            let online: Option<String> = redis::cmd("HGET")
+            let vals: Vec<Option<String>> = redis::cmd("HMGET")
                 .arg(self.rt.k(&format!("client:{cid}")))
                 .arg("online")
+                .arg("cpu_pct")
+                .arg("ram_pct")
+                .arg("ram_used_bytes")
+                .arg("ram_total_bytes")
+                .arg("has_gpu")
+                .arg("gpu_name")
+                .arg("gpu_util_pct")
+                .arg("gpu_mem_used_bytes")
+                .arg("gpu_mem_total_bytes")
+                .arg("stats_at")
                 .query_async(&mut c)
                 .await
-                .unwrap_or(None);
+                .unwrap_or_default();
+            let f = |i: usize| vals.get(i).and_then(|v| v.clone());
+            let num = |i: usize| f(i).and_then(|s| s.parse::<f64>().ok());
             out.push(json!({
                 "id": cid,
                 "name": r.name,
                 "status": r.status,
-                "online": online.as_deref() == Some("1"),
+                "online": f(0).as_deref() == Some("1"),
                 "last_seen_at": r.last_seen_at,
                 "version": r.version,
                 "platform": r.platform,
                 "labels": r.labels,
                 "config_version": r.config_version,
+                "stats": if f(10).is_some() { json!({
+                    "cpu_pct": num(1),
+                    "ram_pct": num(2),
+                    "ram_used_bytes": num(3),
+                    "ram_total_bytes": num(4),
+                    "gpu": if f(5).as_deref() == Some("1") { json!({
+                        "name": f(6),
+                        "util_pct": num(7),
+                        "mem_used_bytes": num(8),
+                        "mem_total_bytes": num(9),
+                    }) } else { serde_json::Value::Null },
+                    "at": num(10),
+                }) } else { serde_json::Value::Null },
             }));
         }
         Ok(out)

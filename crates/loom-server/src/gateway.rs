@@ -284,6 +284,11 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         prio: c.priority_class,
         enqueue_ts: now,
         deadline_ts: now + s.request_deadline_ms,
+        sticky: body
+            .get("user")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string(),
     };
 
     let started = Instant::now();

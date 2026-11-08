@@ -42,7 +42,7 @@ export default function KeysPage() {
         <button className="btn-primary" onClick={() => { setOpen(true); setToken(""); }}><Plus size={16} /> New key</button>
       </div>
       {q.isLoading ? <Spinner /> : (
-        <Card className="overflow-hidden p-0">
+        <Card className="overflow-x-auto p-0">
           <table className="w-full">
             <thead><tr><th className="th">Name</th><th className="th">Prefix</th><th className="th">Project</th><th className="th">Limits (rpm/tpm/conc)</th><th className="th">Status</th><th className="th" /></tr></thead>
             <tbody>

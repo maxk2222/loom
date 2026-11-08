@@ -14,7 +14,7 @@ export default function DeploymentsPage() {
     <div className="space-y-5">
       <h1 className="text-lg font-semibold">Deployments</h1>
       {q.isLoading ? <Spinner /> : (
-        <Card className="overflow-hidden p-0">
+        <Card className="overflow-x-auto p-0">
           <table className="w-full">
             <thead><tr>
               <th className="th">Name</th><th className="th">Backend</th><th className="th">Model</th>

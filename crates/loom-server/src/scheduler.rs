@@ -59,6 +59,9 @@ pub struct PendingRequest {
     pub prio: u32,
     pub enqueue_ts: i64,
     pub deadline_ts: i64,
+    /// KV-cache affinity key (OpenAI `user` field): same key prefers the same
+    /// member while the candidate set is stable — a hint, never a guarantee.
+    pub sticky: String,
 }
 
 pub struct RequestOutcome {
@@ -542,11 +545,28 @@ impl Scheduler {
             r.route(&vm_name, strategy, candidates, &runtime, &req.required)
         };
         let mut trace = decision.trace;
+        let mut ranked = decision.ranked;
+        // KV-cache affinity: a caller-supplied `user` key picks one member
+        // deterministically while the set is stable — the hash target is
+        // rotated to the front, all other candidates remain as fallbacks.
+        if !req.sticky.is_empty() && ranked.len() > 1 {
+            // Hash onto the *sorted member set*: `ranked` order varies per
+            // call (weighted/least_in_flight), so indexing it directly would
+            // pick a different member every time. The identity choice only
+            // shifts when the candidate set itself changes.
+            let mut ids: Vec<&str> = ranked.iter().map(|m| m.deployment_id.as_str()).collect();
+            ids.sort_unstable();
+            let chosen = ids[(fnv1a(&req.sticky) as usize) % ids.len()];
+            if let Some(pos) = ranked.iter().position(|m| m.deployment_id == chosen) {
+                tracing::debug!(req = %req.request_id, dep = %chosen, "sticky affinity member");
+                ranked.swap(0, pos);
+            }
+        }
         // `NoCapacity`/`Rejected` mean a member exists and could serve once it
         // frees up — transient. `ClientOffline` means unavailable; only when
         // every candidate is unreachable is the shortage structural.
         let mut saw_transient = false;
-        for member in decision.ranked {
+        for member in ranked {
             match self.lease_and_assign(req, &member).await {
                 Ok(outcome) => {
                     trace["deployment_id"] = json!(member.deployment_id);
@@ -827,4 +847,15 @@ impl Scheduler {
         _tx: mpsc::Sender<Result<loom_protocol::pb::DataFrame, tonic::Status>>,
     ) {
     }
+}
+
+/// FNV-1a 64-bit — stable across platforms, cheap, good enough for hashing a
+/// short affinity key onto a candidate index.
+fn fnv1a(s: &str) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }

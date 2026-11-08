@@ -160,6 +160,38 @@ export default function OverviewPage() {
           </div>
         </div>
       </div>
+      {online.some(c => c.stats?.cpu_pct != null) && (
+        <div className="card p-4">
+          <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted">Fleet load — live per client</div>
+          <div className="grid gap-x-8 gap-y-2 sm:grid-cols-2">
+            {online.map(c => {
+              const s = c.stats;
+              const gpuPct = s?.gpu?.mem_total_bytes ? (s.gpu.mem_used_bytes ?? 0) / s.gpu.mem_total_bytes * 100 : s?.gpu?.util_pct ?? null;
+              const row = (label: string, pct: number | null | undefined) => (
+                <div key={label} className="flex items-center gap-2 text-[11px]">
+                  <span className="w-8 text-muted">{label}</span>
+                  <div className="h-1.5 flex-1 rounded bg-white/10">
+                    {pct != null && <div className={`h-1.5 rounded ${pct >= 85 ? "bg-rose-400" : pct >= 65 ? "bg-amber-300" : "bg-emerald-400"}`} style={{ width: `${Math.min(100, pct)}%` }} />}
+                  </div>
+                  <span className="w-8 text-right text-muted">{pct != null ? `${pct.toFixed(0)}%` : "—"}</span>
+                </div>
+              );
+              return (
+                <div key={c.id} className="rounded-md bg-surface/60 px-3 py-2">
+                  <div className="mb-1 flex items-center gap-2 text-xs">
+                    <span className="h-1.5 w-1.5 rounded-full bg-ok" />
+                    <span className="font-medium">{c.name}</span>
+                    {s?.gpu && <span className="ml-auto truncate text-[10px] text-muted" title={s.gpu.name}>{s.gpu.name}</span>}
+                  </div>
+                  {row("CPU", s?.cpu_pct)}
+                  {row("RAM", s?.ram_pct)}
+                  {s?.gpu && row(s.gpu.util_pct != null ? "GPU" : "VRAM", gpuPct)}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
       {chart.length > 1 && (
         <div className="card p-4">
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">Recent requests (2min)</div>

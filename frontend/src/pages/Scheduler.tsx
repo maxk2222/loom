@@ -34,7 +34,7 @@ export default function SchedulerPage() {
         ))}
         {(state.data?.queues ?? []).length === 0 && <Card className="col-span-4"><Empty msg="No queue data" /></Card>}
       </div>
-      <Card className="overflow-hidden p-0">
+      <Card className="overflow-x-auto p-0">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Recent requests</div>
         {hist.isLoading ? <Spinner /> : (
           <table className="w-full">
