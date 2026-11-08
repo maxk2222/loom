@@ -38,19 +38,22 @@ export default function OverviewPage() {
     }
     return [...buckets.values()].map(b => ({ t: b.t, ttft: Math.round(b.ttft / b.n) })).slice(-30);
   })();
-  const lat = [...(hist.data?.requests ?? [])].map(h => h.duration_ms ?? 0).filter(Boolean).sort((a, b) => a - b);
-  const pct = (p: number) => lat.length ? Math.round(lat[Math.min(lat.length - 1, Math.floor(p * lat.length))]) : 0;
   const depCap = useQuery({ queryKey: ["deps"], queryFn: () => api.get<{ deployments: any[] }>("/api/deployments") });
   const vms = useQuery({ queryKey: ["ov-vms"], queryFn: () => api.get<{ models: VirtualModel[] }>("/api/models") });
   const latChart = (() => {
-    const m = new Map<string, { t: string; ms: number; n: number }>();
+    const m = new Map<string, { t: string; durs: number[] }>();
     for (const h of [...(hist.data?.requests ?? [])].reverse()) {
       if (!h.duration_ms) continue;
       const t = fmtTime(h.created_at);
-      const b = m.get(t) ?? { t, ms: 0, n: 0 };
-      b.ms += h.duration_ms; b.n++; m.set(t, b);
+      const b = m.get(t) ?? { t, durs: [] };
+      b.durs.push(h.duration_ms); m.set(t, b);
     }
-    return [...m.values()].map(b => ({ t: b.t, ms: Math.round(b.ms / b.n) })).slice(-30);
+    const p = (a: number[], q: number) =>
+      Math.round(a[Math.min(a.length - 1, Math.floor(q * a.length))]);
+    return [...m.values()].map(b => {
+      const d = b.durs.sort((x, y) => x - y);
+      return { t: b.t, p50: p(d, 0.5), p95: p(d, 0.95), p99: p(d, 0.99) };
+    }).slice(-30);
   })();
   const reqPerClient = (() => {
     const m = new Map<string, { name: string; n: number }>();
@@ -222,24 +225,19 @@ export default function OverviewPage() {
             </ResponsiveContainer>
           </div>
         )}
-        <div className="card p-4">
-          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">latency (ms)</div>
-          <div className="grid grid-cols-3 gap-2 pt-3 text-center">
-            <div><div className="text-xl font-semibold text-text">{pct(0.5)}</div><div className="text-[10px] text-muted">p50</div></div>
-            <div><div className="text-xl font-semibold text-text">{pct(0.95)}</div><div className="text-[10px] text-muted">p95</div></div>
-            <div><div className="text-xl font-semibold text-text">{pct(0.99)}</div><div className="text-[10px] text-muted">p99</div></div>
-          </div>
-        </div>
         {latChart.length > 1 && (
           <div className="card p-4">
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">avg latency (ms)</div>
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">latency percentiles (ms)</div>
             <ResponsiveContainer width="100%" height={130}>
               <AreaChart data={latChart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
                 <CartesianGrid stroke="#1c2740" vertical={false} />
                 <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
                 <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
                 <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
-                <Area type="monotone" dataKey="ms" stroke="#4a86c8" fill="#4a86c8" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Area type="monotone" dataKey="p50" stroke="#34d399" fill="#34d399" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+                <Area type="monotone" dataKey="p95" stroke="#fbbf24" fill="#fbbf24" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+                <Area type="monotone" dataKey="p99" stroke="#fb7185" fill="#fb7185" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
               </AreaChart>
             </ResponsiveContainer>
           </div>
