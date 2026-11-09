@@ -146,6 +146,24 @@ impl ClientRegistry {
             .query_async(&mut c)
             .await
             .unwrap_or(false);
+        // Dashboard freshness reads Postgres last_seen_at — refresh it from
+        // heartbeats, throttled to one write per minute per client so the
+        // write rate stays flat regardless of heartbeat interval.
+        let first_in_window: Option<String> = redis::cmd("SET")
+            .arg(self.rt.k(&format!("client:{client_id}:seen_write")))
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(60)
+            .query_async(&mut c)
+            .await
+            .unwrap_or(None);
+        if first_in_window.is_some() {
+            let _ = sqlx::query("UPDATE clients SET last_seen_at = now() WHERE id = $1::uuid")
+                .bind(client_id)
+                .execute(&self.db)
+                .await;
+        }
         let _ = session_id;
         Ok(())
     }
@@ -273,8 +291,25 @@ impl ClientRegistry {
 
     /// Client went offline: run CLIENT_OFFLINE lua across its dep keys,
     /// return (requeue_request_ids, fail_request_ids).
-    pub async fn client_offline(&self, client_id: &str) -> Result<(Vec<String>, Vec<String>)> {
+    /// Mark a client offline and reap its leases — but only when the
+    /// disconnecting stream is still the current session. A stale duplicate
+    /// connection dying after a fresh Hello must not touch the live session's
+    /// online flag, dep states or leases.
+    pub async fn client_offline(
+        &self,
+        client_id: &str,
+        session_id: &str,
+    ) -> Result<(Vec<String>, Vec<String>)> {
         let mut c = self.rt.conn.clone();
+        let current: Option<String> = redis::cmd("HGET")
+            .arg(self.rt.k(&format!("client:{client_id}")))
+            .arg("session_id")
+            .query_async(&mut c)
+            .await
+            .unwrap_or(None);
+        if current.as_deref() != Some(session_id) {
+            return Ok((vec![], vec![]));
+        }
         // find dep ids for this client
         let dep_ids: Vec<String> =
             sqlx::query_scalar("SELECT id::text FROM deployments WHERE client_id = $1::uuid")

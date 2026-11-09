@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 tick.tick().await;
                 let mut c = reg.rt.conn.clone();
-                for cid in sess.connected_ids().await {
+                for (cid, sid) in sess.connected_ids().await {
                     let last: Option<String> = redis::cmd("HGET")
                         .arg(reg.rt.k(&format!("client:{cid}")))
                         .arg("last_hb")
@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or(false);
                     if stale {
                         // control loop ended without proper cleanup
-                        match reg.client_offline(&cid).await {
+                        match reg.client_offline(&cid, &sid).await {
                             Ok((requeue, fail)) => {
                                 for rid in &requeue {
                                     sch.handle_assign_ack(rid, false, "client_offline").await;
@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
                                 tracing::warn!(client = %cid, error = %e, "hb watcher offline failed")
                             }
                         }
-                        sess.unregister(&cid).await;
+                        sess.unregister(&cid, &sid).await;
                         sch.wake();
                     }
                 }

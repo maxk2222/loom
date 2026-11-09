@@ -20,13 +20,15 @@ pub struct SessionManager {
 
 #[derive(Default)]
 struct Inner {
-    /// client_id -> control stream sender.
-    sessions: HashMap<String, mpsc::Sender<ServerEnvelope>>,
-    /// client_id -> one-shot kick handle: firing it makes the control loop
-    /// exit through the normal disconnect path (leases requeued/failed,
+    /// client_id -> (session_id, control stream sender). The session_id is
+    /// stored so a lingering duplicate stream cannot evict the live session's
+    /// entry when it finally dies.
+    sessions: HashMap<String, (String, mpsc::Sender<ServerEnvelope>)>,
+    /// client_id -> (session_id, kick handle): firing it makes the control
+    /// loop exit through the normal disconnect path (leases requeued/failed,
     /// client marked offline). Used for admin suspension so revocation takes
     /// effect on the live session, not just on the next reconnect.
-    kicks: HashMap<String, oneshot::Sender<()>>,
+    kicks: HashMap<String, (String, oneshot::Sender<()>)>,
     /// request_id -> correlator for the incoming RequestData stream pair:
     /// (inbound client stream, outbound server->client sender).
     pending_data: HashMap<String, oneshot::Sender<DataStreamPair>>,
@@ -37,36 +39,49 @@ impl SessionManager {
         Arc::new(Self::default())
     }
 
-    pub async fn register(&self, client_id: &str, tx: mpsc::Sender<ServerEnvelope>) {
+    pub async fn register(
+        &self,
+        client_id: &str,
+        session_id: &str,
+        tx: mpsc::Sender<ServerEnvelope>,
+    ) {
         self.inner
             .lock()
             .await
             .sessions
-            .insert(client_id.to_string(), tx);
+            .insert(client_id.to_string(), (session_id.to_string(), tx));
     }
 
-    pub async fn unregister(&self, client_id: &str) {
+    /// Remove a session only when it is still the registered one — a stale
+    /// duplicate stream dying late must not evict the live session's sender.
+    pub async fn unregister(&self, client_id: &str, session_id: &str) {
         let mut inner = self.inner.lock().await;
-        inner.sessions.remove(client_id);
-        inner.kicks.remove(client_id);
+        if inner
+            .sessions
+            .get(client_id)
+            .is_some_and(|(sid, _)| sid == session_id)
+        {
+            inner.sessions.remove(client_id);
+            inner.kicks.remove(client_id);
+        }
     }
 
     /// Arm a kick handle for a session; the control loop should select on the
     /// returned receiver and break when it resolves.
-    pub async fn register_kick(&self, client_id: &str) -> oneshot::Receiver<()> {
+    pub async fn register_kick(&self, client_id: &str, session_id: &str) -> oneshot::Receiver<()> {
         let (tx, rx) = oneshot::channel();
         self.inner
             .lock()
             .await
             .kicks
-            .insert(client_id.to_string(), tx);
+            .insert(client_id.to_string(), (session_id.to_string(), tx));
         rx
     }
 
     /// Force a live session into its disconnect path. Returns false when the
     /// client is not connected or was already kicked.
     pub async fn kick(&self, client_id: &str) -> bool {
-        if let Some(tx) = self.inner.lock().await.kicks.remove(client_id) {
+        if let Some((_, tx)) = self.inner.lock().await.kicks.remove(client_id) {
             let _ = tx.send(());
             true
         } else {
@@ -79,7 +94,7 @@ impl SessionManager {
         // holding the session map would wedge every session operation.
         let tx = {
             let inner = self.inner.lock().await;
-            inner.sessions.get(client_id).cloned()
+            inner.sessions.get(client_id).map(|(_, tx)| tx.clone())
         };
         let Some(tx) = tx else {
             return Err("client not connected");
@@ -94,8 +109,15 @@ impl SessionManager {
         self.inner.lock().await.sessions.contains_key(client_id)
     }
 
-    pub async fn connected_ids(&self) -> Vec<String> {
-        self.inner.lock().await.sessions.keys().cloned().collect()
+    /// (client_id, session_id) pairs for every live session.
+    pub async fn connected_ids(&self) -> Vec<(String, String)> {
+        self.inner
+            .lock()
+            .await
+            .sessions
+            .iter()
+            .map(|(cid, (sid, _))| (cid.clone(), sid.clone()))
+            .collect()
     }
 
     /// Register expectation of a client data stream for a request.

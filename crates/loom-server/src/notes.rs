@@ -58,7 +58,7 @@ pub async fn push_to(sessions: &crate::session::SessionManager, db: &PgPool, cli
 /// Push to every connected client — used after any note write so all views
 /// converge (broadcast adds, scoped adds and deletes all covered).
 pub async fn push_all(sessions: &crate::session::SessionManager, db: &PgPool) {
-    for id in sessions.connected_ids().await {
+    for (id, _) in sessions.connected_ids().await {
         push_to(sessions, db, &id).await;
     }
 }

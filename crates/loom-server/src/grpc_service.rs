@@ -129,7 +129,9 @@ impl Agent for AgentSvc {
                 .registry
                 .set_online(&client_id, &session_id, &hello.client_version)
                 .await;
-            this.sessions.register(&client_id, out_tx.clone()).await;
+            this.sessions
+                .register(&client_id, &session_id, out_tx.clone())
+                .await;
             // Current notes/briefings for this client (broadcast + scoped).
             crate::notes::push_to(&this.sessions, &this.registry.db, &client_id).await;
             if let Some(inv) = &hello.inventory {
@@ -137,7 +139,7 @@ impl Agent for AgentSvc {
             }
             this.scheduler.wake();
             tracing::info!(client = %client_id, session = %session_id, "client connected");
-            let mut kick_rx = this.sessions.register_kick(&client_id).await;
+            let mut kick_rx = this.sessions.register_kick(&client_id, &session_id).await;
 
             // --- control loop ---
             loop {
@@ -216,8 +218,8 @@ impl Agent for AgentSvc {
             }
 
             // disconnect: release leases, mark offline, fail/requeue requests
-            this.sessions.unregister(&client_id).await;
-            match this.registry.client_offline(&client_id).await {
+            this.sessions.unregister(&client_id, &session_id).await;
+            match this.registry.client_offline(&client_id, &session_id).await {
                 Ok((requeue, fail)) => {
                     // reserved leases → nudge the awaiting dispatcher to retry
                     // the next candidate immediately (reject ack + drop the
