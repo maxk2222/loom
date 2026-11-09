@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Boxes, Cpu, ListOrdered, Zap } from "lucide-react";
-import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
+import { AreaChart, Area, BarChart, Bar, Cell, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { LiveBadge, PageHeader, Stat } from "../components/ui";
@@ -122,6 +122,14 @@ export default function OverviewPage() {
 
   const d = ov.data;
   const online = (clients.data?.clients ?? []).filter((c) => c.online);
+  // Fleet view shows every client — suspended/disconnected ones stay
+  // visible but grayed out instead of disappearing silently.
+  const fleet = [...(clients.data?.clients ?? [])].sort(
+    (a, b) => Number(b.online && b.status === "active") - Number(a.online && a.status === "active")
+  );
+  const offlineNames = new Set(
+    (clients.data?.clients ?? []).filter((c) => !c.online || c.status !== "active").map((c) => c.name)
+  );
 
   return (
     <div className="space-y-6">
@@ -164,32 +172,44 @@ export default function OverviewPage() {
           </div>
         </div>
       </div>
-      {online.some(c => c.stats?.cpu_pct != null) && (
+      {fleet.length > 0 && (
         <div className="card p-4">
           <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted">Fleet load — live per client</div>
           <div className="grid gap-x-8 gap-y-2 sm:grid-cols-2">
-            {online.map(c => {
+            {fleet.map(c => {
               const s = c.stats;
+              const dim = !c.online || c.status !== "active";
               const gpuPct = s?.gpu?.mem_total_bytes ? (s.gpu.mem_used_bytes ?? 0) / s.gpu.mem_total_bytes * 100 : s?.gpu?.util_pct ?? null;
               const row = (label: string, pct: number | null | undefined) => (
                 <div key={label} className="flex items-center gap-2 text-[11px]">
                   <span className="w-8 text-muted">{label}</span>
                   <div className="h-1.5 flex-1 rounded bg-white/10">
-                    {pct != null && <div className={`h-1.5 rounded ${pct >= 85 ? "bg-rose-400" : pct >= 65 ? "bg-amber-300" : "bg-emerald-400"}`} style={{ width: `${Math.min(100, pct)}%` }} />}
+                    {pct != null && <div className={`h-1.5 rounded ${dim ? "bg-slate-500" : pct >= 85 ? "bg-rose-400" : pct >= 65 ? "bg-amber-300" : "bg-emerald-400"}`} style={{ width: `${Math.min(100, pct)}%` }} />}
                   </div>
                   <span className="w-8 text-right text-muted">{pct != null ? `${fmtPct(pct)}%` : "—"}</span>
                 </div>
               );
               return (
-                <div key={c.id} className="rounded-md bg-surface/60 px-3 py-2">
+                <div key={c.id} className={`rounded-md bg-surface/60 px-3 py-2 ${dim ? "opacity-45" : ""}`}>
                   <div className="mb-1 flex items-center gap-2 text-xs">
-                    <span className="h-1.5 w-1.5 rounded-full bg-ok" />
+                    <span className={`h-1.5 w-1.5 rounded-full ${c.status === "suspended" ? "bg-amber-400" : c.online ? "bg-ok" : "bg-slate-500"}`} />
                     <span className="font-medium">{c.name}</span>
+                    {dim && (
+                      <span className={`rounded px-1.5 py-0.5 text-[10px] ${c.status !== "active" ? "bg-amber-400/15 text-amber-300" : "bg-slate-500/15 text-slate-400"}`}>
+                        {c.status !== "active" ? c.status : "offline"}
+                      </span>
+                    )}
                     {s?.gpu && <span className="ml-auto truncate text-[10px] text-muted" title={s.gpu.name}>{s.gpu.name}</span>}
                   </div>
-                  {row("CPU", s?.cpu_pct)}
-                  {row("RAM", s?.ram_pct)}
-                  {s?.gpu && row(s.gpu.util_pct != null ? "GPU" : "VRAM", gpuPct)}
+                  {dim && !s ? (
+                    <div className="text-[10px] text-muted">no live stats</div>
+                  ) : (
+                    <>
+                      {row("CPU", s?.cpu_pct)}
+                      {row("RAM", s?.ram_pct)}
+                      {s?.gpu && row(s.gpu.util_pct != null ? "GPU" : "VRAM", gpuPct)}
+                    </>
+                  )}
                 </div>
               );
             })}
@@ -251,7 +271,9 @@ export default function OverviewPage() {
                 <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
                 <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} />
                 <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
-                <Bar dataKey="n" fill="#3d6fae" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="n" fill="#3d6fae" radius={[4, 4, 0, 0]}>
+                  {reqPerClient.map(e => <Cell key={e.name} fill={offlineNames.has(e.name) ? "#33415c" : "#3d6fae"} />)}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -305,8 +327,12 @@ export default function OverviewPage() {
                 <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
                 <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="e2e" name="e2e tok/s" fill="#3d6fae" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="dec" name="decode tok/s" fill="#4a86c8" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="e2e" name="e2e tok/s" fill="#3d6fae" radius={[4, 4, 0, 0]}>
+                  {tpsClient.map(e => <Cell key={e.name} fill={offlineNames.has(e.name) ? "#33415c" : "#3d6fae"} />)}
+                </Bar>
+                <Bar dataKey="dec" name="decode tok/s" fill="#4a86c8" radius={[4, 4, 0, 0]}>
+                  {tpsClient.map(e => <Cell key={e.name} fill={offlineNames.has(e.name) ? "#3a4a68" : "#4a86c8"} />)}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -320,7 +346,9 @@ export default function OverviewPage() {
                 <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
                 <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} />
                 <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
-                <Bar dataKey="cap" fill="#3d6fae" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="cap" fill="#3d6fae" radius={[4, 4, 0, 0]}>
+                  {perClient.map(e => <Cell key={e.name} fill={offlineNames.has(e.name) ? "#33415c" : "#3d6fae"} />)}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -332,9 +360,9 @@ export default function OverviewPage() {
           <thead><tr><th className="th">Name</th><th className="th">Status</th><th className="th">Version</th><th className="th">Platform</th><th className="th">Last seen</th></tr></thead>
           <tbody>
             {(clients.data?.clients ?? []).map((c) => (
-              <tr key={c.id}>
+              <tr key={c.id} className={!c.online || c.status !== "active" ? "opacity-50" : ""}>
                 <td className="td">{c.name}</td>
-                <td className="td"><LiveBadge live={c.online} /></td>
+                <td className="td">{c.status !== "active" ? <span className="rounded bg-amber-400/15 px-1.5 py-0.5 text-[10px] text-amber-300">{c.status}</span> : <LiveBadge live={c.online} />}</td>
                 <td className="td text-muted">{c.version || "—"}</td>
                 <td className="td text-muted">{c.platform || "—"}</td>
                 <td className="td text-muted">{c.last_seen_at ? fmtTs(c.last_seen_at) : "—"}</td>
