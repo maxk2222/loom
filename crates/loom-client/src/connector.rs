@@ -1085,15 +1085,20 @@ async fn run_request(
 
         let status = if cancel.is_cancelled() {
             "cancelled"
-        } else if upstream_err.is_some() {
+        } else if upstream_err.is_some() || upstream_status >= 400 {
+            // A proxied error body (5xx crash, 4xx rejection) is a failed
+            // generation even though transport completed.
             "failed"
         } else {
             "done"
         };
+        if upstream_err.is_none() && upstream_status >= 400 {
+            upstream_err = Some(format!("upstream status {upstream_status}"));
+        }
         // A clean stream end only counts as success when the upstream call
-        // itself succeeded — a 500 with a proxied error body must not reset
-        // the crash counter (it was already counted at forward()).
-        if status == "done" && upstream_status < 400u32 {
+        // itself succeeded — status is already "failed" for proxied error
+        // bodies, which the breaker counted at forward().
+        if status == "done" {
             state.backends.record_success(&a.deployment_id);
         }
         let _ = data_tx
