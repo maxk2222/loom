@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { LiveBadge, PageHeader, Stat } from "../components/ui";
 import type { ClientRow, Overview, VirtualModel } from "../lib/types";
-import { fmtPct, fmtTs, fmtTime } from "../lib/format";
+import { fmtPct, fmtTs, fmtTime, fmtNum, fmtMs } from "../lib/format";
 
 const API_ENDPOINTS = [
   { m: "POST", p: "/v1/chat/completions", d: "chat · stream · tools · vision" },
@@ -143,7 +143,7 @@ export default function OverviewPage() {
         <Stat label="Virtual models" value={<span className="flex items-center gap-2"><Boxes size={18} className="text-accent" />{d?.virtual_models ?? 0}</span>} />
         <Stat label="Queued" value={<span className="flex items-center gap-2"><ListOrdered size={18} className="text-warn" />{d?.queued_5m ?? 0}</span>} />
         <Stat label="In flight" value={<span className="flex items-center gap-2"><Activity size={18} className="text-accent" />{d?.active_5m ?? 0}</span>} />
-        <Stat label="Requests (24h)" value={<span className="flex items-center gap-2"><Zap size={18} className="text-ok" />{d?.requests_24h ?? 0}</span>} />
+        <Stat label="Requests (24h)" value={<span className="flex items-center gap-2"><Zap size={18} className="text-ok" />{fmtNum(d?.requests_24h ?? 0)}</span>} />
       </div>
       <div className="grid gap-4 md:grid-cols-2">
         <div className="card p-4">
@@ -223,8 +223,8 @@ export default function OverviewPage() {
             <AreaChart data={chart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
               <CartesianGrid stroke="#1c2740" vertical={false} />
               <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} />
-              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={fmtNum} />
+              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
               <Area type="monotone" dataKey="n" stroke="#3d6fae" fill="#3d6fae" fillOpacity={0.16} strokeWidth={2} isAnimationActive={false} />
             </AreaChart>
           </ResponsiveContainer>
@@ -233,13 +233,13 @@ export default function OverviewPage() {
       <div className="grid gap-4 md:grid-cols-3">
         {ttftChart.length > 1 && (
           <div className="card p-4">
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">avg TTFT (ms)</div>
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">avg TTFT</div>
             <ResponsiveContainer width="100%" height={130}>
               <AreaChart data={ttftChart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
                 <CartesianGrid stroke="#1c2740" vertical={false} />
                 <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={(v) => fmtMs(Number(v))} />
+                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtMs(Number(v))} />
                 <Area type="monotone" dataKey="ttft" stroke="#5b7eae" fill="#5b7eae" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
               </AreaChart>
             </ResponsiveContainer>
@@ -247,13 +247,13 @@ export default function OverviewPage() {
         )}
         {latChart.length > 1 && (
           <div className="card p-4">
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">latency percentiles (ms)</div>
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">latency percentiles</div>
             <ResponsiveContainer width="100%" height={130}>
               <AreaChart data={latChart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
                 <CartesianGrid stroke="#1c2740" vertical={false} />
                 <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={(v) => fmtMs(Number(v))} />
+                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtMs(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Area type="monotone" dataKey="p50" stroke="#34d399" fill="#34d399" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
                 <Area type="monotone" dataKey="p95" stroke="#fbbf24" fill="#fbbf24" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
@@ -269,8 +269,8 @@ export default function OverviewPage() {
               <BarChart data={reqPerClient} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
                 <CartesianGrid stroke="#1c2740" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} />
-                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={fmtNum} />
+                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
                 <Bar dataKey="n" fill="#3d6fae" radius={[4, 4, 0, 0]}>
                   {reqPerClient.map(e => <Cell key={e.name} fill={offlineNames.has(e.name) ? "#33415c" : "#3d6fae"} />)}
                 </Bar>
@@ -289,9 +289,9 @@ export default function OverviewPage() {
             <ComposedChart data={tokSeries} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
               <CartesianGrid stroke="#1c2740" vertical={false} />
               <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-              <YAxis yAxisId="l" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-              <YAxis yAxisId="r" orientation="right" tick={{ fontSize: 10, fill: "#8fb3d9" }} tickLine={false} axisLine={false} />
-              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+              <YAxis yAxisId="l" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={fmtNum} />
+              <YAxis yAxisId="r" orientation="right" tick={{ fontSize: 10, fill: "#8fb3d9" }} tickLine={false} axisLine={false} tickFormatter={fmtNum} />
+              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
               <Legend wrapperStyle={{ fontSize: 11 }} />
               <Bar yAxisId="l" dataKey="pt" name="prompt" stackId="tok" fill="#3d6fae" />
               <Bar yAxisId="l" dataKey="ct" name="completion" stackId="tok" fill="#7fa8d9" radius={[4, 4, 0, 0]} />
@@ -308,8 +308,8 @@ export default function OverviewPage() {
               <BarChart data={tpsModel} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
                 <CartesianGrid stroke="#1c2740" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={fmtNum} />
+                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Bar dataKey="e2e" name="e2e tok/s" fill="#3d6fae" radius={[4, 4, 0, 0]} />
                 <Bar dataKey="dec" name="decode tok/s" fill="#4a86c8" radius={[4, 4, 0, 0]} />
@@ -324,8 +324,8 @@ export default function OverviewPage() {
               <BarChart data={tpsClient} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
                 <CartesianGrid stroke="#1c2740" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={fmtNum} />
+                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Bar dataKey="e2e" name="e2e tok/s" fill="#3d6fae" radius={[4, 4, 0, 0]}>
                   {tpsClient.map(e => <Cell key={e.name} fill={offlineNames.has(e.name) ? "#33415c" : "#3d6fae"} />)}
@@ -344,8 +344,8 @@ export default function OverviewPage() {
               <BarChart data={perClient} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
                 <CartesianGrid stroke="#1c2740" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} />
-                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={fmtNum} />
+                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
                 <Bar dataKey="cap" fill="#3d6fae" radius={[4, 4, 0, 0]}>
                   {perClient.map(e => <Cell key={e.name} fill={offlineNames.has(e.name) ? "#33415c" : "#3d6fae"} />)}
                 </Bar>

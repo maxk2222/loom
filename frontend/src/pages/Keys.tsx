@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { Badge, Card, Field, Modal, Select, Spinner } from "../components/ui";
 import type { ApiKey, ApiUser } from "../lib/types";
+import { fmtNum } from "../lib/format";
 
 const SCOPES = [
   "chat", "completions", "embeddings", "models",
@@ -51,7 +52,7 @@ export default function KeysPage() {
                   <td className="td">{k.name || "—"}</td>
                   <td className="td font-mono text-muted">{k.prefix}…</td>
                   <td className="td text-muted">{projects.data?.projects.find((p) => p.id === k.project_id)?.name ?? k.project_id.slice(0, 8)}</td>
-                  <td className="td text-muted">{k.rpm_limit}/{k.tpm_limit}/{k.max_concurrent}</td>
+                  <td className="td text-muted">{k.rpm_limit}/{fmtNum(k.tpm_limit)}/{k.max_concurrent}</td>
                   <td className="td">{k.active ? <Badge tone="ok">active</Badge> : <Badge tone="err">revoked</Badge>}</td>
                   <td className="td text-right">{k.active && <button className="btn-danger py-1 text-xs" onClick={() => revoke(k.id)}>Revoke</button>}</td>
                 </tr>

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PlugZap, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../../lib/api";
+import { fmtMs } from "../../lib/format";
 import { Badge, Card, Empty, Field, Modal, PageHeader, Select, Spinner, Toggle } from "../../components/ui";
 
 interface DepForm {
@@ -335,7 +336,7 @@ export default function BackendsPage() {
                 {testing.ok === undefined
                   ? "Testing…"
                   : testing.ok
-                    ? `Connected in ${testing.latency_ms}ms — ${testing.models?.length ?? 0} models: ${(testing.models ?? []).slice(0, 6).join(", ")}`
+                    ? `Connected in ${fmtMs(testing.latency_ms)} — ${testing.models?.length ?? 0} models: ${(testing.models ?? []).slice(0, 6).join(", ")}`
                     : `Failed: ${testing.error ?? `status ${(testing as any).status ?? "?"}`}`}
               </div>
             )}

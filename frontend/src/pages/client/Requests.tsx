@@ -3,6 +3,7 @@ import { XCircle } from "lucide-react";
 import { api } from "../../lib/api";
 import { Badge, Card, Spinner } from "../../components/ui";
 import type { LocalRequest } from "../../lib/types";
+import { fmtDur } from "../../lib/format";
 
 export default function RequestsPage() {
   const qc = useQueryClient();
@@ -42,7 +43,7 @@ export default function RequestsPage() {
                 <td className="td"><Badge tone={r.class === "local" ? "accent" : "warn"}>{r.class}</Badge></td>
                 <td className="td text-muted">{r.api}</td>
                 <td className="td text-muted">{depName(r.deployment_id)}</td>
-                <td className="td text-muted">{Math.max(0, Math.floor((Date.now() - r.started_unix_ms) / 1000))}s</td>
+                <td className="td text-muted">{fmtDur(Math.max(0, (Date.now() - r.started_unix_ms) / 1000))}</td>
                 <td className="td text-right"><button className="btn-ghost p-1 text-err" onClick={() => cancel(r.request_id)}><XCircle size={15} /></button></td>
               </tr>
             ))}

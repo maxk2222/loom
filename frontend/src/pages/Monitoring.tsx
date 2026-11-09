@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Card, Spinner } from "../components/ui";
 import type { HistoryRow, ApiUser, UsageStat } from "../lib/types";
-import { fmtTs, fmtTimeS } from "../lib/format";
+import { fmtTs, fmtTimeS, fmtMs, fmtNum } from "../lib/format";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
@@ -45,8 +45,8 @@ export default function MonitoringPage() {
             <BarChart data={data}>
               <CartesianGrid stroke="#1f2a36" strokeDasharray="3 3" />
               <XAxis dataKey="project" stroke="#8b9bad" fontSize={12} />
-              <YAxis stroke="#8b9bad" fontSize={12} />
-              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={TOOLTIP_STYLE} />
+              <YAxis stroke="#8b9bad" fontSize={12} tickFormatter={fmtNum} />
+              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={TOOLTIP_STYLE} formatter={(v) => fmtNum(Number(v))} />
               <Bar dataKey="requests" fill="#5b8def" radius={[3, 3, 0, 0]} />
               <Bar dataKey="tokens" fill="#3fb96c" radius={[3, 3, 0, 0]} />
             </BarChart>
@@ -62,10 +62,10 @@ export default function MonitoringPage() {
               <tr key={r.id}>
                 <td className="td text-muted">{fmtTimeS(r.created_at)}</td>
                 <td className="td"><span className={r.status === "completed" ? "text-ok" : r.status === "failed" ? "text-err" : "text-warn"}>{r.status}</span></td>
-                <td className="td text-muted">{r.queue_wait_ms}ms</td>
-                <td className="td text-muted">{r.ttft_ms}ms</td>
-                <td className="td text-muted">{r.duration_ms}ms</td>
-                <td className="td text-muted">{r.prompt_tokens}+{r.completion_tokens}</td>
+                <td className="td text-muted">{fmtMs(r.queue_wait_ms)}</td>
+                <td className="td text-muted">{fmtMs(r.ttft_ms)}</td>
+                <td className="td text-muted">{fmtMs(r.duration_ms)}</td>
+                <td className="td text-muted">{fmtNum(r.prompt_tokens)}+{fmtNum(r.completion_tokens)}</td>
                 <td className="td text-muted">{r.error_code || "—"}</td>
               </tr>
             ))}

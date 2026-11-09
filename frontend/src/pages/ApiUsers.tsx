@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { Badge, Card, Field, Modal, Spinner, Toggle } from "../components/ui";
 import type { ApiUser, VirtualModel } from "../lib/types";
+import { fmtNum } from "../lib/format";
 
 interface ApiKey {
   id: string;
@@ -202,7 +203,7 @@ export default function ApiUsersPage() {
                     </td>
                     <td className="td"><ModelChips projectId={p.id} vms={vmList} /></td>
                     <td className="td text-xs text-muted">
-                      {pk ? `${pk.rpm_limit} / ${pk.tpm_limit.toLocaleString()} / ${pk.max_concurrent}` : "—"}
+                      {pk ? `${pk.rpm_limit} / ${fmtNum(pk.tpm_limit)} / ${pk.max_concurrent}` : "—"}
                     </td>
                     <td className="td">
                       <Badge tone={p.enabled ? "ok" : "warn"}>{p.enabled ? "enabled" : "disabled"}</Badge>

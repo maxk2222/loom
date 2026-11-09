@@ -3,6 +3,7 @@ import { XCircle } from "lucide-react";
 import { api } from "../lib/api";
 import { Card, Empty, Spinner } from "../components/ui";
 import type { HistoryRow, QueueClass } from "../lib/types";
+import { fmtMs, fmtNum } from "../lib/format";
 
 export default function SchedulerPage() {
   const state = useQuery({
@@ -28,7 +29,7 @@ export default function SchedulerPage() {
         {(state.data?.queues ?? []).map((q) => (
           <Card key={q.class}>
             <div className="text-xs text-muted">Priority class {q.class}</div>
-            <div className="mt-1 text-2xl font-semibold">{q.depth}</div>
+            <div className="mt-1 text-2xl font-semibold">{fmtNum(q.depth)}</div>
             <div className="text-xs text-muted">queued</div>
           </Card>
         ))}
@@ -50,10 +51,10 @@ export default function SchedulerPage() {
                     <span className={r.status === "completed" ? "text-ok" : r.status === "failed" ? "text-err" : "text-warn"}>{r.status}</span>
                     {r.error_code && <div className="text-xs text-muted">{r.error_code}</div>}
                   </td>
-                  <td className="td text-muted">{r.queue_wait_ms}ms</td>
-                  <td className="td text-muted">{r.ttft_ms}ms</td>
-                  <td className="td text-muted">{r.duration_ms}ms</td>
-                  <td className="td text-muted">{r.prompt_tokens}+{r.completion_tokens}</td>
+                  <td className="td text-muted">{fmtMs(r.queue_wait_ms)}</td>
+                  <td className="td text-muted">{fmtMs(r.ttft_ms)}</td>
+                  <td className="td text-muted">{fmtMs(r.duration_ms)}</td>
+                  <td className="td text-muted">{fmtNum(r.prompt_tokens)}+{fmtNum(r.completion_tokens)}</td>
                   <td className="td text-right">
                     {(r.status === "queued" || r.status === "streaming") && (
                       <button className="btn-ghost p-1 text-err" title="cancel" onClick={() => cancel(r.id)}><XCircle size={15} /></button>

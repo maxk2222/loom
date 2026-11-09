@@ -4,17 +4,7 @@ import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAx
 import { Badge, Card, Stat } from "../../components/ui";
 import { Megaphone, X } from "lucide-react";
 import type { ClientNote, ClientStatus } from "../../lib/types";
-import { fmtPct, fmtTs, fmtTimeS } from "../../lib/format";
-
-function fmtUptime(s: number): string {
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  return h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
-}
-
-function fmtGB(b: number): string {
-  return (b / 1024 ** 3).toFixed(1);
-}
+import { fmtPct, fmtTs, fmtTimeS, fmtUptime, fmtGiB, fmtNum, fmtMs } from "../../lib/format";
 
 function Meter({ label, pct, limit }: { label: string; pct: number; limit: number }) {
   const over = limit > 0 && pct >= limit;
@@ -130,7 +120,7 @@ export default function ClientStatusPage() {
             )}
           </div>
           <Meter label="CPU" pct={d.system.cpu_pct} limit={d.system.cpu_limit_pct} />
-          <Meter label={`RAM (${fmtGB(d.system.ram_used_bytes)} / ${fmtGB(d.system.ram_total_bytes)} GB)`} pct={d.system.ram_pct} limit={d.system.ram_limit_pct} />
+          <Meter label={`RAM (${fmtGiB(d.system.ram_used_bytes)} / ${fmtGiB(d.system.ram_total_bytes)} GB)`} pct={d.system.ram_pct} limit={d.system.ram_limit_pct} />
           {d.system.gpu && (
             <>
               {d.system.gpu.util_pct != null && (
@@ -138,7 +128,7 @@ export default function ClientStatusPage() {
               )}
               {d.system.gpu.mem_total_bytes != null && d.system.gpu.mem_total_bytes > 0 && (
                 <Meter
-                  label={`VRAM (${fmtGB(d.system.gpu.mem_used_bytes ?? 0)} / ${fmtGB(d.system.gpu.mem_total_bytes)} GB)`}
+                  label={`VRAM (${fmtGiB(d.system.gpu.mem_used_bytes ?? 0)} / ${fmtGiB(d.system.gpu.mem_total_bytes)} GB)`}
                   pct={(d.system.gpu.mem_used_bytes ?? 0) / d.system.gpu.mem_total_bytes * 100}
                   limit={d.system.gpu_vram_limit_pct ?? 0}
                 />
@@ -248,21 +238,21 @@ function ClientCharts() {
             <BarChart data={byClass} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
               <CartesianGrid stroke="#1c2740" vertical={false} />
               <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} />
-              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={fmtNum} />
+              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
               <Bar dataKey="n" fill="#3d6fae" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
       )}
       <div className="card p-4">
-        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">latency (ms)</div>
+        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">latency</div>
         <ResponsiveContainer width="100%" height={130}>
           <AreaChart data={latChart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
             <CartesianGrid stroke="#1c2740" vertical={false} />
             <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-            <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-            <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+            <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={(v) => fmtMs(Number(v))} />
+            <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtMs(Number(v))} />
             <Area type="monotone" dataKey="ms" stroke="#4a86c8" fill="#4a86c8" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
           </AreaChart>
         </ResponsiveContainer>
@@ -273,8 +263,8 @@ function ClientCharts() {
           <BarChart data={tokRows} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
             <CartesianGrid stroke="#1c2740" vertical={false} />
             <XAxis dataKey="t" tick={{ fontSize: 9, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-            <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-            <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+            <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={fmtNum} />
+            <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
             <Legend wrapperStyle={{ fontSize: 11 }} />
             <Bar dataKey="pt" name="prompt" stackId="tok" fill="#3d6fae" />
             <Bar dataKey="ct" name="completion" stackId="tok" fill="#7fa8d9" radius={[4, 4, 0, 0]} />
@@ -288,8 +278,8 @@ function ClientCharts() {
             <BarChart data={byModel} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
               <CartesianGrid stroke="#1c2740" vertical={false} />
               <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} />
-              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={fmtNum} />
+              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
               <Legend wrapperStyle={{ fontSize: 11 }} />
               <Bar dataKey="t1" name="tier-1 local" stackId="c" fill="#3d6fae" />
               <Bar dataKey="t2" name="tier-2 shared" stackId="c" fill="#7fa8d9" radius={[4, 4, 0, 0]} />
@@ -304,8 +294,8 @@ function ClientCharts() {
             <BarChart data={byModel} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
               <CartesianGrid stroke="#1c2740" vertical={false} />
               <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={fmtNum} />
+              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
               <Legend wrapperStyle={{ fontSize: 11 }} />
               <Bar dataKey="e2e" name="e2e tok/s" fill="#3d6fae" radius={[4, 4, 0, 0]} />
               <Bar dataKey="dec" name="decode tok/s" fill="#8fb3d9" radius={[4, 4, 0, 0]} />
@@ -319,8 +309,8 @@ function ClientCharts() {
           <ComposedChart data={tokRows} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
             <CartesianGrid stroke="#1c2740" vertical={false} />
             <XAxis dataKey="t" tick={{ fontSize: 9, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-            <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-            <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} />
+            <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={fmtNum} />
+            <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
             <Legend wrapperStyle={{ fontSize: 11 }} />
             <Area type="monotone" dataKey="e2e" name="e2e tok/s" stroke="#3d6fae" fill="#3d6fae" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
             <Area type="monotone" dataKey="dec" name="decode tok/s" stroke="#8fb3d9" fill="none" strokeWidth={1.5} dot={false} isAnimationActive={false} />
