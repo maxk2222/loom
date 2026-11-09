@@ -105,7 +105,10 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/keys/{id}/revoke", post(revoke_key))
         // clients
         .route("/api/clients", get(list_clients))
-        .route("/api/clients/{id}", get(client_detail))
+        .route(
+            "/api/clients/{id}",
+            get(client_detail).delete(delete_client),
+        )
         .route("/api/routers", get(list_routers).post(create_router))
         .route(
             "/api/routers/{id}",
@@ -746,6 +749,34 @@ async fn client_status(
     }
     audit(&s.db, "client", "status", &format!("{id}:{status}")).await;
     Json(json!({"ok":true})).into_response()
+}
+
+/// Permanent removal: kick the live session first so in-flight work
+/// requeues/fails cleanly, then drop the row — deployments, VM/router
+/// memberships and client notes cascade with it. The device credential
+/// dies with the row, so the workstation's next reconnect is rejected.
+async fn delete_client(State(s): State<AdminState>, Path(id): Path<String>) -> Response {
+    s.sessions.kick(&id).await;
+    match sqlx::query("DELETE FROM clients WHERE id=$1::uuid")
+        .bind(&id)
+        .execute(&s.db)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => {
+            audit(&s.db, "client", "delete", &id).await;
+            Json(json!({"ok":true})).into_response()
+        }
+        Ok(_) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"client not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 async fn issue_enroll_token(State(s): State<AdminState>, req: Request) -> Response {

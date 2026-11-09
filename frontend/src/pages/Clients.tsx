@@ -26,6 +26,11 @@ export default function ClientsPage() {
     await api.post(`/api/clients/${id}/status`, { status });
     await q.refetch();
   };
+  const remove = async (id: string, name: string) => {
+    if (!confirm(`Remove client "${name}" permanently? Its deployments leave all virtual models and the device credential stops working.`)) return;
+    await api.del(`/api/clients/${id}`);
+    await q.refetch();
+  };
   const pushUpdate = async (id: string) => {
     const r = await api.post<{ live?: boolean }>(`/api/clients/${id}/update`).catch(() => null);
     if (r) alert(r.live ? "Update pushed to the live session." : "Update queued — applies on the client's next check-in.");
@@ -99,6 +104,7 @@ export default function ClientsPage() {
                       ) : (
                         <button className="btn-outline py-1 text-xs" onClick={() => setStatus(c.id, "active")}>Activate</button>
                       )}
+                      <button className="btn-outline py-1 text-xs text-red-400" onClick={() => remove(c.id, c.name)}>Remove</button>
                     </span>
                   </td>
                 </tr>
