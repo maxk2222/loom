@@ -12,3 +12,4 @@ coverage/
 .profraw
 frontend/dist
 frontend/node_modules
+docs/scripts/node_modules/

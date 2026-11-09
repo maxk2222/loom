@@ -49,12 +49,20 @@ POST /v1/chat/completions  →  loom-server (route · queue · auth · meter)
 ## Screenshots
 
 <div align="center">
-<img src="docs/screenshots/login.png" width="31%" alt="Login"/>
-<img src="docs/screenshots/overview.png" width="31%" alt="Dashboard overview"/>
-<img src="docs/screenshots/client.png" width="31%" alt="Client UI"/>
+<img src="docs/screenshots/walkthrough-admin.gif" width="88%" alt="Admin dashboard walkthrough"/>
+<br/><sub>Admin dashboard — fleet load, time-windowed charts, token breakdowns, virtual models</sub>
+<br/><br/>
+<img src="docs/screenshots/walkthrough-client.gif" width="88%" alt="Workstation client walkthrough"/>
+<br/><sub>Workstation client — system load, tier-2 sharing, request analytics</sub>
+<br/><br/>
+<img src="docs/screenshots/admin-overview.png" width="31%" alt="Overview"/>
+<img src="docs/screenshots/admin-monitoring.png" width="31%" alt="Monitoring"/>
+<img src="docs/screenshots/client-status.png" width="31%" alt="Client status"/>
 <br/>
-<sub>Login · Admin dashboard · Workstation client UI — dark-only, one codebase, two build variants</sub>
+<sub>Overview · Monitoring with per-model/client/key totals · Client status — dark-only, one codebase, two build variants</sub>
 </div>
+
+Regenerate with `docs/scripts/capture-ui.mjs` (1440p captures, scripted GIF walkthroughs).
 
 ## Architecture
 

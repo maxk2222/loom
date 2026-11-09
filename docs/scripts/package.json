@@ -1,0 +1,14 @@
+{
+  "name": "loom-docs-capture",
+  "private": true,
+  "type": "module",
+  "description": "Regenerate README/docs screenshots and walkthrough GIFs",
+  "scripts": {
+    "capture": "node capture-ui.mjs"
+  },
+  "dependencies": {
+    "gifenc": "^1.0.3",
+    "playwright-core": "^1.49.1",
+    "sharp": "^0.33.5"
+  }
+}
