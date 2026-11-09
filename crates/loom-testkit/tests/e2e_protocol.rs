@@ -181,15 +181,21 @@ async fn e2e_config_push_applied() {
             .unwrap(),
         )
         .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    // client acks config — captured by mock
-    let captured = rig.server.captured().await;
-    assert!(
-        captured
-            .iter()
-            .any(|c| c.contains("config") || c.contains("ack")),
-        "expected config ack, got {captured:?}"
-    );
+    // client acks config — poll instead of a fixed sleep (CI runners are
+    // slow enough that 300ms is not always enough for receive+apply+ack).
+    let got_ack = wait_until(
+        || async {
+            rig.server
+                .captured()
+                .await
+                .iter()
+                .any(|c| c.contains("config") || c.contains("ack"))
+        },
+        Duration::from_secs(10),
+        Duration::from_millis(100),
+    )
+    .await;
+    assert!(got_ack, "expected config ack, got {:?}", rig.server.captured().await);
 }
 
 #[tokio::test]
