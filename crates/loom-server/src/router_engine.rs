@@ -299,6 +299,61 @@ fn to_choice(m: &Value, raw: &str, reason: &str) -> RouteChoice {
     }
 }
 
+/// The model name a member would dispatch to — same resolution as
+/// `to_choice`, without needing raw classifier output.
+fn member_target(m: &Value) -> String {
+    if let Some(r) = m["resolved"].as_str() {
+        return r.into();
+    }
+    let refv = m["ref"].as_str().unwrap_or("");
+    refv.strip_prefix("vm:")
+        .map(String::from)
+        .or_else(|| refv.strip_prefix("dep:").map(dep_vm_name))
+        .unwrap_or_default()
+}
+
+/// Drop members whose dispatch target can't serve right now — deployments
+/// removed from the fleet (disabled/deleted) leave stale refs in the config,
+/// and a classifier or `when` rule must never send traffic to a dead target
+/// while siblings are alive. `dep:` refs to deleted deployments resolve to
+/// empty direct VMs and are filtered the same way.
+async fn filter_live_members(
+    sched: &Scheduler,
+    cfg: &Value,
+    api: ApiType,
+    required: &RequiredCaps,
+) -> Value {
+    let Some(ms) = cfg["members"].as_array() else {
+        return cfg.clone();
+    };
+    let mut live = Vec::with_capacity(ms.len());
+    for m in ms {
+        let target = member_target(m);
+        if sched.serviceable(&target, api, required).await {
+            live.push(m.clone());
+        }
+    }
+    let mut out = cfg.clone();
+    out["members"] = Value::Array(live);
+    out
+}
+
+/// Fall back to `fallback_model` (when set and itself serviceable) or fail.
+fn fallback_or_bail(cfg: &Value, raw: impl Into<String>, reason: &str) -> Result<RouteChoice> {
+    let fb = cfg_str(cfg, "fallback_model");
+    let raw = raw.into();
+    if fb.is_empty() {
+        bail!("router: {raw}");
+    }
+    Ok(RouteChoice {
+        model: fb.into(),
+        name: fb.into(),
+        raw,
+        reason: reason.into(),
+        set: Value::Null,
+    })
+}
+
 /// Request signals used by `mode: "heuristic"` routers — cheap and fully
 /// deterministic, no engine call needed.
 #[derive(Debug, Default)]
@@ -574,20 +629,36 @@ fn heuristic_choice(cfg: &Value, m: &ReqMetrics) -> Result<RouteChoice> {
     bail!("heuristic router: no member matched and no fallback set ({summary})");
 }
 
-/// Full router pass: excerpt → classify → pick → fallback on failure.
-/// `mode: "heuristic"` skips the engine call entirely and applies the
-/// members' `when` rules to request metrics instead.
+/// Full router pass: dead-member filter → excerpt → classify → pick →
+/// fallback on failure. `mode: "heuristic"` skips the engine call entirely
+/// and applies the members' `when` rules to request metrics instead.
+/// Members whose targets can't serve (disabled/deleted deployments, dead
+/// vm refs, offline clients) are filtered out before any rule or classifier
+/// sees them, so they can never be picked.
 /// Returns the chosen target; `Err` only when nothing is routable at all.
 pub async fn route(
     sched: &Scheduler,
     models: &ModelRegistry,
     vm: &VirtualModel,
     body: &Value,
+    required: &RequiredCaps,
     prio: u32,
     deadline_ms: i64,
 ) -> Result<RouteChoice> {
-    let cfg = &vm.router_config;
+    let live_cfg = filter_live_members(sched, &vm.router_config, ApiType::Chat, required).await;
+    let cfg = &live_cfg;
     let mode = cfg_str(cfg, "mode");
+    if cfg["members"]
+        .as_array()
+        .map(|ms| ms.is_empty())
+        .unwrap_or(true)
+    {
+        let fb = cfg_str(cfg, "fallback_model");
+        if !fb.is_empty() && sched.serviceable(fb, ApiType::Chat, required).await {
+            return fallback_or_bail(cfg, "all members unavailable", "members-dead→fallback");
+        }
+        bail!("router: all members unavailable and no live fallback");
+    }
     if mode == "heuristic" {
         return heuristic_choice(cfg, &req_metrics(body));
     }
@@ -653,7 +724,16 @@ pub async fn test_classify(
     prompt: &str,
     deadline_ms: i64,
 ) -> Value {
-    let cfg = &vm.router_config;
+    // Same dead-member filtering as route() — the test console should show
+    // what a real request would see, including stale refs dropping out.
+    let live_cfg = filter_live_members(
+        sched,
+        &vm.router_config,
+        ApiType::Chat,
+        &RequiredCaps::default(),
+    )
+    .await;
+    let cfg = &live_cfg;
     let mode = cfg_str(cfg, "mode");
     if mode == "heuristic" || mode == "hybrid" {
         let body = json!({"messages": [{"role": "user", "content": prompt}]});
@@ -735,6 +815,18 @@ mod tests {
         let c = cfg();
         let ch = pick_member(&c, "qwen").unwrap();
         assert_eq!(ch.model, "dep-abc-123");
+    }
+
+    #[test]
+    fn member_target_prefers_resolved_then_ref() {
+        let dep = json!({"ref": "dep:abc-123", "resolved": "dep-abc-123"});
+        assert_eq!(member_target(&dep), "dep-abc-123");
+        let dep_unresolved = json!({"ref": "dep:abc-123"});
+        assert_eq!(member_target(&dep_unresolved), "dep-abc-123");
+        let vm = json!({"ref": "vm:fast"});
+        assert_eq!(member_target(&vm), "fast");
+        let bare = json!({"name": "x"});
+        assert_eq!(member_target(&bare), "");
     }
 
     #[test]

@@ -160,6 +160,28 @@ impl Scheduler {
         (queued, (pending - queued).max(0))
     }
 
+    /// Does `model` currently have at least one dispatchable member?
+    /// Combines the snapshot filter (enabled + capabilities for `api` and
+    /// `required`) with runtime liveness — a member whose client is gone or
+    /// whose dep was marked unavailable is dead weight for routing.
+    /// `available` and `draining` members count as live: requests may queue
+    /// behind a busy member and a draining member reopens once it recovers.
+    /// Used by the auto-router to keep dead members unpickable.
+    pub async fn serviceable(&self, model: &str, api: ApiType, required: &RequiredCaps) -> bool {
+        let Some(vm) = self.inner.models.resolve(model).await else {
+            return false;
+        };
+        let candidates = self.inner.models.candidates(&vm, api, required).await;
+        for m in &candidates {
+            if let Ok(Some(rt)) = self.inner.registry.dep_runtime(&m.deployment_id).await {
+                if rt.state == "available" || rt.state == "draining" {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // ---- control-stream event sinks (called by grpc_service) ----
 
     pub async fn handle_assign_ack(&self, request_id: &str, accepted: bool, reason: &str) {

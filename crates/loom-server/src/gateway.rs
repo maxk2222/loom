@@ -207,6 +207,9 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
     // Auto-router: when the requested model is a `kind='router'` VM, classify
     // the request with the configured router model and dispatch to the chosen
     // member instead. The API key's grant on the router name covers members.
+    // `required` is computed before routing so the engine can tell a member
+    // that exists-but-can't-serve-this-request from a live one.
+    let required = required_caps_from_request(&body);
     let mut routed: Option<crate::router_engine::RouteChoice> = None;
     let model = {
         let router_vm = if api == ApiType::Chat {
@@ -220,6 +223,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                 &s.models,
                 &vm,
                 &body,
+                &required,
                 c.priority_class,
                 s.request_deadline_ms,
             )
@@ -245,7 +249,6 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         }
     };
 
-    let required = required_caps_from_request(&body);
     let streaming = request_stream(&body);
     // Ask streaming backends to emit a final `usage` chunk so the client can
     // report real token counts (LM Studio, vLLM, OpenAI all honor this;

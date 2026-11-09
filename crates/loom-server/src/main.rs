@@ -102,6 +102,22 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Model-registry reconcile: admin changes reload eagerly, but out-of-band
+    // writers (manual SQL, migrations, restored backups) would otherwise
+    // leave phantom members in the routing snapshot until restart. A slow
+    // periodic reload makes the snapshot eventually consistent.
+    {
+        let m = models.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                if let Err(e) = m.reload().await {
+                    tracing::warn!(error = %e, "model registry reconcile reload failed");
+                }
+            }
+        });
+    }
     let usage = usage::UsageWriter::new(pool.clone(), cfg.history_retention_days);
     let auth = Arc::new(auth::Auth {
         db: pool.clone(),

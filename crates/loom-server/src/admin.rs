@@ -121,6 +121,7 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/notes/{id}", delete(delete_note))
         // deployments
         .route("/api/deployments", get(list_deployments))
+        .route("/api/deployments/{id}", delete(delete_deployment))
         // virtual models
         .route("/api/models", get(list_vms).post(create_vm))
         .route(
@@ -923,14 +924,219 @@ async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
     .fetch_all(&s.db)
     .await
     .unwrap_or_default();
+    // VM members + router dep: refs per deployment — lets the dashboard show
+    // what breaks before a deployment gets disabled or deleted.
+    let member_refs: Vec<(String, String)> = sqlx::query_as(
+        "SELECT m.deployment_id::text, vm.api_name FROM virtual_model_members m
+         JOIN virtual_models vm ON vm.id = m.virtual_model_id",
+    )
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default();
+    let mut ref_map: std::collections::HashMap<String, Vec<String>> = Default::default();
+    for (dep, vm) in member_refs {
+        ref_map.entry(dep).or_default().push(vm);
+    }
+    let router_cfgs: Vec<(String, Value)> =
+        sqlx::query_as("SELECT api_name, router_config FROM virtual_models WHERE kind='router'")
+            .fetch_all(&s.db)
+            .await
+            .unwrap_or_default();
     let mut out = Vec::new();
     for (id, cid, n, bt, mn, en, cn, caps) in rows {
-        let rt = s.registry.dep_runtime(&id.to_string()).await.ok().flatten();
+        let dep_id = id.to_string();
+        let rt = s.registry.dep_runtime(&dep_id).await.ok().flatten();
+        let mut referenced_by = ref_map.remove(&dep_id).unwrap_or_default();
+        let dep_ref = format!("dep:{dep_id}");
+        let direct = crate::router_engine::dep_vm_name(&dep_id);
+        for (rname, cfg) in &router_cfgs {
+            let hit = cfg["members"].as_array().into_iter().flatten().any(|m| {
+                m["ref"].as_str() == Some(dep_ref.as_str())
+                    || m["resolved"].as_str() == Some(direct.as_str())
+            });
+            if hit {
+                referenced_by.push(rname.clone());
+            }
+        }
         out.push(json!({"id":id,"client_id":cid,"client_name":cn,"name":n,"backend_type":bt,"model_name":mn,"enabled":en,
-            "capabilities": caps,
+            "capabilities": caps, "referenced_by": referenced_by,
             "runtime": rt.map(|r| json!({"state":r.state,"tier2_free":r.tier2_free,"tier2_total":r.tier2_total,"pressure_gated":r.pressure_gated}))}));
     }
     Json(json!({"deployments": out}))
+}
+
+/// Router api_names whose config references `dep_id` (`dep:` member ref or a
+/// materialized `resolved` name) — used for delete warnings/cleanup.
+async fn router_refs_to_dep(s: &AdminState, dep_id: &str) -> Vec<String> {
+    let rows: Vec<(String, Value)> =
+        sqlx::query_as("SELECT api_name, router_config FROM virtual_models WHERE kind='router'")
+            .fetch_all(&s.db)
+            .await
+            .unwrap_or_default();
+    let dep_ref = format!("dep:{dep_id}");
+    let direct = crate::router_engine::dep_vm_name(dep_id);
+    rows.into_iter()
+        .filter(|(_, cfg)| {
+            cfg["members"].as_array().into_iter().flatten().any(|m| {
+                m["ref"].as_str() == Some(dep_ref.as_str())
+                    || m["resolved"].as_str() == Some(direct.as_str())
+            })
+        })
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// Router api_names whose config references a `vm:<api_name>` member.
+async fn router_refs_to_vm(s: &AdminState, api_name: &str) -> Vec<String> {
+    let rows: Vec<(String, Value)> =
+        sqlx::query_as("SELECT api_name, router_config FROM virtual_models WHERE kind='router'")
+            .fetch_all(&s.db)
+            .await
+            .unwrap_or_default();
+    let vm_ref = format!("vm:{api_name}");
+    rows.into_iter()
+        .filter(|(_, cfg)| {
+            cfg["members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|m| m["ref"].as_str() == Some(vm_ref.as_str()))
+        })
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// VMs + routers that reference `dep_id` — reported by the deployment
+/// delete/disable endpoints so a stale ref never silently breaks routing.
+async fn dep_referenced_by(s: &AdminState, dep_id: &str) -> Vec<String> {
+    let mut names: Vec<String> = sqlx::query_scalar(
+        "SELECT vm.api_name FROM virtual_model_members m
+         JOIN virtual_models vm ON vm.id = m.virtual_model_id
+         WHERE m.deployment_id = $1::uuid",
+    )
+    .bind(dep_id)
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default();
+    names.extend(router_refs_to_dep(s, dep_id).await);
+    names
+}
+
+/// Delete `kind='direct'` models no router member materializes anymore —
+/// they exist only as dispatch targets for `dep:` refs and accumulate
+/// otherwise. Direct models kept alive via `fallback_virtual_model_id`
+/// stay. Returns how many were removed.
+async fn gc_direct_vms(s: &AdminState) -> u64 {
+    let cfgs: Vec<Value> =
+        sqlx::query_scalar("SELECT router_config FROM virtual_models WHERE kind='router'")
+            .fetch_all(&s.db)
+            .await
+            .unwrap_or_default();
+    let mut keep: std::collections::HashSet<String> = Default::default();
+    for cfg in &cfgs {
+        for m in cfg["members"].as_array().into_iter().flatten() {
+            if let Some(r) = m["resolved"].as_str() {
+                keep.insert(r.to_string());
+            }
+            if let Some(dep) = m["ref"].as_str().and_then(|r| r.strip_prefix("dep:")) {
+                keep.insert(crate::router_engine::dep_vm_name(dep));
+            }
+        }
+    }
+    let fallback_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT fallback_virtual_model_id::text FROM virtual_models
+         WHERE fallback_virtual_model_id IS NOT NULL",
+    )
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default();
+    let directs: Vec<(uuid::Uuid, String)> =
+        sqlx::query_as("SELECT id, api_name FROM virtual_models WHERE kind='direct'")
+            .fetch_all(&s.db)
+            .await
+            .unwrap_or_default();
+    let mut removed = 0u64;
+    for (id, name) in directs {
+        if keep.contains(&name) || fallback_ids.iter().any(|f| f == &id.to_string()) {
+            continue;
+        }
+        let r = sqlx::query("DELETE FROM virtual_models WHERE id=$1 AND kind='direct'")
+            .bind(id)
+            .execute(&s.db)
+            .await;
+        removed += r.map(|x| x.rows_affected()).unwrap_or(0);
+    }
+    removed
+}
+
+/// Soft-delete (`enabled=false`) or hard-delete (`?hard=true`) a deployment.
+/// Soft keeps history/FKs and takes effect immediately in the routing
+/// snapshot; hard cascades member rows and reloads the registry. Either way
+/// the response lists every VM/router still referencing it.
+async fn delete_deployment(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let hard = q
+        .get("hard")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let exists: Option<(String,)> =
+        sqlx::query_as("SELECT model_name FROM deployments WHERE id=$1::uuid")
+            .bind(&id)
+            .fetch_optional(&s.db)
+            .await
+            .unwrap_or(None);
+    let Some((model_name,)) = exists else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"no such deployment"})),
+        )
+            .into_response();
+    };
+    let referenced_by = dep_referenced_by(&s, &id).await;
+    if hard {
+        let _ = sqlx::query("DELETE FROM deployments WHERE id=$1::uuid")
+            .bind(&id)
+            .execute(&s.db)
+            .await;
+        // Runtime keys have no FK — clean them explicitly.
+        let mut c = s.registry.rt.conn.clone();
+        let _: () = redis::cmd("DEL")
+            .arg(s.registry.rt.k(&format!("dep:{id}")))
+            .arg(s.registry.rt.k(&format!("dep:{id}:leases")))
+            .query_async(&mut c)
+            .await
+            .unwrap_or(());
+        let gc = gc_direct_vms(&s).await;
+        let _ = s.models.reload().await;
+        audit(&s.db, "deployment", "delete", &id).await;
+        return Json(json!({
+            "ok": true, "deleted": true, "model_name": model_name,
+            "referenced_by": referenced_by, "gc_direct_vms": gc,
+        }))
+        .into_response();
+    }
+    let _ = sqlx::query("UPDATE deployments SET enabled=false, updated_at=now() WHERE id=$1::uuid")
+        .bind(&id)
+        .execute(&s.db)
+        .await;
+    s.models.patch_deployment(&id, None, Some(false)).await;
+    let mut c = s.registry.rt.conn.clone();
+    let _: () = redis::cmd("HSET")
+        .arg(s.registry.rt.k(&format!("dep:{id}")))
+        .arg("state")
+        .arg("unavailable")
+        .query_async(&mut c)
+        .await
+        .unwrap_or(());
+    audit(&s.db, "deployment", "disable", &id).await;
+    Json(json!({
+        "ok": true, "disabled": true, "model_name": model_name,
+        "referenced_by": referenced_by,
+    }))
+    .into_response()
 }
 
 async fn list_vms(State(s): State<AdminState>) -> Json<Value> {
@@ -1101,13 +1307,25 @@ async fn update_vm(
 }
 
 async fn delete_vm(State(s): State<AdminState>, Path(id): Path<String>) -> Response {
+    // Routers referencing this VM via `vm:` members keep the stale ref —
+    // filtered at route time, but the caller should know.
+    let api_name: Option<String> =
+        sqlx::query_scalar("SELECT api_name FROM virtual_models WHERE id=$1::uuid")
+            .bind(&id)
+            .fetch_optional(&s.db)
+            .await
+            .unwrap_or(None);
+    let referenced_by = match &api_name {
+        Some(n) => router_refs_to_vm(&s, n).await,
+        None => Vec::new(),
+    };
     let _ = sqlx::query("DELETE FROM virtual_models WHERE id=$1::uuid")
         .bind(&id)
         .execute(&s.db)
         .await;
     let _ = s.models.reload().await;
     audit(&s.db, "virtual_model", "delete", &id).await;
-    Json(json!({"ok":true})).into_response()
+    Json(json!({"ok":true, "referenced_by": referenced_by})).into_response()
 }
 
 // ---------------- scheduler / monitoring ----------------
@@ -1523,9 +1741,10 @@ async fn create_router(State(s): State<AdminState>, Json(b): Json<Value>) -> Res
         Ok(row) => {
             use sqlx::Row;
             let id: String = row.get(0);
+            let gc = gc_direct_vms(&s).await;
             let _ = s.models.reload().await;
             audit(&s.db, "router", "create", &id).await;
-            Json(json!({"ok":true,"id":id})).into_response()
+            Json(json!({"ok":true,"id":id,"gc_direct_vms":gc})).into_response()
         }
         Err(_) => (
             StatusCode::CONFLICT,
@@ -1577,9 +1796,10 @@ async fn update_router(
     .await;
     match res {
         Ok(r) if r.rows_affected() > 0 => {
+            let gc = gc_direct_vms(&s).await;
             let _ = s.models.reload().await;
             audit(&s.db, "router", "update", &id).await;
-            Json(json!({"ok":true})).into_response()
+            Json(json!({"ok":true,"gc_direct_vms":gc})).into_response()
         }
         Ok(_) => (
             StatusCode::NOT_FOUND,
@@ -1601,9 +1821,10 @@ async fn delete_router(State(s): State<AdminState>, Path(id): Path<String>) -> R
         .await;
     match r {
         Ok(x) if x.rows_affected() > 0 => {
+            let gc = gc_direct_vms(&s).await;
             let _ = s.models.reload().await;
             audit(&s.db, "router", "delete", &id).await;
-            Json(json!({"ok":true})).into_response()
+            Json(json!({"ok":true,"gc_direct_vms":gc})).into_response()
         }
         _ => (
             StatusCode::NOT_FOUND,
