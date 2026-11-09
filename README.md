@@ -348,11 +348,15 @@ deployment (gateway and client on the same host, mTLS, qwen2.5:0.5b):
 | `heuristic`/hybrid router rule hit | **~0 ms** (in-process rule eval; TTFB 4.5 ms vs 5.2 ms without router) |
 | LLM-classified pick (cold 27B classifier) | ~7–30 s — use heuristic/hybrid when latency matters |
 
+Remote members cost their network hop to the client on top of that —
+measured on a MacBook client reachable over a ~25 ms RTT tailscale
+link: TTFB 93 ms total vs ~12 ms for the local backend, i.e. roughly
+the round-trip legs (~60–80 ms) plus ~10 ms control-plane share. Pick
+same-site members when every millisecond counts.
+
 Scheduling itself (Redis lease + candidate fan-out) is ~1–5 ms and sits
 inside the numbers above; the client→backend first-token time dominates
-end-to-end TTFB, not the control plane. Remote members naturally cost
-their network hop to the client — pick same-site members when every
-millisecond counts.
+end-to-end TTFB, not the control plane.
 
 ## Repository layout
 
