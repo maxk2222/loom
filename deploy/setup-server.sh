@@ -110,22 +110,45 @@ if [ ! -s "$DIR/tls/ca.crt" ] || [ ! -s "$DIR/tls/ca.key" ]; then
     ok "internal CA created"
 else ok "internal CA reused"; fi
 
-if [ ! -s "$DIR/tls/server.crt" ] || [ ! -s "$DIR/tls/server.key" ]; then
-    SAN="DNS:$HOSTNAME,DNS:localhost,IP:127.0.0.1"
-    for ip in $(hostname -I 2>/dev/null); do SAN="$SAN,IP:$ip"; done
-    command -v tailscale >/dev/null && tailscale ip -4 2>/dev/null | grep -q . && \
-        SAN="$SAN,IP:$(tailscale ip -4)" || true
-    for s in "${EXTRA_SANS[@]}"; do
-        case "$s" in *[!0-9.]*) SAN="$SAN,DNS:$s";; *) SAN="$SAN,IP:$s";; esac
+SAN="DNS:$HOSTNAME,DNS:localhost,IP:127.0.0.1"
+for ip in $(hostname -I 2>/dev/null); do SAN="$SAN,IP:$ip"; done
+if command -v tailscale >/dev/null; then
+    TS_IP=$(tailscale ip -4 2>/dev/null || true)
+    [ -n "$TS_IP" ] && SAN="$SAN,IP:$TS_IP"
+    # MagicDNS name (host.tailnet.ts.net) — remote clients dial this name.
+    TS_DNS=$(tailscale status --json 2>/dev/null | grep -o '"DNSName": *"[^"]*"' \
+        | head -1 | cut -d'"' -f4 | sed 's/\.$//' || true)
+    [ -n "$TS_DNS" ] && SAN="$SAN,DNS:$TS_DNS"
+fi
+for s in ${EXTRA_SANS[@]+"${EXTRA_SANS[@]}"}; do
+    case "$s" in *[!0-9.]*) SAN="$SAN,DNS:$s";; *) SAN="$SAN,IP:$s";; esac
+done
+
+cert_covers_sans() { # all wanted SANs present in the current cert?
+    local have s rc=0
+    have=$(openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null \
+        | sed 's/IP Address:/IP:/g' || true)
+    [ -n "$have" ] || return 1
+    for s in $(printf '%s' "$SAN" | tr ',' '\n'); do
+        printf '%s' "$have" | grep -qF "$s" || { rc=1; break; }
     done
-    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$DIR/tls/server.key" 2>/dev/null
+    return $rc
+}
+
+if [ ! -s "$DIR/tls/server.key" ]; then
+    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$DIR/tls/server.key" 2>/dev/null \
+        || die "server key generation failed"
+fi
+if [ ! -s "$DIR/tls/server.crt" ] || ! cert_covers_sans "$DIR/tls/server.crt"; then
+    [ -s "$DIR/tls/server.crt" ] && warn "SAN set changed — re-signing server cert"
     openssl req -new -key "$DIR/tls/server.key" -subj "/CN=loom-server" -out "$DIR/tls/server.csr"
     printf 'subjectAltName=%s\n' "$SAN" > "$DIR/tls/san.cnf"
     openssl x509 -req -in "$DIR/tls/server.csr" -CA "$DIR/tls/ca.crt" -CAkey "$DIR/tls/ca.key" \
-        -CAcreateserial -days 730 -out "$DIR/tls/server.crt" -extfile "$DIR/tls/san.cnf" >/dev/null 2>&1
+        -CAcreateserial -days 730 -out "$DIR/tls/server.crt" -extfile "$DIR/tls/san.cnf" \
+        || die "server cert signing failed"
     rm -f "$DIR/tls/server.csr"
     ok "server cert signed (SAN: $SAN)"
-else ok "server cert reused"; fi
+else ok "server cert reused (covers all SANs)"; fi
 chmod 600 "$DIR/tls/ca.key" "$DIR/tls/server.key" 2>/dev/null || true
 chown -R 10001:10001 "$DIR/tls" 2>/dev/null || true
 
@@ -232,15 +255,15 @@ ok "compose written"
 say "starting stack"
 docker compose -f "$DIR/docker-compose.yml" --env-file "$DIR/.env" up -d --build >/dev/null
 for i in $(seq 1 60); do
-    curl -fsS --max-time 2 "http://localhost:$HTTP_PORT/readyz" 2>/dev/null | grep -q ready && break
+    [ "$(curl -fsS --max-time 2 "http://localhost:$HTTP_PORT/readyz" 2>/dev/null || true)" = "ready" ] && break
     sleep 2
 done
-curl -fsS --max-time 5 "http://localhost:$HTTP_PORT/readyz" >/dev/null \
+[ "$(curl -fsS --max-time 5 "http://localhost:$HTTP_PORT/readyz" 2>/dev/null || true)" = "ready" ] \
     || die "server did not become ready — check: docker compose -f $DIR/docker-compose.yml logs server"
 ok "server ready on :$HTTP_PORT"
 
 # --- admin + enroll token ---------------------------------------------------------
-SETUP=$(curl -fsS --max-time 5 "http://localhost:$HTTP_PORT/api/setup/status" | grep -o '"needs_setup":[a-z]*' | cut -d: -f2)
+SETUP=$(curl -fsS --max-time 5 "http://localhost:$HTTP_PORT/api/setup/status" 2>/dev/null | grep -o '"needs_setup":[a-z]*' | cut -d: -f2 || true)
 COOKIE="$DIR/.cookie"
 if [ "$SETUP" = "true" ]; then
     if [ -n "$ADMIN_EMAIL" ]; then
@@ -261,7 +284,7 @@ fi
 if [ -n "$ENROLL_LABEL" ] && [ -s "$COOKIE" ]; then
     TOK=$(curl -fsS -b "$COOKIE" -X POST "http://localhost:$HTTP_PORT/api/enroll-tokens" \
         -H 'Content-Type: application/json' -d "{\"label\":\"$ENROLL_LABEL\",\"max_uses\":10,\"expires_hours\":72}" \
-        | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+        2>/dev/null | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || true)
     [ -n "$TOK" ] && { printf '%s\n' "$TOK" > "$DIR/.enroll-token"; chmod 600 "$DIR/.enroll-token"; ok "enroll token: $TOK"; }
 fi
 

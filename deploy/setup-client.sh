@@ -173,7 +173,7 @@ fi
 if [ "$PROBE_VLLM" = "1" ] && [ -z "$VLLM" ]; then
     for p in 8003 8000 8001 8002; do
         code=$(get "http://localhost:$p/v1/models")
-        [ "$code" = "200" ] || [ "$code" = "401" ] && { VLLM="http://localhost:$p"; break; }
+        if [ "$code" = "200" ] || [ "$code" = "401" ]; then VLLM="http://localhost:$p"; break; fi
     done
 fi
 if [ -n "$VLLM" ]; then
@@ -291,6 +291,7 @@ $NET
     environment:
       LOOM_ENROLL_TOKEN: \${LOOM_ENROLL_TOKEN:-}
       LOOM_CONFIG: /etc/loom-client/config.toml
+      LOOM_LAPI_PORT: "$CFG_LAPI_PORT"
       RUST_LOG: "info,loom_client=debug"
     volumes:
       # host seed (read-only): config.toml + ca.crt land in the state volume

@@ -37,5 +37,7 @@ ENV LOOM_CONFIG=/etc/loom-client/config.toml \
     LOOM_LOCAL_API_BIND=0.0.0.0:8391
 VOLUME /etc/loom-client
 EXPOSE 8391
-HEALTHCHECK --interval=15s --timeout=3s --retries=5 CMD curl -fsS http://localhost:8391/healthz || exit 1
+# LOOM_LAPI_PORT lets generated configs move the local API port (setup
+# auto-picks a free one when 8391 is taken) without breaking this check.
+HEALTHCHECK --interval=15s --timeout=3s --retries=5 CMD curl -fsS "http://localhost:${LOOM_LAPI_PORT:-8391}/healthz" || exit 1
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint-client.sh"]
