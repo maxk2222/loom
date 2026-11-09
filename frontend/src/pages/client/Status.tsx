@@ -1,5 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { api } from "../../lib/api";
+import { WindowPicker } from "../Overview";
 import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { Badge, Card, Stat } from "../../components/ui";
 import { Megaphone, X } from "lucide-react";
@@ -188,10 +190,20 @@ export default function ClientStatusPage() {
 }
 
 
+const CLIENT_WINDOWS = [
+  { v: "1h", l: "1h" },
+  { v: "6h", l: "6h" },
+  { v: "24h", l: "24h" },
+  { v: "all", l: "All" },
+];
+const WIN_MS: Record<string, number> = { "1h": 3.6e6, "6h": 21.6e6, "24h": 86.4e6, all: Infinity };
+
 function ClientCharts() {
   const q = useQuery({ queryKey: ["client-hist"], queryFn: () => api.get<{ history: any[] }>("/local/api/history"), refetchInterval: 8000 });
   const bk = useQuery({ queryKey: ["chart-backends"], queryFn: () => api.get<{ backends: LocalBackend[] }>("/local/api/backends"), refetchInterval: 30000 });
-  const rows = q.data?.history ?? [];
+  const [win, setWin] = useState("24h");
+  // History is a ~300-entry ring — filter client-side by the picked window.
+  const rows = (q.data?.history ?? []).filter(r => Date.now() - r.ended_unix_ms <= WIN_MS[win]);
   const modelName = (() => {
     const m = new Map<string, string>();
     for (const b of bk.data?.backends ?? []) for (const d of b.deployments ?? []) m.set(d.id, d.model_name || d.name);
@@ -230,6 +242,11 @@ function ClientCharts() {
   }));
   if (rows.length === 0) return null;
   return (
+    <div className="space-y-4">
+    <div className="flex items-center justify-between">
+      <div className="text-xs font-medium uppercase tracking-wide text-muted">Request analytics</div>
+      <WindowPicker value={win} onChange={setWin} options={CLIENT_WINDOWS} />
+    </div>
     <div className="grid gap-4 md:grid-cols-2">
       {byClass.length > 0 && (
         <div className="card p-4">
@@ -317,6 +334,34 @@ function ClientCharts() {
           </ComposedChart>
         </ResponsiveContainer>
       </div>
+    </div>
+    {byModel.length > 0 && (
+      <div className="card overflow-x-auto p-0">
+        <div className="border-b border-border px-4 py-3 text-sm font-medium">Token totals by model <span className="text-xs text-muted">({win})</span></div>
+        <table className="w-full">
+          <thead><tr>
+            <th className="th">Model</th>
+            <th className="th text-right">tier-1</th>
+            <th className="th text-right">tier-2</th>
+            <th className="th text-right">Prompt</th>
+            <th className="th text-right">Completion</th>
+            <th className="th text-right">Total</th>
+          </tr></thead>
+          <tbody>
+            {byModel.map(m => (
+              <tr key={m.name}>
+                <td className="td">{m.name}</td>
+                <td className="td text-right text-muted">{fmtNum(m.t1)}</td>
+                <td className="td text-right text-muted">{fmtNum(m.t2)}</td>
+                <td className="td text-right text-muted">{fmtNum(m.pt)}</td>
+                <td className="td text-right text-muted">{fmtNum(m.ct)}</td>
+                <td className="td text-right font-medium">{fmtNum(m.pt + m.ct)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )}
     </div>
   );
 }

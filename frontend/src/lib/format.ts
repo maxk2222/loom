@@ -27,6 +27,23 @@ export function fmtTimeS(v: string | number | Date | null | undefined): string {
   return Number.isNaN(d.getTime()) ? "—" : tfs.format(d);
 }
 
+const df = new Intl.DateTimeFormat("sv-SE", { year: "numeric", month: "2-digit", day: "2-digit" });
+const dtfShort = new Intl.DateTimeFormat("sv-SE", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+
+// Date-only "YYYY-MM-DD" — long-window chart ticks.
+export function fmtDay(v: string | number | Date | null | undefined): string {
+  if (v == null || v === "") return "—";
+  const d = v instanceof Date ? v : new Date(v);
+  return Number.isNaN(d.getTime()) ? "—" : df.format(d);
+}
+
+// Short "MM-DD HH:mm" — mid-window (week/month) chart ticks.
+export function fmtDayT(v: string | number | Date | null | undefined): string {
+  if (v == null || v === "") return "—";
+  const d = v instanceof Date ? v : new Date(v);
+  return Number.isNaN(d.getTime()) ? "—" : dtfShort.format(d);
+}
+
 // Percent display: sub-1% values get one decimal so an idle-but-alive host
 // reads "0.3%" instead of a broken-looking "0%".
 export function fmtPct(v: number | null | undefined): string {

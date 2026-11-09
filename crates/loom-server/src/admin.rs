@@ -137,6 +137,8 @@ pub fn router(s: AdminState) -> Router {
         // monitoring
         .route("/api/history", get(history))
         .route("/api/stats/usage", get(usage_stats))
+        .route("/api/stats/series", get(stats_series))
+        .route("/api/stats/breakdown", get(stats_breakdown))
         // settings
         .route("/api/settings/{key}", get(get_setting).put(put_setting))
         .route("/api/branding", put(put_branding))
@@ -1417,6 +1419,151 @@ async fn usage_stats(State(s): State<AdminState>) -> Json<Value> {
     Json(
         json!({"usage_24h": rows.iter().map(|(p,r,pt,ct)| json!({"project_id":p,"requests":r,"prompt_tokens":pt,"completion_tokens":ct})).collect::<Vec<_>>()}),
     )
+}
+
+/// Map a window selector to (postgres interval, bucket width seconds).
+/// Bucket widths target ~50 points per chart so axes stay readable.
+fn stats_window(w: Option<&String>) -> (&'static str, i64) {
+    match w.map(|s| s.as_str()).unwrap_or("24h") {
+        "7d" => ("7 days", 10_800),
+        "30d" => ("30 days", 43_200),
+        "365d" | "1y" => ("365 days", 604_800),
+        "all" => ("100 years", 2_592_000),
+        _ => ("24 hours", 1_800),
+    }
+}
+
+#[derive(Deserialize)]
+struct StatsQ {
+    window: Option<String>,
+}
+
+/// Time-bucketed aggregates for dashboard charts. Bucketing is done with
+/// epoch arithmetic so arbitrary bucket widths work (not just date_trunc units).
+async fn stats_series(State(s): State<AdminState>, Query(q): Query<StatsQ>) -> Json<Value> {
+    let (interval, bucket) = stats_window(q.window.as_ref());
+    type Row = (
+        chrono::DateTime<chrono::Utc>,
+        i64,
+        i64,
+        i64,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        i64,
+        i64,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT to_timestamp(floor(extract(epoch from created_at)/$2)*$2) AS bucket,
+                count(*)::bigint,
+                sum(prompt_tokens)::bigint,
+                sum(completion_tokens)::bigint,
+                avg(NULLIF(ttft_ms,0))::float8,
+                percentile_cont(0.5)  within group (order by NULLIF(duration_ms,0))::float8,
+                percentile_cont(0.95) within group (order by NULLIF(duration_ms,0))::float8,
+                percentile_cont(0.99) within group (order by NULLIF(duration_ms,0))::float8,
+                sum(duration_ms)::bigint,
+                sum(GREATEST(duration_ms - ttft_ms, 0))::bigint
+           FROM requests_history
+          WHERE created_at > now() - $1::interval
+          GROUP BY bucket ORDER BY bucket",
+    )
+    .bind(interval)
+    .bind(bucket as f64)
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default();
+    Json(json!({
+        "window": q.window.unwrap_or_else(|| "24h".into()),
+        "bucket_secs": bucket,
+        "buckets": rows.iter().map(|(t,r,pt,ct,ttft,p50,p95,p99,dur,dec)| json!({
+            "t": t, "requests": r, "prompt_tokens": pt, "completion_tokens": ct,
+            "ttft_ms": ttft.unwrap_or(0.0), "p50_ms": p50.unwrap_or(0.0),
+            "p95_ms": p95.unwrap_or(0.0), "p99_ms": p99.unwrap_or(0.0),
+            "duration_ms": dur, "decode_ms": dec,
+        })).collect::<Vec<_>>()
+    }))
+}
+
+/// Totals grouped by dimension (model / client / api key / project user) for
+/// "total tokens by X" displays. duration/decode sums are included so clients
+/// can derive e2e and decode tok/s without a second aggregation pass.
+async fn stats_breakdown(State(s): State<AdminState>, Query(q): Query<StatsQ>) -> Json<Value> {
+    let (interval, _) = stats_window(q.window.as_ref());
+    type Row = (
+        Option<String>,
+        Option<uuid::Uuid>,
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    );
+    // (resolved display name, project name for keys, raw id, requests, pt, ct, dur, dec)
+    let run = |group: &str| {
+        match group {
+            "model" => "SELECT coalesce(vm.api_name, h.virtual_model_id::text, 'unknown'), NULL::uuid, '',
+                        count(*)::bigint, sum(h.prompt_tokens)::bigint, sum(h.completion_tokens)::bigint,
+                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - h.ttft_ms,0))::bigint
+                   FROM requests_history h LEFT JOIN virtual_models vm ON vm.id = h.virtual_model_id
+                  WHERE h.created_at > now() - $1::interval
+                  GROUP BY vm.api_name, h.virtual_model_id",
+            "client" => "SELECT coalesce(c.name, h.client_id::text, 'unknown'), NULL::uuid, '',
+                        count(*)::bigint, sum(h.prompt_tokens)::bigint, sum(h.completion_tokens)::bigint,
+                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - h.ttft_ms,0))::bigint
+                   FROM requests_history h LEFT JOIN clients c ON c.id = h.client_id
+                  WHERE h.created_at > now() - $1::interval
+                  GROUP BY c.name, h.client_id",
+            "key" => "SELECT coalesce(nullif(k.name,''), k.prefix, h.api_key_id::text, 'unknown'), NULL::uuid,
+                        coalesce(p.name,''),
+                        count(*)::bigint, sum(h.prompt_tokens)::bigint, sum(h.completion_tokens)::bigint,
+                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - h.ttft_ms,0))::bigint
+                   FROM requests_history h
+                   LEFT JOIN api_keys k ON k.id = h.api_key_id
+                   LEFT JOIN projects p ON p.id = h.project_id
+                  WHERE h.created_at > now() - $1::interval
+                  GROUP BY k.name, k.prefix, p.name, h.api_key_id",
+            _ => "SELECT coalesce(p.name, h.project_id::text, 'unknown'), NULL::uuid, '',
+                        count(*)::bigint, sum(h.prompt_tokens)::bigint, sum(h.completion_tokens)::bigint,
+                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - h.ttft_ms,0))::bigint
+                   FROM requests_history h LEFT JOIN projects p ON p.id = h.project_id
+                  WHERE h.created_at > now() - $1::interval
+                  GROUP BY p.name, h.project_id",
+        }
+    };
+    let db = s.db.clone();
+    let fetch = move |sql: &'static str| {
+        let db = db.clone();
+        async move {
+            sqlx::query_as::<_, Row>(sql)
+                .bind(interval)
+                .fetch_all(&db)
+                .await
+                .unwrap_or_default()
+        }
+    };
+    let map_rows = |rows: Vec<Row>| -> Vec<Value> {
+        rows.into_iter()
+            .map(|(name, _u, extra, r, pt, ct, dur, dec)| {
+                json!({
+                    "name": name.unwrap_or_else(|| "unknown".into()),
+                    "extra": if extra.is_empty() { Value::Null } else { json!(extra) },
+                    "requests": r, "prompt_tokens": pt, "completion_tokens": ct,
+                    "tokens": pt + ct, "duration_ms": dur, "decode_ms": dec,
+                })
+            })
+            .collect()
+    };
+    let models = map_rows(fetch(run("model")).await);
+    let clients = map_rows(fetch(run("client")).await);
+    let keys = map_rows(fetch(run("key")).await);
+    let projects = map_rows(fetch(run("project")).await);
+    Json(json!({
+        "window": q.window.unwrap_or_else(|| "24h".into()),
+        "models": models, "clients": clients, "keys": keys, "projects": projects,
+    }))
 }
 
 // ---------------- settings / branding / system ----------------

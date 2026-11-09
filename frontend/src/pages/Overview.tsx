@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { LiveBadge, PageHeader, Stat } from "../components/ui";
 import type { ClientRow, Overview, VirtualModel } from "../lib/types";
-import { fmtPct, fmtTs, fmtTime, fmtNum, fmtMs } from "../lib/format";
+import { fmtPct, fmtTs, fmtTime, fmtDay, fmtDayT, fmtNum, fmtMs } from "../lib/format";
 
 const API_ENDPOINTS = [
   { m: "POST", p: "/v1/chat/completions", d: "chat · stream · tools · vision" },
@@ -14,91 +14,88 @@ const API_ENDPOINTS = [
   { m: "GET", p: "/v1/models", d: "OpenAI model list" },
 ];
 
+const WINDOWS = [
+  { v: "24h", l: "24h" },
+  { v: "7d", l: "7d" },
+  { v: "30d", l: "30d" },
+  { v: "365d", l: "1y" },
+  { v: "all", l: "All" },
+];
+
+interface SeriesBucket {
+  t: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  ttft_ms: number;
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+  duration_ms: number;
+  decode_ms: number;
+}
+
+interface BreakdownRow {
+  name: string;
+  extra: string | null;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  tokens: number;
+  duration_ms: number;
+  decode_ms: number;
+}
+
+export function WindowPicker({ value, onChange, options = WINDOWS }: { value: string; onChange: (v: string) => void; options?: { v: string; l: string }[] }) {
+  return (
+    <div className="flex gap-0.5 rounded-md bg-panel2 p-0.5">
+      {options.map(w => (
+        <button
+          key={w.v}
+          onClick={() => onChange(w.v)}
+          className={`rounded px-2 py-0.5 text-[11px] transition-colors ${value === w.v ? "bg-accent/20 text-accent" : "text-muted hover:text-text"}`}
+        >{w.l}</button>
+      ))}
+    </div>
+  );
+}
+
 export default function OverviewPage() {
+  const [win, setWin] = useState("24h");
   const ov = useQuery({ queryKey: ["overview"], queryFn: () => api.get<Overview>("/api/overview"), refetchInterval: 5000 });
   const clients = useQuery({ queryKey: ["clients"], queryFn: () => api.get<{ clients: ClientRow[] }>("/api/clients"), refetchInterval: 5000 });
-  const hist = useQuery({ queryKey: ["ov-hist"], queryFn: () => api.get<{ requests: any[] }>("/api/history?limit=200"), refetchInterval: 10000 });
-  const chart = (() => {
-    const buckets = new Map<string, { t: string; n: number; ok: number }>();
-    for (const h of [...(hist.data?.requests ?? [])].reverse()) {
-      const t = fmtTime(h.created_at);
-      const b = buckets.get(t) ?? { t, n: 0, ok: 0 };
-      b.n++; if (h.status === "done") b.ok++;
-      buckets.set(t, b);
-    }
-    return [...buckets.values()].slice(-30);
-  })();
-  const ttftChart = (() => {
-    const buckets = new Map<string, { t: string; ttft: number; n: number }>();
-    for (const h of [...(hist.data?.requests ?? [])].reverse()) {
-      if (!h.ttft_ms) continue;
-      const t = fmtTime(h.created_at);
-      const b = buckets.get(t) ?? { t, ttft: 0, n: 0 };
-      b.ttft += h.ttft_ms; b.n++; buckets.set(t, b);
-    }
-    return [...buckets.values()].map(b => ({ t: b.t, ttft: Math.round(b.ttft / b.n) })).slice(-30);
-  })();
+  const series = useQuery({
+    queryKey: ["stats-series", win],
+    queryFn: () => api.get<{ buckets: SeriesBucket[] }>(`/api/stats/series?window=${win}`),
+    refetchInterval: 15000,
+  });
+  const brk = useQuery({
+    queryKey: ["stats-brk", win],
+    queryFn: () => api.get<{ models: BreakdownRow[]; clients: BreakdownRow[]; keys: BreakdownRow[]; projects: BreakdownRow[] }>(`/api/stats/breakdown?window=${win}`),
+    refetchInterval: 15000,
+  });
   const depCap = useQuery({ queryKey: ["deps"], queryFn: () => api.get<{ deployments: any[] }>("/api/deployments") });
   const vms = useQuery({ queryKey: ["ov-vms"], queryFn: () => api.get<{ models: VirtualModel[] }>("/api/models") });
-  const latChart = (() => {
-    const m = new Map<string, { t: string; durs: number[] }>();
-    for (const h of [...(hist.data?.requests ?? [])].reverse()) {
-      if (!h.duration_ms) continue;
-      const t = fmtTime(h.created_at);
-      const b = m.get(t) ?? { t, durs: [] };
-      b.durs.push(h.duration_ms); m.set(t, b);
-    }
-    const p = (a: number[], q: number) =>
-      Math.round(a[Math.min(a.length - 1, Math.floor(q * a.length))]);
-    return [...m.values()].map(b => {
-      const d = b.durs.sort((x, y) => x - y);
-      return { t: b.t, p50: p(d, 0.5), p95: p(d, 0.95), p99: p(d, 0.99) };
-    }).slice(-30);
-  })();
-  const reqPerClient = (() => {
-    const m = new Map<string, { name: string; n: number }>();
-    for (const h of hist.data?.requests ?? []) {
-      if (!h.client_id) continue;
-      const n = clients.data?.clients.find(c => c.id === h.client_id)?.name ?? "?";
-      const b = m.get(n) ?? { name: n, n: 0 };
-      b.n++; m.set(n, b);
-    }
-    return [...m.values()];
-  })();
-  // Token throughput: stacked prompt/completion tokens per minute, plus
-  // aggregate e2e tok/s = total tokens / total request time per bucket.
-  const tokSeries = (() => {
-    const m = new Map<string, { t: string; pt: number; ct: number; tps: number; dur: number }>();
-    for (const h of [...(hist.data?.requests ?? [])].reverse()) {
-      const t = fmtTime(h.created_at);
-      const b = m.get(t) ?? { t, pt: 0, ct: 0, tps: 0, dur: 0 };
-      b.pt += h.prompt_tokens ?? 0; b.ct += h.completion_tokens ?? 0;
-      b.dur += (h.duration_ms ?? 0) / 1000;
-      m.set(t, b);
-    }
-    return [...m.values()].map(b => ({ ...b, tps: b.dur > 0 ? +((b.pt + b.ct) / b.dur).toFixed(1) : 0 })).slice(-30);
-  })();
-  // Per-model + per-client e2e tok/s: Σ tokens / Σ duration per group.
-  const depName = (id?: string) => depCap.data?.deployments.find(d => d.id === id)?.name ?? id?.slice(0, 8) ?? "?";
-  const clientName = (id?: string) => clients.data?.clients.find(c => c.id === id)?.name ?? "?";
-  const tpsBy = (key: (h: any) => string | undefined) => {
-    const m = new Map<string, { name: string; e2e: number; dec: number; pt: number; ct: number; dur: number; decdur: number; n: number }>();
-    for (const h of hist.data?.requests ?? []) {
-      const k = key(h); if (!k) continue;
-      const b = m.get(k) ?? { name: k, e2e: 0, dec: 0, pt: 0, ct: 0, dur: 0, decdur: 0, n: 0 };
-      b.pt += h.prompt_tokens ?? 0; b.ct += h.completion_tokens ?? 0;
-      b.dur += (h.duration_ms ?? 0) / 1000;
-      b.decdur += Math.max(0, (h.duration_ms ?? 0) - (h.ttft_ms ?? 0)) / 1000;
-      b.n++; m.set(k, b);
-    }
-    return [...m.values()].map(b => ({
-      name: b.name, n: b.n, pt: b.pt, ct: b.ct,
-      e2e: b.dur > 0 ? +((b.pt + b.ct) / b.dur).toFixed(1) : 0,
-      dec: b.decdur > 0 ? +(b.ct / b.decdur).toFixed(1) : 0,
-    }));
-  };
-  const tpsModel = tpsBy(h => depName(h.deployment_id));
-  const tpsClient = tpsBy(h => clientName(h.client_id));
+
+  // Tick formatter per window: HH:mm for a day, "MM-DD HH:mm" for week/month,
+  // "YYYY-MM-DD" beyond that.
+  const tickFmt = win === "24h" ? fmtTime : win === "7d" || win === "30d" ? fmtDayT : fmtDay;
+  const buckets = series.data?.buckets ?? [];
+  const chart = buckets.map(b => ({ t: tickFmt(b.t), n: b.requests }));
+  const ttftChart = buckets.filter(b => b.ttft_ms > 0).map(b => ({ t: tickFmt(b.t), ttft: Math.round(b.ttft_ms) }));
+  const latChart = buckets.map(b => ({ t: tickFmt(b.t), p50: Math.round(b.p50_ms), p95: Math.round(b.p95_ms), p99: Math.round(b.p99_ms) }));
+  const tokSeries = buckets.map(b => ({
+    t: tickFmt(b.t), pt: b.prompt_tokens, ct: b.completion_tokens,
+    tps: b.duration_ms > 0 ? +(((b.prompt_tokens + b.completion_tokens) / (b.duration_ms / 1000)).toFixed(1)) : 0,
+  }));
+  const reqPerClient = (brk.data?.clients ?? []).map(c => ({ name: c.name, n: c.requests }));
+  const tpsOf = (r: BreakdownRow) => ({
+    name: r.name,
+    e2e: r.duration_ms > 0 ? +((r.tokens / (r.duration_ms / 1000)).toFixed(1)) : 0,
+    dec: r.decode_ms > 0 ? +((r.completion_tokens / (r.decode_ms / 1000)).toFixed(1)) : 0,
+  });
+  const tpsModel = (brk.data?.models ?? []).map(tpsOf);
+  const tpsClient = (brk.data?.clients ?? []).map(tpsOf);
   const perClient = (() => {
     const m = new Map<string, { name: string; cap: number }>();
     for (const d of depCap.data?.deployments ?? []) {
@@ -136,7 +133,12 @@ export default function OverviewPage() {
       <PageHeader
         title="Overview"
         desc={`${online.length} of ${d?.clients_total ?? 0} clients online · live via event stream`}
-        actions={<LiveBadge live={online.length > 0} />}
+        actions={
+          <span className="flex items-center gap-3">
+            <WindowPicker value={win} onChange={setWin} />
+            <LiveBadge live={online.length > 0} />
+          </span>
+        }
       />
       <div className="stagger grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
         <Stat label="Clients online" value={<span className="flex items-center gap-2"><Cpu size={18} className="text-ok" />{online.length}<span className="text-sm text-muted">/ {d?.clients_total ?? 0}</span></span>} />
@@ -218,7 +220,7 @@ export default function OverviewPage() {
       )}
       {chart.length > 1 && (
         <div className="card p-4">
-          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">Recent requests (2min)</div>
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">Requests</div>
           <ResponsiveContainer width="100%" height={160}>
             <AreaChart data={chart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
               <CartesianGrid stroke="#1c2740" vertical={false} />

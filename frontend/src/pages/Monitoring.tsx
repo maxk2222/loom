@@ -1,19 +1,46 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { api } from "../lib/api";
 import { Card, Spinner } from "../components/ui";
 import type { HistoryRow, ApiUser, UsageStat } from "../lib/types";
 import { fmtTs, fmtTimeS, fmtMs, fmtNum } from "../lib/format";
+import { WindowPicker } from "./Overview";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 
 const TOOLTIP_STYLE = { background: "#10161d", border: "1px solid #1f2a36", borderRadius: 6, color: "#dbe4ee" } as const;
 
+interface BreakdownRow {
+  name: string;
+  extra: string | null;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  tokens: number;
+  duration_ms: number;
+  decode_ms: number;
+}
+
+const DIMS = [
+  { v: "models", l: "Model" },
+  { v: "clients", l: "Client" },
+  { v: "projects", l: "API user" },
+  { v: "keys", l: "API key" },
+] as const;
+
 export default function MonitoringPage() {
+  const [win, setWin] = useState("24h");
+  const [dim, setDim] = useState<typeof DIMS[number]["v"]>("models");
   const usage = useQuery({ queryKey: ["usage"], queryFn: () => api.get<{ usage_24h: UsageStat[] }>("/api/stats/usage"), refetchInterval: 10000 });
   const hist = useQuery({ queryKey: ["hist"], queryFn: () => api.get<{ requests: HistoryRow[] }>("/api/history?limit=200"), refetchInterval: 5000 });
   const versions = useQuery({ queryKey: ["cfgvers"], queryFn: () => api.get<{ versions: { id: number; entity: string; entity_id: string; change: unknown; actor: string; created_at: string }[] }>("/api/config-versions"), refetchInterval: 15000 });
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: ApiUser[] }>("/api/projects") });
+  const brk = useQuery({
+    queryKey: ["mon-brk", win],
+    queryFn: () => api.get<{ models: BreakdownRow[]; clients: BreakdownRow[]; keys: BreakdownRow[]; projects: BreakdownRow[] }>(`/api/stats/breakdown?window=${win}`),
+    refetchInterval: 15000,
+  });
   const pname = (id: string) => projects.data?.projects.find((p) => p.id === id)?.name ?? id.slice(0, 8);
 
   const data = (usage.data?.usage_24h ?? []).map((u) => ({
@@ -27,13 +54,17 @@ export default function MonitoringPage() {
   const p50 = ttfts[Math.floor(ttfts.length * 0.5)] ?? 0;
   const p99 = ttfts[Math.floor(ttfts.length * 0.99)] ?? 0;
   const failures = rows.filter((r) => r.status === "failed").length;
+  const dimRows = brk.data?.[dim] ?? [];
 
   return (
     <div className="space-y-6">
-      <h1 className="text-lg font-semibold">Monitoring</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-lg font-semibold">Monitoring</h1>
+        <WindowPicker value={win} onChange={setWin} />
+      </div>
       <div className="grid grid-cols-3 gap-4">
-        <Card><div className="text-xs text-muted">TTFT p50</div><div className="mt-1 text-2xl font-semibold">{p50}<span className="text-sm text-muted"> ms</span></div></Card>
-        <Card><div className="text-xs text-muted">TTFT p99</div><div className="mt-1 text-2xl font-semibold">{p99}<span className="text-sm text-muted"> ms</span></div></Card>
+        <Card><div className="text-xs text-muted">TTFT p50</div><div className="mt-1 text-2xl font-semibold">{fmtMs(p50)}</div></Card>
+        <Card><div className="text-xs text-muted">TTFT p99</div><div className="mt-1 text-2xl font-semibold">{fmtMs(p99)}</div></Card>
         <Card><div className="text-xs text-muted">Failures (recent)</div><div className="mt-1 text-2xl font-semibold text-err">{failures}</div></Card>
       </div>
       <Card>
@@ -52,6 +83,45 @@ export default function MonitoringPage() {
             </BarChart>
           </ResponsiveContainer>
         )}
+      </Card>
+      <Card className="overflow-x-auto p-0">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div className="text-sm font-medium">Token totals <span className="text-xs text-muted">({win})</span></div>
+          <div className="flex gap-0.5 rounded-md bg-panel2 p-0.5">
+            {DIMS.map(d => (
+              <button
+                key={d.v}
+                onClick={() => setDim(d.v)}
+                className={`rounded px-2 py-0.5 text-[11px] transition-colors ${dim === d.v ? "bg-accent/20 text-accent" : "text-muted hover:text-text"}`}
+              >{d.l}</button>
+            ))}
+          </div>
+        </div>
+        <table className="w-full">
+          <thead><tr>
+            <th className="th">{DIMS.find(d => d.v === dim)?.l}</th>
+            {dim === "keys" && <th className="th">API user</th>}
+            <th className="th text-right">Requests</th>
+            <th className="th text-right">Prompt</th>
+            <th className="th text-right">Completion</th>
+            <th className="th text-right">Total</th>
+            <th className="th text-right">tok/s</th>
+          </tr></thead>
+          <tbody>
+            {dimRows.map((r) => (
+              <tr key={r.name + (r.extra ?? "")}>
+                <td className="td">{r.name}</td>
+                {dim === "keys" && <td className="td text-muted">{r.extra || "—"}</td>}
+                <td className="td text-right text-muted">{fmtNum(r.requests)}</td>
+                <td className="td text-right text-muted">{fmtNum(r.prompt_tokens)}</td>
+                <td className="td text-right text-muted">{fmtNum(r.completion_tokens)}</td>
+                <td className="td text-right font-medium">{fmtNum(r.tokens)}</td>
+                <td className="td text-right text-muted">{r.duration_ms > 0 ? fmtNum(+(r.tokens / (r.duration_ms / 1000)).toFixed(1)) : "—"}</td>
+              </tr>
+            ))}
+            {dimRows.length === 0 && <tr><td className="td text-center text-muted" colSpan={dim === "keys" ? 7 : 6}>No usage in this window.</td></tr>}
+          </tbody>
+        </table>
       </Card>
       <Card className="overflow-x-auto p-0">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Request history</div>
