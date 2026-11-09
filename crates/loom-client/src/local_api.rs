@@ -510,6 +510,7 @@ async fn openai_inference_raw(
         let conn = s.connector.clone();
         let rid = request_id.clone();
         let dep_id = dep_id.clone();
+        let upstream_status = resp.status;
         let mut stream = resp.stream;
         tokio::spawn(async move {
             let _token = token; // keep slot until stream ends
@@ -544,7 +545,11 @@ async fn openai_inference_raw(
                         break;
                     }
                     None => {
-                        s.backends.record_success(&dep_id);
+                        // Same rule as the tier-2 path: a proxied 5xx error
+                        // body is not a success — it already counted.
+                        if upstream_status < 400 {
+                            s.backends.record_success(&dep_id);
+                        }
                         break;
                     }
                 }

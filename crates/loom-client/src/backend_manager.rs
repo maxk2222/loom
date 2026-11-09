@@ -686,7 +686,20 @@ impl BackendManager {
             return Err(AdapterError::Connect("backend disabled".into()));
         }
         match be.adapter.forward(api, &model, body, cancel).await {
-            Ok(r) => Ok(r),
+            Ok(r) => {
+                // Upstream 5xx arrives as Ok(resp) — status and error body
+                // are proxied verbatim. It is the same generation crash.
+                if r.status >= 400 {
+                    self.record_failure(
+                        dep_id,
+                        &AdapterError::Upstream {
+                            status: r.status,
+                            message: String::new(),
+                        },
+                    );
+                }
+                Ok(r)
+            }
             Err(e) => {
                 self.record_failure(dep_id, &e);
                 Err(e)
@@ -940,7 +953,18 @@ impl BackendManager {
             .forward_multipart(api, &model, body, content_type, cancel)
             .await
         {
-            Ok(r) => Ok(r),
+            Ok(r) => {
+                if r.status >= 400 {
+                    self.record_failure(
+                        dep_id,
+                        &AdapterError::Upstream {
+                            status: r.status,
+                            message: String::new(),
+                        },
+                    );
+                }
+                Ok(r)
+            }
             Err(e) => {
                 self.record_failure(dep_id, &e);
                 Err(e)

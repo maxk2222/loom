@@ -1037,6 +1037,7 @@ async fn run_request(
                 .map_err(|e| format!("upstream: {e}"))?
         };
 
+        let upstream_status = resp.status;
         let mut ttft_ms: i64 = 0;
         let mut usage = loom_core::openai::Usage::default();
         let mut upstream_err: Option<String> = None;
@@ -1087,7 +1088,10 @@ async fn run_request(
         } else {
             "done"
         };
-        if status == "done" {
+        // A clean stream end only counts as success when the upstream call
+        // itself succeeded — a 500 with a proxied error body must not reset
+        // the crash counter (it was already counted at forward()).
+        if status == "done" && upstream_status < 400 {
             state.backends.record_success(&a.deployment_id);
         }
         let _ = data_tx
