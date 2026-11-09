@@ -143,7 +143,9 @@ impl BackendAdapter for GenericAdapter {
 
     /// Loaded instances from LM Studio's registry — `Some(set)` when the
     /// endpoint exists (empty set = "nothing resident"), `None` elsewhere
-    /// (permissive: treat as unknown-loadable).
+    /// (permissive: treat as unknown-loadable). Embedding-only models stay
+    /// out of the set: a dynamic deployment binding to one could never
+    /// serve chat, which is what auto-binding exists for.
     async fn loaded_models(&self) -> Option<Vec<String>> {
         let url = format!("{}/api/v1/models", self.endpoint());
         let v = common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(5))
@@ -151,6 +153,9 @@ impl BackendAdapter for GenericAdapter {
             .ok()?;
         let mut out = Vec::new();
         for m in v["models"].as_array()? {
+            if m["type"].as_str() == Some("embedding") {
+                continue;
+            }
             for i in m["loaded_instances"].as_array().into_iter().flatten() {
                 if let Some(id) = i["id"].as_str() {
                     out.push(id.to_string());

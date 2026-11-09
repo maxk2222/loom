@@ -711,7 +711,32 @@ async fn admin_list_backends(State(s): State<AppState>) -> Json<Value> {
             v
         })
         .collect();
-    Json(json!({"backends": masked}))
+    // Models the backend lists/loads that no deployment covers yet —
+    // surfaced for the UI's one-click "add deployment" flow. Dynamic
+    // deployments report their bound model alongside the "auto" config.
+    let detected = s.backends.detected_models().await;
+    let mut out = masked;
+    for v in out.iter_mut() {
+        let bid = v["id"].as_str().unwrap_or_default().to_string();
+        if let Some(ds) = v["deployments"].as_array_mut() {
+            for d in ds.iter_mut() {
+                if let Some(did) = d["id"].as_str() {
+                    let r = s.backends.effective_model(did).await;
+                    d["resolved_model"] = json!(r);
+                }
+            }
+        }
+        v["detected_models"] = detected
+            .get(&bid)
+            .map(|ms| {
+                json!(ms
+                    .iter()
+                    .map(|(m, l)| json!({"model": m, "loaded": l}))
+                    .collect::<Vec<_>>())
+            })
+            .unwrap_or(json!([]));
+    }
+    Json(json!({"backends": out}))
 }
 
 /// Endpoint must be a concrete http(s) URL — blocks file://, javascript:,
@@ -876,12 +901,14 @@ async fn admin_list_deployments(State(s): State<AppState>) -> Json<Value> {
         for d in &b.deployments {
             let caps = s.backends.capabilities(&d.id).await;
             let health = s.backends.health_of(&d.id).await;
+            let resolved = s.backends.effective_model(&d.id).await;
             out.push(json!({
                 "deployment": d,
                 "backend_id": b.id,
                 "backend_type": b.backend_type,
                 "capabilities": caps,
                 "health": health.map(|h| h.as_str()),
+                "resolved_model": resolved,
             }));
         }
     }

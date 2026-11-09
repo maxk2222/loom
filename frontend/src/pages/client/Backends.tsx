@@ -9,6 +9,7 @@ interface DepForm {
   id: string;
   name: string;
   model_name: string;
+  resolved_model?: string | null;
   max_concurrent: number;
   local_reserve: number;
   tier2_max: number;
@@ -28,6 +29,7 @@ interface BackendForm {
   api_version?: string;
   health_interval_secs: number;
   deployments: DepForm[];
+  detected_models?: { model: string; loaded: boolean }[];
 }
 
 const EMPTY_DEP: DepForm = {
@@ -103,6 +105,23 @@ export default function BackendsPage() {
   });
   const del = useMutation({
     mutationFn: (id: string) => api.del(`/local/api/backends/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["client-backends"] }),
+  });
+
+  // One-click deploy of a detected model: append a deployment with fleet
+  // defaults to the backend and save it in place.
+  const addModel = useMutation({
+    mutationFn: (p: { backend: BackendForm; model: string }) =>
+      api.put(`/local/api/backends/${p.backend.id}`, {
+        backend: {
+          ...p.backend,
+          api_key: "",
+          deployments: [
+            ...p.backend.deployments,
+            { ...EMPTY_DEP, id: "", name: p.model, model_name: p.model },
+          ],
+        },
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["client-backends"] }),
   });
 
@@ -190,7 +209,16 @@ export default function BackendsPage() {
                   {b.deployments.map((d) => (
                     <tr key={d.id}>
                       <td className="td">{d.name}</td>
-                      <td className="td font-mono text-xs text-muted">{d.model_name}</td>
+                      <td className="td font-mono text-xs text-muted">
+                        {d.model_name === "auto" ? (
+                          <>
+                            <Badge tone="accent">auto</Badge>{" "}
+                            {d.resolved_model ?? "—"}
+                          </>
+                        ) : (
+                          d.model_name
+                        )}
+                      </td>
                       <td className="td text-xs text-muted">
                         max {d.max_concurrent} · res {d.local_reserve} · t2 {d.tier2_max}
                       </td>
@@ -200,6 +228,32 @@ export default function BackendsPage() {
                   ))}
                 </tbody>
               </table>
+              {(b.detected_models?.length ?? 0) > 0 && (
+                <div className="flex flex-wrap items-center gap-2 border-t border-border/40 pt-3">
+                  <span className="text-xs text-muted">Detected:</span>
+                  {b.detected_models!.map((m) => (
+                    <button
+                      key={m.model}
+                      className="btn-ghost flex items-center gap-1.5 border border-border/60 px-2 py-1 font-mono text-xs"
+                      title={m.loaded ? "Loaded — click to add deployment" : "Listed — click to add deployment"}
+                      onClick={() => addModel.mutate({ backend: b, model: m.model })}
+                    >
+                      <span className={m.loaded ? "text-ok" : "text-muted"}>●</span>
+                      {m.model}
+                      <Plus size={12} />
+                    </button>
+                  ))}
+                  {b.detected_models!.some((m) => m.loaded) && (
+                    <button
+                      className="btn-ghost flex items-center gap-1 border border-accent/50 px-2 py-1 text-xs text-accent"
+                      title="Deployment that always uses the model currently loaded in this backend"
+                      onClick={() => addModel.mutate({ backend: b, model: "auto" })}
+                    >
+                      <Plus size={12} /> auto (current model)
+                    </button>
+                  )}
+                </div>
+              )}
             </Card>
           ))}
         </div>
@@ -295,8 +349,8 @@ export default function BackendsPage() {
                     <Field label="Deployment name">
                       <input className="input" value={d.name} onChange={(e) => updDep(editing, i, { name: e.target.value })} placeholder="llama-8b" />
                     </Field>
-                    <Field label="Physical model">
-                      <input className="input font-mono" value={d.model_name} onChange={(e) => updDep(editing, i, { model_name: e.target.value })} placeholder="llama3.1:8b" />
+                    <Field label="Physical model" hint='Use "auto" to always use the model currently loaded in this backend'>
+                      <input className="input font-mono" value={d.model_name} onChange={(e) => updDep(editing, i, { model_name: e.target.value })} placeholder='llama3.1:8b or "auto"' />
                     </Field>
                   </div>
                   <div className="grid grid-cols-4 gap-2">

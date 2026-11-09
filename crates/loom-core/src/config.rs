@@ -310,6 +310,13 @@ fn default_health() -> u64 {
     15
 }
 
+/// Sentinel for `DeploymentConfig::model_name`: the deployment follows the
+/// backend's currently loaded model — most recently loaded instance wins
+/// (vLLM's single resident model, LM Studio `loaded_instances`, Ollama
+/// `/api/ps`; falls back to the first listed model when the backend exposes
+/// no loaded-set). Only meaningful on non-remote backends.
+pub const DYNAMIC_MODEL: &str = "auto";
+
 /// A deployment = one model exposed under a deployment id on the client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentConfig {
@@ -318,6 +325,7 @@ pub struct DeploymentConfig {
     /// Friendly name.
     pub name: String,
     /// Physical model name understood by the backend (e.g. "llama3.1:8b").
+    /// `DYNAMIC_MODEL` ("auto") binds the currently loaded model at runtime.
     pub model_name: String,
     /// Capability overrides (merged over probed values).
     #[serde(default)]
