@@ -255,6 +255,44 @@ impl BackendAdapter for GenericAdapter {
         }
     }
 
+    /// LM Studio ≥0.4 exposes `POST /api/v1/models/unload {instance_id}`.
+    /// The loaded instance id usually equals the model key, but custom
+    /// instances can differ — resolve it through the registry first. A model
+    /// that isn't loaded is already in the desired state; backends without
+    /// the endpoint answer 4xx, which the caller treats as unsupported.
+    async fn unload(&self, model: &str) -> Result<(), AdapterError> {
+        let Some(info) = self.lmstudio_model_info(model).await? else {
+            return Err(AdapterError::Protocol(
+                "unload not supported by this backend".into(),
+            ));
+        };
+        let Some(instance_id) = info["loaded_instances"].as_array().and_then(|li| {
+            li.iter()
+                .find(|i| i["id"].as_str() == Some(model))
+                .or_else(|| li.first())
+                .and_then(|i| i["id"].as_str().map(String::from))
+        }) else {
+            return Ok(());
+        };
+        let url = format!("{}/api/v1/models/unload", self.endpoint());
+        let mut req = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({"instance_id": instance_id}))
+            .timeout(Duration::from_secs(30));
+        if !self.cfg.api_key.is_empty() {
+            req = req.bearer_auth(&self.cfg.api_key);
+        }
+        match req.send().await {
+            Ok(r) if r.status().is_success() => Ok(()),
+            Ok(r) => Err(AdapterError::Upstream {
+                status: r.status().as_u16(),
+                message: format!("unload failed: {}", r.status()),
+            }),
+            Err(e) => Err(AdapterError::Connect(e.to_string())),
+        }
+    }
+
     async fn forward(
         &self,
         api: ApiType,
@@ -372,6 +410,73 @@ mod tests {
             axum::serve(listener, app).await.ok();
         });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn lmstudio_unload_posts_resolved_instance_id() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h2 = hits.clone();
+        let registry = || async {
+            Json(json!({
+                "models": [{
+                    "key": "m",
+                    "type": "llm",
+                    "loaded_instances": [{"id": "inst-42"}],
+                }]
+            }))
+        };
+        let app = Router::new().route("/api/v1/models", get(registry)).route(
+            "/api/v1/models/unload",
+            post(move |Json(b): Json<serde_json::Value>| {
+                let h = h2.clone();
+                async move {
+                    assert_eq!(b["instance_id"], "inst-42");
+                    h.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"instance_id": "inst-42"}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let a = GenericAdapter::new(cfg(format!("http://{addr}")), reqwest::Client::new());
+        a.unload("m").await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn lmstudio_unload_not_loaded_is_noop() {
+        let app = Router::new().route(
+            "/api/v1/models",
+            get(|| async { Json(json!({"models": [{"key": "m", "loaded_instances": []}]})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let a = GenericAdapter::new(cfg(format!("http://{addr}")), reqwest::Client::new());
+        assert!(a.unload("m").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unload_non_lmstudio_is_unsupported() {
+        // Plain OpenAI server: /api/v1/models is a 404 → unsupported, not a
+        // silent success that would pretend memory was freed.
+        let app = Router::new().route("/api/v1/models", get(|| async { StatusCode::NOT_FOUND }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let a = GenericAdapter::new(cfg(format!("http://{addr}")), reqwest::Client::new());
+        assert!(a.unload("m").await.is_err());
     }
 
     #[tokio::test]
