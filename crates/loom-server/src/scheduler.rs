@@ -507,6 +507,15 @@ impl Scheduler {
             .and_then(|r| r);
             match outcome {
                 Ok(outcome) => {
+                    // Dispatched: the lease now tracks inflight state — the
+                    // queued tracking hash is write-only metadata and would
+                    // otherwise linger until its TTL.
+                    let mut c = self.inner.rt.conn.clone();
+                    let _: () = redis::cmd("DEL")
+                        .arg(self.inner.rt.k(&format!("req:{rid}")))
+                        .query_async(&mut c)
+                        .await
+                        .unwrap_or(());
                     let _ = e.done_tx.send(Ok(outcome));
                 }
                 Err(SchedErr::NoCapacity) => {
