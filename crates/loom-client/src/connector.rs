@@ -546,18 +546,27 @@ impl Connector {
         let _ = ctrl_tx.send(client_msgs::inventory(inv)).await;
         self.state.send_capacity_report().await;
 
-        // Heartbeat task.
+        // Heartbeat task. Session-scoped cancel: the guard fires when this
+        // future returns *or* is dropped (reconnect_notify resolves the run()
+        // select and drops us mid-await — exactly the `enabled=false` path).
+        // A surviving hb task would hold a ctrl_tx clone, keep the
+        // client→server stream open and the server-side session alive
+        // (fresh last_hb → online) until the endpoint timeout.
+        let session_cancel = CancellationToken::new();
+        let _session_guard = session_cancel.clone().drop_guard();
         let hb_secs = ack.heartbeat_interval_secs.max(2) as u64;
         let hb_tx = ctrl_tx.clone();
         let session_id = ack.session_id.clone();
         let sched = self.state.scheduler.clone();
-        let cancel = self.state.shutdown.clone();
+        let hb_cancel = session_cancel.clone();
+        let shutdown = self.state.shutdown.clone();
         let hb_task = tokio::spawn(async move {
             let mut t = tokio::time::interval(Duration::from_secs(hb_secs));
             loop {
-                t.tick().await;
-                if cancel.is_cancelled() {
-                    break;
+                tokio::select! {
+                    _ = t.tick() => {}
+                    _ = hb_cancel.cancelled() => break,
+                    _ = shutdown.cancelled() => break,
                 }
                 let (local, t2) = sched
                     .counters()
