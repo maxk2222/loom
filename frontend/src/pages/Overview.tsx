@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { LiveBadge, PageHeader, Stat } from "../components/ui";
 import type { ClientRow, Overview, VirtualModel } from "../lib/types";
-import { fmtTs, fmtTime } from "../lib/format";
+import { fmtPct, fmtTs, fmtTime } from "../lib/format";
 
 const API_ENDPOINTS = [
   { m: "POST", p: "/v1/chat/completions", d: "chat · stream · tools · vision" },
@@ -177,7 +177,7 @@ export default function OverviewPage() {
                   <div className="h-1.5 flex-1 rounded bg-white/10">
                     {pct != null && <div className={`h-1.5 rounded ${pct >= 85 ? "bg-rose-400" : pct >= 65 ? "bg-amber-300" : "bg-emerald-400"}`} style={{ width: `${Math.min(100, pct)}%` }} />}
                   </div>
-                  <span className="w-8 text-right text-muted">{pct != null ? `${pct.toFixed(0)}%` : "—"}</span>
+                  <span className="w-8 text-right text-muted">{pct != null ? `${fmtPct(pct)}%` : "—"}</span>
                 </div>
               );
               return (

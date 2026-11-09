@@ -4,7 +4,7 @@ import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { Badge, Card, Field, Modal, Spinner } from "../components/ui";
 import type { ClientRow } from "../lib/types";
-import { fmtTs } from "../lib/format";
+import { fmtPct, fmtTs } from "../lib/format";
 
 export default function ClientsPage() {
   const q = useQuery({ queryKey: ["clients"], queryFn: () => api.get<{ clients: ClientRow[] }>("/api/clients"), refetchInterval: 5000 });
@@ -34,8 +34,8 @@ export default function ClientsPage() {
 
   const Bar = ({ pct, title }: { pct: number | null | undefined; title: string }) =>
     pct == null ? <span className="text-muted text-xs">—</span> : (
-      <div className="w-20" title={`${title} ${pct.toFixed(0)}%`}>
-        <div className="flex justify-between text-[10px] text-muted"><span>{title}</span><span>{pct.toFixed(0)}%</span></div>
+      <div className="w-20" title={`${title} ${fmtPct(pct)}%`}>
+        <div className="flex justify-between text-[10px] text-muted"><span>{title}</span><span>{fmtPct(pct)}%</span></div>
         <div className="h-1.5 rounded bg-white/10">
           <div className={`h-1.5 rounded ${pct >= 85 ? "bg-rose-400" : pct >= 65 ? "bg-amber-300" : "bg-emerald-400"}`} style={{ width: `${Math.min(100, pct)}%` }} />
         </div>

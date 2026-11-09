@@ -4,7 +4,7 @@ import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAx
 import { Badge, Card, Stat } from "../../components/ui";
 import { Megaphone, X } from "lucide-react";
 import type { ClientNote, ClientStatus } from "../../lib/types";
-import { fmtTs, fmtTimeS } from "../../lib/format";
+import { fmtPct, fmtTs, fmtTimeS } from "../../lib/format";
 
 function fmtUptime(s: number): string {
   const h = Math.floor(s / 3600);
@@ -22,7 +22,7 @@ function Meter({ label, pct, limit }: { label: string; pct: number; limit: numbe
     <div>
       <div className="mb-1 flex justify-between text-xs">
         <span className="text-muted">{label}</span>
-        <span className={over ? "text-err" : "text-text"}>{pct.toFixed(0)}%{limit > 0 && <span className="text-muted"> / limit {limit}%</span>}</span>
+        <span className={over ? "text-err" : "text-text"}>{fmtPct(pct)}%{limit > 0 && <span className="text-muted"> / limit {limit}%</span>}</span>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-border">
         <div className={`h-full rounded-full transition-all ${over ? "bg-err" : pct > 80 ? "bg-warn" : "bg-ok"}`} style={{ width: `${Math.min(100, pct)}%` }} />
