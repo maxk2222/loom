@@ -105,7 +105,8 @@ impl ModelRegistry {
                     d.capabilities, m.priority, m.weight, m.manual_pinned,
                     m.enabled AS member_enabled, d.enabled AS dep_enabled
              FROM virtual_model_members m
-             JOIN deployments d ON d.id = m.deployment_id",
+             JOIN deployments d ON d.id = m.deployment_id
+             ORDER BY m.priority",
         )
         .fetch_all(&self.db)
         .await?;
@@ -204,8 +205,15 @@ impl ModelRegistry {
             .cloned()
             .collect();
         // If VM disallows heterogeneity, members must share one model_name.
+        // The canonical name comes from the lowest-priority-value member —
+        // vm.members arrive in arbitrary DB order, so out.first() alone
+        // would make the surviving family nondeterministic across reloads.
         if !vm.allow_heterogeneous && out.len() > 1 {
-            if let Some(first) = out.first().map(|m| m.model_name.clone()) {
+            if let Some(first) = out
+                .iter()
+                .min_by_key(|m| m.priority)
+                .map(|m| m.model_name.clone())
+            {
                 out.retain(|m| m.model_name == first);
             }
         }
