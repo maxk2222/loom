@@ -2074,7 +2074,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "loom-cli"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "loom-client"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "loom-core"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2173,7 +2173,7 @@ dependencies = [
 
 [[package]]
 name = "loom-protocol"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "futures-util",
  "loom-core",
@@ -2192,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "loom-server"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2247,7 +2247,7 @@ dependencies = [
 
 [[package]]
 name = "loom-testkit"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "anyhow",
  "async-trait",
