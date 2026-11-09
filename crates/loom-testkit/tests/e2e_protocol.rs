@@ -195,7 +195,11 @@ async fn e2e_config_push_applied() {
         Duration::from_millis(100),
     )
     .await;
-    assert!(got_ack, "expected config ack, got {:?}", rig.server.captured().await);
+    assert!(
+        got_ack,
+        "expected config ack, got {:?}",
+        rig.server.captured().await
+    );
 }
 
 #[tokio::test]
