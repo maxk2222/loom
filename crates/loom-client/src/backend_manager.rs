@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub struct DeploymentInfo {
     pub cfg: DeploymentConfig,
@@ -30,6 +30,18 @@ struct Inner {
     deployments: RwLock<HashMap<String, DeploymentEntry>>,
     sys_stats: RwLock<Option<crate::sysmon::SharedStats>>,
     cancel: CancellationToken,
+    /// Per-deployment generation-crash circuit breakers.
+    tracker: crate::recovery::FailureTracker,
+    /// Handles the recovery task needs (admission gate + report pushes);
+    /// installed by `spawn_health_loop`.
+    recovery_ctx: std::sync::Mutex<Option<RecoveryCtx>>,
+}
+
+#[derive(Clone)]
+struct RecoveryCtx {
+    sched: crate::scheduler::LocalScheduler,
+    capacity_notify: Arc<tokio::sync::Notify>,
+    inventory_notify: Arc<tokio::sync::Notify>,
 }
 
 struct BackendEntry {
@@ -90,6 +102,8 @@ impl BackendManager {
                 deployments: RwLock::new(HashMap::new()),
                 sys_stats: RwLock::new(None),
                 cancel: CancellationToken::new(),
+                tracker: crate::recovery::FailureTracker::new(Default::default()),
+                recovery_ctx: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -188,6 +202,10 @@ impl BackendManager {
             }
         }
         *backends = next_backends;
+        self.inner.tracker.set_config(cfg.recovery.clone());
+        self.inner
+            .tracker
+            .retain(&next_deployments.keys().cloned().collect());
         *deployments = next_deployments;
     }
 
@@ -203,6 +221,11 @@ impl BackendManager {
         capacity_notify: std::sync::Arc<tokio::sync::Notify>,
         inventory_notify: std::sync::Arc<tokio::sync::Notify>,
     ) {
+        *self.inner.recovery_ctx.lock().unwrap() = Some(RecoveryCtx {
+            sched: sched.clone(),
+            capacity_notify: capacity_notify.clone(),
+            inventory_notify: inventory_notify.clone(),
+        });
         let this = self.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(10));
@@ -300,7 +323,8 @@ impl BackendManager {
                 //  - auto_load=false: JIT loads on first request → stay ready
                 //  - model_name="auto" (local only): follows the backend's
                 //    current model — ready while one resolves
-                let health_ok = adapter_health == Health::Healthy;
+                let health_ok =
+                    adapter_health == Health::Healthy && !self.inner.tracker.reports_down(&did);
                 let dynamic = de.cfg.model_name == loom_core::config::DYNAMIC_MODEL && !remote;
                 let effective_model = if dynamic {
                     let current = de.resolved_model.read().await.clone();
@@ -397,6 +421,9 @@ impl BackendManager {
                     *w = None;
                 } else if de.cfg.auto_load
                     && de.cfg.enabled
+                    // An open breaker means the recovery task owns the
+                    // model — keep-warm must not fight its unload+reload.
+                    && !self.inner.tracker.reports_down(&did)
                     // Dynamic deployments follow the resident model — there
                     // is nothing to warm.
                     && !dynamic
@@ -658,7 +685,13 @@ impl BackendManager {
         if !be.cfg.enabled {
             return Err(AdapterError::Connect("backend disabled".into()));
         }
-        be.adapter.forward(api, &model, body, cancel).await
+        match be.adapter.forward(api, &model, body, cancel).await {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                self.record_failure(dep_id, &e);
+                Err(e)
+            }
+        }
     }
 
     /// Model a request should carry upstream: static `model_name`, or — for
@@ -714,6 +747,169 @@ impl BackendManager {
         be.adapter.unload(&model).await
     }
 
+    // ---- generation-crash circuit breaker -------------------------------
+
+    /// Record a crash-classified failure for the circuit breaker — call
+    /// failures and mid-stream errors alike. A breaker opening kicks the
+    /// single-flight recovery task.
+    pub fn record_failure(&self, dep_id: &str, e: &AdapterError) {
+        if !crate::recovery::counts_as_crash(e) {
+            return;
+        }
+        if self.inner.tracker.record_failure(dep_id) {
+            warn!(deployment = %dep_id, error = %e,
+                  "generation breaker opened — deployment reports down, recovery scheduled");
+            crate::telemetry::recovery_event("opened");
+            self.spawn_recovery(dep_id);
+        }
+    }
+
+    /// A cleanly completed request resets the consecutive-failure counter
+    /// (but never closes an open breaker — only a verified reload does).
+    pub fn record_success(&self, dep_id: &str) {
+        self.inner.tracker.record_success(dep_id);
+    }
+
+    /// Circuit-breaker snapshot for the local API status endpoint.
+    pub fn recovery_states(&self) -> HashMap<String, crate::recovery::DepState> {
+        self.inner.tracker.states()
+    }
+
+    /// True while the deployment is excluded by an open/quarantined breaker.
+    pub fn reports_down(&self, dep_id: &str) -> bool {
+        self.inner.tracker.reports_down(dep_id)
+    }
+
+    /// Spawn the single-flight recovery task for a tripped deployment.
+    fn spawn_recovery(&self, dep_id: &str) {
+        if !self.inner.tracker.claim_recovery(dep_id) {
+            return;
+        }
+        let this = self.clone();
+        let dep_id = dep_id.to_string();
+        tokio::spawn(async move {
+            this.recovery_loop(&dep_id).await;
+        });
+    }
+
+    /// Isolation is immediate; healing is patient. The loop waits for the
+    /// owning backend to be reachable (a backend-wide outage is the health
+    /// loop's problem, not a reload's) and for the deployment to drain
+    /// (local tier-1 work is never preempted), then `unload → warm_up`
+    /// — a real JIT reload verified by an actual generation. Success closes
+    /// the breaker; failures back off, then quarantine with a slow retry
+    /// cadence so a manually repaired backend heals without a restart.
+    async fn recovery_loop(&self, dep_id: &str) {
+        let ctx = self.inner.recovery_ctx.lock().unwrap().clone();
+        let Some(ctx) = ctx else {
+            self.inner.tracker.finish_recovery(dep_id);
+            return;
+        };
+        let cfg = self.inner.tracker.config();
+        // Immediate isolation: stop tier-2 admission locally and make the
+        // next capacity/inventory push carry `down` before waiting.
+        if ctx.sched.set_dep_ready(dep_id, false, true) {
+            ctx.capacity_notify.notify_one();
+        }
+        ctx.inventory_notify.notify_one();
+
+        loop {
+            // Backend-wide outage → the adapter health loop owns this; a
+            // model reload against a dead server would just burn attempts.
+            while self.backend_health(dep_id).await != Health::Healthy {
+                tokio::select! {
+                    _ = self.inner.cancel.cancelled() => {
+                        self.inner.tracker.finish_recovery(dep_id);
+                        return;
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                }
+            }
+            // Cooldown between attempts (quarantine cadence reuses it).
+            while self.inner.tracker.cooling_down(dep_id) {
+                tokio::select! {
+                    _ = self.inner.cancel.cancelled() => {
+                        self.inner.tracker.finish_recovery(dep_id);
+                        return;
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                }
+            }
+            // Drain in-flight work — tier-1 local requests are never
+            // preempted; on a crashed engine they fail anyway after grace.
+            let grace = Duration::from_secs(cfg.idle_grace_secs);
+            let t0 = std::time::Instant::now();
+            while !ctx.sched.idle_deployments().iter().any(|d| d == dep_id) && t0.elapsed() < grace
+            {
+                tokio::select! {
+                    _ = self.inner.cancel.cancelled() => {
+                        self.inner.tracker.finish_recovery(dep_id);
+                        return;
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                }
+            }
+            // Reload: unload frees the crashed instance (no-op on backends
+            // without unload semantics), warm_up JIT-reloads AND verifies —
+            // it issues a real one-token generation.
+            crate::telemetry::recovery_event("attempt");
+            match self.unload(dep_id).await {
+                Ok(()) => debug!(deployment = %dep_id, "recovery: model unloaded"),
+                Err(e) => debug!(deployment = %dep_id, error = %e, "recovery: unload skipped"),
+            }
+            let warmed = match self.warm_for_recovery(dep_id).await {
+                Ok(()) => true,
+                Err(e) => {
+                    debug!(deployment = %dep_id, error = %e, "recovery: reload probe failed");
+                    false
+                }
+            };
+            if warmed {
+                self.inner.tracker.healed(dep_id);
+                ctx.sched.set_dep_ready(dep_id, true, true);
+                ctx.capacity_notify.notify_one();
+                ctx.inventory_notify.notify_one();
+                crate::telemetry::recovery_event("healed");
+                info!(deployment = %dep_id, "generation breaker healed — deployment back in routing");
+                self.inner.tracker.finish_recovery(dep_id);
+                return;
+            }
+            let brk = self.inner.tracker.attempt_failed(dep_id);
+            if brk == crate::recovery::Breaker::Quarantined {
+                crate::telemetry::recovery_event("quarantined");
+                warn!(deployment = %dep_id, "generation breaker quarantined — reloading gave up, retrying hourly");
+            }
+        }
+    }
+
+    /// Health of the backend owning this deployment.
+    async fn backend_health(&self, dep_id: &str) -> Health {
+        let health = {
+            let deps = self.inner.deployments.read().await;
+            let Some(d) = deps.get(dep_id) else {
+                return Health::Down;
+            };
+            let backends = self.inner.backends.read().await;
+            backends.get(&d.backend_id).map(|b| b.health.clone())
+        };
+        match health {
+            Some(h) => *h.read().await,
+            None => Health::Down,
+        }
+    }
+
+    /// warm_up against the deployment's effective model.
+    async fn warm_for_recovery(&self, dep_id: &str) -> Result<(), AdapterError> {
+        let (backend_id, model) = self.deployment_model(dep_id).await?;
+        let backends = self.inner.backends.read().await;
+        let Some(be) = backends.get(&backend_id) else {
+            return Err(AdapterError::Connect(format!(
+                "missing backend {backend_id}"
+            )));
+        };
+        be.adapter.warm_up(&model).await
+    }
+
     /// Raw multipart forward (audio transcription/translation). The adapter
     /// rewrites the `model` form field to the physical model name.
     pub async fn forward_multipart(
@@ -734,9 +930,17 @@ impl BackendManager {
         if !be.cfg.enabled {
             return Err(AdapterError::Connect("backend disabled".into()));
         }
-        be.adapter
+        match be
+            .adapter
             .forward_multipart(api, &model, body, content_type, cancel)
             .await
+        {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                self.record_failure(dep_id, &e);
+                Err(e)
+            }
+        }
     }
 
     /// Full inventory for server reports.
@@ -750,7 +954,13 @@ impl BackendManager {
                 .map(|b| b.cfg.backend_type)
                 .unwrap_or(BackendType::GenericOpenAi);
             let caps = d.caps.read().await.clone();
-            let health = *d.health.read().await;
+            // An open circuit breaker overrides the adapter-level view: the
+            // generation pipeline is dead even though the model is "loaded".
+            let health = if self.inner.tracker.reports_down(id) {
+                Health::Down
+            } else {
+                *d.health.read().await
+            };
             let model_name = if d.cfg.model_name == loom_core::config::DYNAMIC_MODEL {
                 d.resolved_model
                     .read()

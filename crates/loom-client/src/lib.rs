@@ -7,6 +7,7 @@ pub mod connector;
 pub mod local_api;
 pub mod local_ui;
 pub mod notes;
+pub mod recovery;
 pub mod scheduler;
 pub mod sysmon;
 pub mod telemetry;

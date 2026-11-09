@@ -50,21 +50,23 @@ impl Router {
     }
 
     /// Rank candidates for a virtual model.
-    /// `runtime`: deployment_id -> (tier2_free, state) from Redis.
+    /// `runtime`: deployment_id -> (tier2_free, state, health) from Redis.
     pub fn route(
         &mut self,
         vm_api_name: &str,
         strategy: Strategy,
         mut candidates: Vec<Member>,
-        runtime: &HashMap<String, (u32, String)>,
+        runtime: &HashMap<String, (u32, String, String)>,
         required: &RequiredCaps,
     ) -> RouteDecision {
         // Filter: runtime availability + caps already filtered upstream.
+        // `health == "down"` (crash breaker / dead backend) removes a member
+        // even when its admission state still reads available.
         let before = candidates.len();
         candidates.retain(|m| {
             runtime
                 .get(&m.deployment_id)
-                .map(|(free, st)| *free > 0 && st == "available")
+                .map(|(free, st, health)| *free > 0 && st == "available" && health != "down")
                 .unwrap_or(false)
         });
         let filtered_out = before - candidates.len();

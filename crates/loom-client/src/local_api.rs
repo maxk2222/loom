@@ -509,6 +509,7 @@ async fn openai_inference_raw(
         let sched = s.scheduler.clone();
         let conn = s.connector.clone();
         let rid = request_id.clone();
+        let dep_id = dep_id.clone();
         let mut stream = resp.stream;
         tokio::spawn(async move {
             let _token = token; // keep slot until stream ends
@@ -535,13 +536,17 @@ async fn openai_inference_raw(
                     }
                     Some(Err(e)) => {
                         warn!(error = %e, "upstream stream error");
+                        s.backends.record_failure(&dep_id, &e);
                         let msg = bytes::Bytes::from(
                             "data: {\"error\":{\"message\":\"upstream stream error\"}}\n\n",
                         );
                         let _ = tx.send(Ok(msg)).await;
                         break;
                     }
-                    None => break,
+                    None => {
+                        s.backends.record_success(&dep_id);
+                        break;
+                    }
                 }
             }
             telemetry::req_finished("done");
@@ -625,6 +630,12 @@ async fn admin_status(State(s): State<AppState>) -> Json<Value> {
         "capacities": caps,
         "system": sys,
         "update": crate::updater::watchdog_status(),
+        "recovery": s.backends.recovery_states().iter().map(|(dep, st)| json!({
+            "deployment": dep,
+            "breaker": st.breaker.as_str(),
+            "consec_failures": st.consec_failures,
+            "attempts": st.attempts,
+        })).collect::<Vec<_>>(),
     }))
 }
 

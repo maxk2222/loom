@@ -174,7 +174,10 @@ impl Scheduler {
         let candidates = self.inner.models.candidates(&vm, api, required).await;
         for m in &candidates {
             if let Ok(Some(rt)) = self.inner.registry.dep_runtime(&m.deployment_id).await {
-                if rt.state == "available" || rt.state == "draining" {
+                // `down` health (crash breaker open or dead backend) excludes
+                // a member even while its admission state still reads
+                // available/draining — the generation path is dead.
+                if (rt.state == "available" || rt.state == "draining") && rt.health != "down" {
                     return true;
                 }
             }
@@ -698,7 +701,7 @@ impl Scheduler {
         let any_busy = ranked.is_empty()
             && runtime
                 .values()
-                .any(|(_, st)| st == "available" || st == "draining");
+                .any(|(_, st, h)| (st == "available" || st == "draining") && h != "down");
         let mut saw_transient = false;
         for member in ranked {
             match self.lease_and_assign(req, &member).await {
@@ -735,11 +738,14 @@ impl Scheduler {
     async fn runtime_view(
         &self,
         candidates: &[crate::model_registry::Member],
-    ) -> HashMap<String, (u32, String)> {
+    ) -> HashMap<String, (u32, String, String)> {
         let mut out = HashMap::new();
         for m in candidates {
             if let Ok(Some(rt)) = self.inner.registry.dep_runtime(&m.deployment_id).await {
-                out.insert(m.deployment_id.clone(), (rt.tier2_free, rt.state));
+                out.insert(
+                    m.deployment_id.clone(),
+                    (rt.tier2_free, rt.state, rt.health),
+                );
             }
         }
         out

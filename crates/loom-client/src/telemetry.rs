@@ -36,6 +36,11 @@ pub fn server_connected(v: bool) {
     gauge!("loom_client_server_connected").set(if v { 1.0 } else { 0.0 });
 }
 
+/// Circuit-breaker lifecycle: "opened" | "attempt" | "healed" | "quarantined".
+pub fn recovery_event(kind: &str) {
+    counter!("loom_client_recovery_events_total", "kind" => kind.to_string()).increment(1);
+}
+
 pub fn backend_health(dep: &str, healthy: bool) {
     gauge!("loom_client_backend_healthy", "deployment" => dep.to_string()).set(if healthy {
         1.0

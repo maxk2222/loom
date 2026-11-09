@@ -359,6 +359,7 @@ impl ClientRegistry {
         }
         Ok(Some(DepRuntime {
             state: m.get("state").cloned().unwrap_or_default(),
+            health: m.get("health").cloned().unwrap_or_default(),
             tier2_free: m
                 .get("tier2_free")
                 .and_then(|v| v.parse().ok())
@@ -382,7 +383,7 @@ impl ClientRegistry {
         let mut out = Vec::new();
         for id in ids {
             if let Some(rt) = self.dep_runtime(&id).await? {
-                if rt.state == "available" && rt.tier2_free > 0 {
+                if rt.state == "available" && rt.tier2_free > 0 && rt.health != "down" {
                     out.push(id);
                 }
             }
@@ -460,6 +461,10 @@ impl ClientRegistry {
 #[derive(Debug)]
 pub struct DepRuntime {
     pub state: String,
+    /// Client-reported generation health: "healthy" | "degraded" | "down" |
+    /// "unknown". `down` (crash breaker open, or a dead backend) must be
+    /// excluded from routing even while `state` still reads available.
+    pub health: String,
     pub tier2_free: u32,
     pub tier2_total: u32,
     pub client_id: String,

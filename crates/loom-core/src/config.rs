@@ -56,6 +56,12 @@ pub struct ClientConfig {
     #[serde(default)]
     pub updater: UpdaterConfig,
 
+    /// Self-healing on generation crashes: consecutive backend failures trip
+    /// a per-deployment circuit breaker that reports `down` and attempts
+    /// `unload → reload` with backoff before quarantining.
+    #[serde(default)]
+    pub recovery: RecoveryConfig,
+
     /// Desktop tray icon settings.
     #[serde(default)]
     pub tray: TrayConfig,
@@ -86,6 +92,7 @@ impl Default for ClientConfig {
             sharing_enabled: false,
             pressure: PressureConfig::default(),
             updater: UpdaterConfig::default(),
+            recovery: RecoveryConfig::default(),
             tray: TrayConfig::default(),
             config_version: 0,
         }
@@ -231,6 +238,59 @@ impl Default for PressureConfig {
             unload_models: false,
             cooldown_secs: default_pressure_cooldown(),
             gpu_vram_pct: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryConfig {
+    /// Self-healing on generation crashes at all.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Consecutive crash-classified failures that trip the breaker.
+    #[serde(default = "default_recovery_threshold")]
+    pub failure_threshold: u32,
+    /// Max seconds to wait for in-flight requests to drain before unloading
+    /// anyway — on a crashed engine in-flight work fails regardless.
+    #[serde(default = "default_idle_grace")]
+    pub idle_grace_secs: u64,
+    /// Backoff between reload attempts in seconds; the last value repeats.
+    #[serde(default = "default_recovery_backoff")]
+    pub backoff_secs: Vec<u64>,
+    /// Reload attempts before quarantine.
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+    /// Retry cadence while quarantined — a manually repaired backend heals
+    /// on its own without waiting for a client restart.
+    #[serde(default = "default_quarantine_retry")]
+    pub quarantine_retry_secs: u64,
+}
+
+fn default_recovery_threshold() -> u32 {
+    3
+}
+fn default_idle_grace() -> u64 {
+    30
+}
+fn default_recovery_backoff() -> Vec<u64> {
+    vec![60, 300, 900]
+}
+fn default_max_attempts() -> u32 {
+    5
+}
+fn default_quarantine_retry() -> u64 {
+    3600
+}
+
+impl Default for RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            failure_threshold: default_recovery_threshold(),
+            idle_grace_secs: default_idle_grace(),
+            backoff_secs: default_recovery_backoff(),
+            max_attempts: default_max_attempts(),
+            quarantine_retry_secs: default_quarantine_retry(),
         }
     }
 }

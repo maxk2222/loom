@@ -1070,6 +1070,9 @@ async fn run_request(
                     }
                 }
                 Some(Err(e)) => {
+                    // Mid-generation crash — counts toward the breaker just
+                    // like a failed forward() call.
+                    state.backends.record_failure(&a.deployment_id, &e);
                     upstream_err = Some(e.to_string());
                     break;
                 }
@@ -1084,6 +1087,9 @@ async fn run_request(
         } else {
             "done"
         };
+        if status == "done" {
+            state.backends.record_success(&a.deployment_id);
+        }
         let _ = data_tx
             .send(frames::end(status == "cancelled", &finish_reason))
             .await;
