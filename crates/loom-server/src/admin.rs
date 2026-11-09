@@ -1402,7 +1402,16 @@ async fn put_setting(
     Path(key): Path<String>,
     Json(b): Json<Value>,
 ) -> Response {
-    if !["scheduler", "queue", "branding", "retention"].contains(&key.as_str()) {
+    if ![
+        "scheduler",
+        "queue",
+        "branding",
+        "retention",
+        "public_base",
+        "release_repo",
+    ]
+    .contains(&key.as_str())
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error":"unknown setting"})),
@@ -2139,17 +2148,23 @@ async fn push_client_update(
     State(s): State<AdminState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
+    // Ship the manifest base along with the trigger — clients on custom gRPC
+    // ports can't derive the HTTP endpoint from server_url (:50051→:8080
+    // only covers defaults), so the server tells them explicitly.
+    let base = public_base(&s).await;
+    let updater = json!({"update_now": true, "server_base": base});
     // jsonb_set only creates the *last* missing path element — ensure the
     // intermediate `client` object exists first, then merge `updater` into it
     // (keeps other desired client fields intact).
     let row: Option<(i64, Value)> = sqlx::query_as(
         "UPDATE clients SET desired_config = jsonb_set(
              jsonb_set(COALESCE(desired_config,'{}'::jsonb), '{client}', COALESCE(desired_config->'client','{}'::jsonb), true),
-             '{client,updater}', '{\"update_now\":true}'::jsonb, true),
+             '{client,updater}', COALESCE(desired_config->'client'->'updater','{}'::jsonb) || $2::jsonb, true),
              config_version = config_version + 1
          WHERE id = $1::uuid RETURNING config_version, desired_config",
     )
     .bind(&id)
+    .bind(&updater)
     .fetch_optional(&s.db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

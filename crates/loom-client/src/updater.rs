@@ -357,8 +357,11 @@ pub fn arch() -> &'static str {
 }
 
 /// HTTP base URL serving `/api/releases/*` on the server.
-/// Prefers `updater.server_base`; otherwise derives it from the gRPC
-/// `server_url` by swapping the default agent port for the HTTP port.
+/// Prefers `updater.server_base` (pushed by the server or set at install);
+/// otherwise derives it from the gRPC `server_url`. Derivation only knows
+/// the default port pair (:50051→:8080) — custom gRPC ports cannot be
+/// mapped and fall back to the raw URL, which is why setups should always
+/// write an explicit `server_base`.
 pub fn manifest_base(cfg: &UpdaterConfig, server_url: &str) -> String {
     if !cfg.server_base.is_empty() {
         return cfg.server_base.trim_end_matches('/').into();
@@ -367,9 +370,16 @@ pub fn manifest_base(cfg: &UpdaterConfig, server_url: &str) -> String {
     if u.is_empty() {
         return String::new();
     }
-    // gRPC agent :50051 → HTTP dashboard :8080 (LOOM default ports).
+    // gRPC agent :50051 → HTTP dashboard :8080 (LOOM default ports). Works
+    // with or without an explicit scheme on server_url.
     if let Some(host) = u.strip_suffix(":50051") {
         return format!("{host}:8080");
+    }
+    // Bare host:port without scheme still parses in reqwest as a valid
+    // relative-looking URL failure — normalize to http:// so the error is
+    // a clean connect error, not a URL parse error.
+    if !u.contains("://") {
+        return format!("http://{u}");
     }
     u.into()
 }
@@ -402,7 +412,7 @@ fn ensure_self_update_supported() -> Result<()> {
 }
 
 /// Best-effort container detection (Docker, Podman, k8s pods, …).
-fn in_container() -> bool {
+pub(crate) fn in_container() -> bool {
     if std::path::Path::new("/.dockerenv").exists()
         || std::path::Path::new("/run/.containerenv").exists()
     {

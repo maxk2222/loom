@@ -596,7 +596,19 @@ impl Connector {
             session_resume_id: String::new(),
             last_config_version: cfg.config_version,
             inventory: Some(inv),
-            platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            platform: format!(
+                "{}-{}{}",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                // Docker clients can't self-update (binary lives on the
+                // image layer) — the suffix lets the dashboard offer the
+                // right update path instead of a doomed button push.
+                if crate::updater::in_container() {
+                    "-container"
+                } else {
+                    ""
+                }
+            ),
             client_csr_pem: self
                 .state
                 .pending_csr
@@ -718,12 +730,13 @@ impl Connector {
         }
         self.notify_capacity();
 
-        // Updater directives: persist enabled/auto_apply, and fire a one-shot
-        // update run when the admin pushed `update_now`.
+        // Updater directives: persist enabled/auto_apply/server_base, and
+        // fire a one-shot update run when the admin pushed `update_now`.
         if let Some(up) = &desired.client.updater {
-            if up.enabled.is_some() || up.auto_apply.is_some() {
+            if up.enabled.is_some() || up.auto_apply.is_some() || up.server_base.is_some() {
                 let enabled = up.enabled;
                 let auto_apply = up.auto_apply;
+                let server_base = up.server_base.clone();
                 self.state
                     .cfg_store
                     .update(|c| {
@@ -732,6 +745,9 @@ impl Connector {
                         }
                         if let Some(v) = auto_apply {
                             c.updater.auto_apply = v;
+                        }
+                        if let Some(v) = server_base {
+                            c.updater.server_base = v;
                         }
                     })
                     .await?;

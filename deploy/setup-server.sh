@@ -291,6 +291,13 @@ if [ -n "$ENROLL_LABEL" ] && [ -s "$COOKIE" ]; then
         2>/dev/null | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || true)
     [ -n "$TOK" ] && { printf '%s\n' "$TOK" > "$DIR/.enroll-token"; chmod 600 "$DIR/.enroll-token"; ok "enroll token: $TOK"; }
 fi
+# Client updater manifest base — without it clients guess the HTTP endpoint
+# from the gRPC port, which only works on defaults.
+if [ -s "$COOKIE" ]; then
+    curl -fsS -b "$COOKIE" -X PUT "http://localhost:$HTTP_PORT/api/settings/public_base" \
+        -H 'Content-Type: application/json' -d "{\"value\":\"http://$HOSTNAME:$HTTP_PORT\"}" >/dev/null 2>&1 \
+        || warn "could not set public_base — set it later via PUT /api/settings/public_base"
+fi
 
 cat <<EOS
 

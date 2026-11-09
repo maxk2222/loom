@@ -82,10 +82,17 @@ export default function ClientsPage() {
                   <td className="td text-right">
                     <span className="inline-flex gap-2">
                       {c.online && (
-                        <button className="btn-outline py-1 text-xs" onClick={() => pushUpdate(c.id)}
-                          title="Push a client update (downloads + verifies the latest release, then restarts)">
-                          Update
-                        </button>
+                        c.platform?.endsWith("-container") ? (
+                          <button className="btn-outline py-1 text-xs opacity-50 cursor-not-allowed" disabled
+                            title="Container install — update by pulling a newer image, self-update can't swap a running container's binary">
+                            Update
+                          </button>
+                        ) : (
+                          <button className="btn-outline py-1 text-xs" onClick={() => pushUpdate(c.id)}
+                            title="Push a client update (downloads + verifies the latest release, then restarts)">
+                            Update
+                          </button>
+                        )
                       )}
                       {c.status === "active" ? (
                         <button className="btn-outline py-1 text-xs" onClick={() => setStatus(c.id, "suspended")}>Suspend</button>

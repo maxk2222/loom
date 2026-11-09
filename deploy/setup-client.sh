@@ -281,6 +281,7 @@ cooldown_secs = 30
 
 [updater]
 enabled = false
+server_base = "$SERVER_HTTP"
 
 [tray]
 enabled = false

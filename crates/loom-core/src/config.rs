@@ -410,6 +410,11 @@ pub struct DesiredUpdater {
     /// Trigger an update check + apply right now (one-shot, not persisted).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_now: Option<bool>,
+    /// HTTP base of the server's release-manifest endpoint, pushed so clients
+    /// don't have to guess it from the gRPC address (custom ports break the
+    /// :50051→:8080 derivation). Persisted into `updater.server_base`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_base: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
