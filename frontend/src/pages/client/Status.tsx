@@ -6,7 +6,7 @@ import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAx
 import { Badge, Card, Stat } from "../../components/ui";
 import { Megaphone, X } from "lucide-react";
 import type { ClientNote, ClientStatus } from "../../lib/types";
-import { fmtPct, fmtTs, fmtTimeS, fmtUptime, fmtGiB, fmtNum, fmtMs } from "../../lib/format";
+import { fmtPct, fmtTs, fmtTimeS, fmtDayT, fmtUptime, fmtGiB, fmtNum, fmtMs } from "../../lib/format";
 
 function Meter({ label, pct, limit }: { label: string; pct: number; limit: number }) {
   const over = limit > 0 && pct >= limit;
@@ -241,8 +241,9 @@ function ClientCharts() {
     const end = Date.now();
     const N = Math.min(30, Math.max(6, Math.floor(rows.length / 3)));
     const bw = span / N;
+    const tick = win === "all" || win === "24h" ? fmtDayT : fmtTimeS;
     const bkt = Array.from({ length: N }, (_, i) => ({
-      t: fmtTimeS(end - span + (i + 0.5) * bw), n: 0, tok: 0,
+      t: tick(end - span + (i + 0.5) * bw), n: 0, tok: 0,
     }));
     for (const r of rows) {
       const i = Math.min(N - 1, Math.max(0, Math.floor((r.ended_unix_ms - (end - span)) / bw)));

@@ -83,7 +83,7 @@ export default function OverviewPage() {
   const buckets = series.data?.buckets ?? [];
   const chart = buckets.map(b => ({ t: tickFmt(b.t), n: b.requests, tok: b.prompt_tokens + b.completion_tokens }));
   const ttftChart = buckets.filter(b => b.ttft_ms > 0).map(b => ({ t: tickFmt(b.t), ttft: Math.round(b.ttft_ms) }));
-  const latChart = buckets.map(b => ({ t: tickFmt(b.t), p50: Math.round(b.p50_ms), p95: Math.round(b.p95_ms), p99: Math.round(b.p99_ms) }));
+  const latChart = buckets.filter(b => b.p50_ms > 0).map(b => ({ t: tickFmt(b.t), p50: Math.round(b.p50_ms), p95: Math.round(b.p95_ms), p99: Math.round(b.p99_ms) }));
   const tokSeries = buckets.map(b => ({
     t: tickFmt(b.t), pt: b.prompt_tokens, ct: b.completion_tokens,
     tps: b.duration_ms > 0 ? +(((b.prompt_tokens + b.completion_tokens) / (b.duration_ms / 1000)).toFixed(1)) : 0,

@@ -758,6 +758,13 @@ async fn client_status(
 /// memberships and client notes cascade with it. The device credential
 /// dies with the row, so the workstation's next reconnect is rejected.
 async fn delete_client(State(s): State<AdminState>, Path(id): Path<String>) -> Response {
+    if uuid::Uuid::parse_str(&id).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"invalid client id"})),
+        )
+            .into_response();
+    }
     s.sessions.kick(&id).await;
     match sqlx::query("DELETE FROM clients WHERE id=$1::uuid")
         .bind(&id)
@@ -765,6 +772,10 @@ async fn delete_client(State(s): State<AdminState>, Path(id): Path<String>) -> R
         .await
     {
         Ok(r) if r.rows_affected() > 0 => {
+            // Cascading member rows die with the deployments — drop the
+            // cached VM member lists immediately instead of waiting for
+            // the 60s reconcile tick.
+            let _ = s.models.reload().await;
             audit(&s.db, "client", "delete", &id).await;
             Json(json!({"ok":true})).into_response()
         }
@@ -1509,13 +1520,13 @@ async fn stats_breakdown(State(s): State<AdminState>, Query(q): Query<StatsQ>) -
                         sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - h.ttft_ms,0))::bigint
                    FROM requests_history h LEFT JOIN virtual_models vm ON vm.id = h.virtual_model_id
                   WHERE h.created_at > now() - $1::interval
-                  GROUP BY vm.api_name, h.virtual_model_id",
+                  GROUP BY vm.api_name, h.virtual_model_id ORDER BY sum(h.prompt_tokens)+sum(h.completion_tokens) DESC",
             "client" => "SELECT coalesce(c.name, h.client_id::text, 'unknown'), NULL::uuid, '',
                         count(*)::bigint, sum(h.prompt_tokens)::bigint, sum(h.completion_tokens)::bigint,
                         sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - h.ttft_ms,0))::bigint
                    FROM requests_history h LEFT JOIN clients c ON c.id = h.client_id
                   WHERE h.created_at > now() - $1::interval
-                  GROUP BY c.name, h.client_id",
+                  GROUP BY c.name, h.client_id ORDER BY sum(h.prompt_tokens)+sum(h.completion_tokens) DESC",
             "key" => "SELECT coalesce(nullif(k.name,''), k.prefix, h.api_key_id::text, 'unknown'), NULL::uuid,
                         coalesce(p.name,''),
                         count(*)::bigint, sum(h.prompt_tokens)::bigint, sum(h.completion_tokens)::bigint,
@@ -1524,13 +1535,13 @@ async fn stats_breakdown(State(s): State<AdminState>, Query(q): Query<StatsQ>) -
                    LEFT JOIN api_keys k ON k.id = h.api_key_id
                    LEFT JOIN projects p ON p.id = h.project_id
                   WHERE h.created_at > now() - $1::interval
-                  GROUP BY k.name, k.prefix, p.name, h.api_key_id",
+                  GROUP BY k.name, k.prefix, p.name, h.api_key_id ORDER BY sum(h.prompt_tokens)+sum(h.completion_tokens) DESC",
             _ => "SELECT coalesce(p.name, h.project_id::text, 'unknown'), NULL::uuid, '',
                         count(*)::bigint, sum(h.prompt_tokens)::bigint, sum(h.completion_tokens)::bigint,
                         sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - h.ttft_ms,0))::bigint
                    FROM requests_history h LEFT JOIN projects p ON p.id = h.project_id
                   WHERE h.created_at > now() - $1::interval
-                  GROUP BY p.name, h.project_id",
+                  GROUP BY p.name, h.project_id ORDER BY sum(h.prompt_tokens)+sum(h.completion_tokens) DESC",
         }
     };
     let db = s.db.clone();
