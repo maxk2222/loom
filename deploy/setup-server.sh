@@ -93,7 +93,11 @@ HTTP_PORT=$(pick_port "$HTTP_PORT"); GRPC_PORT=$(pick_port "$GRPC_PORT"); BOOT_P
 ok "ports: http=$HTTP_PORT grpc=$GRPC_PORT bootstrap=$BOOT_PORT"
 
 # --- dirs + permissions -------------------------------------------------------
-mkdir -p "$DIR/tls" "$DIR/state"
+if ! mkdir -p "$DIR/tls" "$DIR/state" 2>/dev/null; then
+    say "creating $DIR needs elevated permissions"
+    sudo mkdir -p "$DIR/tls" "$DIR/state" && sudo chown -R "$(id -u):$(id -g)" "$DIR" \
+        || die "could not create install dir $DIR"
+fi
 chmod 700 "$DIR"
 # container uid 10001 (see Dockerfiles); bind-mounted dirs must be readable
 chown -R 10001:10001 "$DIR/tls" "$DIR/state" 2>/dev/null || {
