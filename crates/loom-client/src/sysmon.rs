@@ -70,6 +70,11 @@ pub fn spawn(
         let mut sys = sysinfo::System::new();
         let mut below_since: Option<Instant> = None;
         let mut gated = false;
+        // Deployments whose adapter reported unload unsupported — skip them
+        // for the rest of this pressure event instead of retrying every
+        // tick. Reset when gates reopen.
+        let mut offload_unsupported: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         // refresh_cpu_all() both discovers the cpu structs and refreshes
         // usage — refresh_cpu_usage() alone updates only existing entries,
         // which leaves global_cpu_usage() at 0 on Linux where the list
@@ -117,6 +122,7 @@ pub fn spawn(
                 if gated {
                     warn!(cpu = %cpu, ram = %ram_pct, "local pressure — tier-2 gates closed");
                 } else {
+                    offload_unsupported.clear();
                     info!(cpu = %cpu, ram = %ram_pct, "pressure cleared — tier-2 gates open");
                 }
             }
@@ -131,19 +137,35 @@ pub fn spawn(
                 // unloading an absent model is a no-op that would spam the
                 // log every tick for the whole pressure event.
                 let unloadable: std::collections::HashSet<String> = snapshot
-                    .into_iter()
+                    .iter()
                     .filter(|c| {
                         c.sharing_mode != loom_core::config::SharingMode::Private && c.model_ready
                     })
-                    .map(|c| c.deployment_id)
+                    .map(|c| c.deployment_id.clone())
                     .collect();
                 for dep_id in sched.idle_deployments() {
-                    if !unloadable.contains(&dep_id) {
+                    if !unloadable.contains(&dep_id) || offload_unsupported.contains(&dep_id) {
                         continue;
                     }
                     match backends.unload(&dep_id).await {
-                        Ok(()) => info!(deployment = %dep_id, "model unloaded (pressure offload)"),
+                        Ok(()) => {
+                            // The model is no longer resident — reflect that
+                            // immediately instead of waiting ~15s for the next
+                            // health probe; also keeps the next tick from
+                            // re-unloading an already-absent model.
+                            let healthy = snapshot
+                                .iter()
+                                .find(|c| c.deployment_id == dep_id)
+                                .map(|c| c.health_ok)
+                                .unwrap_or(true);
+                            let _ = sched.set_dep_ready(&dep_id, healthy, false);
+                            capacity_notify.notify_one();
+                            info!(deployment = %dep_id, "model unloaded (pressure offload)");
+                        }
                         Err(e) => {
+                            if matches!(e, crate::adapters::AdapterError::Protocol(_)) {
+                                offload_unsupported.insert(dep_id.clone());
+                            }
                             tracing::debug!(deployment = %dep_id, error = %e, "pressure unload skipped")
                         }
                     }
