@@ -129,7 +129,7 @@ export default function Layout() {
 
   return (
     <div className="flex min-h-screen">
-      <aside className="flex w-56 shrink-0 flex-col border-r border-border bg-panel/60 backdrop-blur">
+      <aside className="sticky top-0 flex h-screen w-56 shrink-0 flex-col border-r border-border bg-panel/60 backdrop-blur">
         <div className="grad-line" />
         <div className="flex items-center gap-2.5 px-4 pb-4 pt-4">
           <Logo size={30} />
