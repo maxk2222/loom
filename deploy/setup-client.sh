@@ -113,6 +113,32 @@ else cp "$CA_FILE" "$DIR/ca.crt"; CA_FILE="$DIR/ca.crt"; fi
 grep -q "BEGIN CERTIFICATE" "$CA_FILE" || die "$CA_FILE is not a PEM certificate"
 ok "ca.crt ← $CA_FILE (TOFU — verify fingerprint out-of-band for untrusted networks)"
 
+# --- existing state ---------------------------------------------------------------
+CFG="$DIR/config.toml"
+# The client persists its device credential + deployment ids in the state
+# VOLUME, not the seed config — on --reconfigure recover the effective
+# config from wherever it lives: running container → named volume → seed.
+EFF_CFG=""
+if [ -f "$DIR/docker-compose.yml" ]; then
+    CTR=$(docker compose -f "$DIR/docker-compose.yml" ps -q 2>/dev/null | head -1 || true)
+    [ -n "$CTR" ] && EFF_CFG=$(docker exec "$CTR" cat /etc/loom-client/config.toml 2>/dev/null || true)
+    if ! printf '%s' "$EFF_CFG" | grep -q 'device_credential = "dev_'; then
+        VPROJ=$(grep -m1 '^name:' "$DIR/docker-compose.yml" | awk '{print $2}' || true)
+        [ -n "$VPROJ" ] && EFF_CFG=$(docker run --rm -v "${VPROJ}_loom-client-state:/v" alpine \
+            cat /v/config.toml 2>/dev/null || true)
+    fi
+fi
+printf '%s' "$EFF_CFG" | grep -q 'device_credential = "dev_' || EFF_CFG=$(cat "$CFG" 2>/dev/null || true)
+# name→id lookups so regenerated configs keep stable ids — server-side
+# virtual-model members reference deployment uuids and would dangle.
+block_id() { # $1 literal section header e.g. [[backends]], $2 want-name → id or ""
+    printf '%s\n' "$EFF_CFG" | awk -v sec="$1" -v want="$2" '
+        /^\[/ { in_sec = ($0 == sec); id=""; name="" }
+        in_sec && /^id = / { gsub(/"/,"",$3); id=$3 }
+        in_sec && /^name = / { gsub(/"/,"",$3); name=$3; if (id!="" && name==want) { print id; exit } }
+    '
+}
+
 # --- backend discovery ----------------------------------------------------------
 # No -f: we want the status code itself (000 on connect failure).
 get() { curl -sS --max-time 4 -o /dev/null -w '%{http_code}' ${3:+-H "Authorization: Bearer $3"} "$1" 2>/dev/null || true; }
@@ -133,7 +159,8 @@ container_key() { # port → --api-key/-api_key value from a local container's a
 BACKENDS=""          # TOML text accumulated
 add_backend() { # name type endpoint key
     local n="$1" t="$2" ep="$3" key="$4" id
-    id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
+    id=$(block_id '[[backends]]' "$n")
+    [ -n "$id" ] || id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
     BACKENDS="$BACKENDS
 [[backends]]
 id = \"$id\"
@@ -146,7 +173,8 @@ enabled = true
 }
 add_dep() { # name model autoload
     local n="$1" m="$2" al="${3:-true}" did
-    did=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
+    did=$(block_id '[[backends.deployments]]' "$n")
+    [ -n "$did" ] || did=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
     BACKENDS="$BACKENDS
 [[backends.deployments]]
 id = \"$did\"
@@ -218,22 +246,7 @@ fi
 [ -n "$BACKENDS" ] || warn "no backends discovered — add them later via the local UI (:8391)"
 
 # --- config.toml ------------------------------------------------------------------
-CFG="$DIR/config.toml"
 ENROLLED=0; KEEP_ID=""; KEEP_CRED=""
-# The client persists its device credential in the state VOLUME, not the
-# seed config — on --reconfigure recover it from wherever it lives:
-# running container → named volume → seed file.
-EFF_CFG=""
-if [ -f "$DIR/docker-compose.yml" ]; then
-    CTR=$(docker compose -f "$DIR/docker-compose.yml" ps -q 2>/dev/null | head -1 || true)
-    [ -n "$CTR" ] && EFF_CFG=$(docker exec "$CTR" cat /etc/loom-client/config.toml 2>/dev/null || true)
-    if ! printf '%s' "$EFF_CFG" | grep -q 'device_credential = "dev_'; then
-        VPROJ=$(grep -m1 '^name:' "$DIR/docker-compose.yml" | awk '{print $2}' || true)
-        [ -n "$VPROJ" ] && EFF_CFG=$(docker run --rm -v "${VPROJ}_loom-client-state:/v" alpine \
-            cat /v/config.toml 2>/dev/null || true)
-    fi
-fi
-printf '%s' "$EFF_CFG" | grep -q 'device_credential = "dev_' || EFF_CFG=$(cat "$CFG" 2>/dev/null || true)
 KEEP_ID=$(printf '%s\n' "$EFF_CFG" | grep -m1 '^client_id = "' || true)
 KEEP_CRED=$(printf '%s\n' "$EFF_CFG" | grep -m1 '^device_credential = "' || true)
 { [ -s "$CFG" ] && grep -q '^client_id = "[0-9a-f]' "$CFG"; } || [ -n "$KEEP_ID" ] && ENROLLED=1
