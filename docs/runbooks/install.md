@@ -1,6 +1,29 @@
 # Install & Enrollment Runbook
 
-## Server (Docker Compose)
+## Automated setup (recommended)
+
+```bash
+# Server — dirs + uid healing, CA + signed server cert, port autodetect,
+# internal-only Postgres/Redis, admin + enroll token:
+deploy/setup-server.sh --dir /data/loom \
+    --admin-email you@example.com --enroll-token first-node
+
+# Client — fetches CA via /api/tls/ca.crt, discovers Ollama/vLLM/LM Studio
+# (incl. vLLM --api-key extraction from local containers), writes config,
+# enrolls over mTLS bootstrap:
+deploy/setup-client.sh --server https://<server>:50052 --token enroll_x \
+    --dir /data/loom-client
+```
+
+Both scripts are idempotent. Notable automations: occupied ports are
+re-mapped, TLS/UID/ownership problems self-heal via root entrypoints that
+drop to uid 10001, and backend discovery builds deployments (vLLM gets a
+dynamic `model_name = "auto"` deployment that follows whatever model is
+loaded). `GET /api/tls/ca.crt` serves the public CA trust anchor — use it
+for TOFU client setup (verify the fingerprint out-of-band on untrusted
+networks).
+
+## Server (Docker Compose, manual)
 
 ```bash
 cd deploy

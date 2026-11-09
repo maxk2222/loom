@@ -53,16 +53,16 @@ services:
     environment:
       LOOM_DATABASE_URL: postgres://${POSTGRES_USER:-loom}:${POSTGRES_PASSWORD:-loom}@postgres:5432/${POSTGRES_DB:-loom}
       LOOM_REDIS_URL: redis://default:${REDIS_PASSWORD:-}@redis:6379/0
-      LOOM_REDIS_PREFIX: ${LOOM_REDIS_PREFIX:-loom:prod:}
-      LOOM_HTTP_BIND: 0.0.0.0:8080
-      LOOM_GRPC_BIND: 0.0.0.0:50051
+      LOOM_REDIS_PREFIX: "${LOOM_REDIS_PREFIX:-loom:prod:}"
+      LOOM_HTTP_BIND: "0.0.0.0:${LOOM_HTTP_PORT:-8080}"
+      LOOM_GRPC_BIND: "0.0.0.0:${LOOM_GRPC_PORT:-50051}"
       LOOM_DATA_DIR: /data
-      RUST_LOG: ${RUST_LOG:-info,loom_server=debug}
+      RUST_LOG: "${RUST_LOG:-info,loom_server=debug}"
     volumes:
       - serverdata:/data
     ports:
-      - "127.0.0.1:50051:50051"
-      - "127.0.0.1:8080:8080"
+      - "${LOOM_GRPC_ADDR:-127.0.0.1}:${LOOM_GRPC_PORT:-50051}:${LOOM_GRPC_PORT:-50051}"
+      - "${LOOM_HTTP_ADDR:-127.0.0.1}:${LOOM_HTTP_PORT:-8080}:${LOOM_HTTP_PORT:-8080}"
 
   caddy:
     profiles: ["full"]

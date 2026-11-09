@@ -26,6 +26,14 @@ set -eu
 
 CFG="${LOOM_CONFIG:-/etc/loom-client/config.toml}"
 
+# The container starts as root so state/bind-mounted dirs can be
+# ownership-healed regardless of the host-side uid, then drops to `loom`.
+if [ "$(id -u)" = "0" ]; then
+    mkdir -p "$(dirname "$CFG")"
+    chown -R loom:loom "$(dirname "$CFG")" 2>/dev/null || true
+    chmod 700 "$(dirname "$CFG")" 2>/dev/null || true
+fi
+
 # Strip characters that would break the TOML string literals below.
 esc() { printf '%s' "$1" | tr -d '"\\'; }
 # Numeric env → digits only (invalid input falls back to the default).
@@ -109,7 +117,12 @@ if [ ! -f "$CFG" ]; then
         fi
     } > "$CFG"
     chmod 600 "$CFG"
+    [ "$(id -u)" = "0" ] && chown loom:loom "$CFG" 2>/dev/null || true
     echo "loom-client: wrote initial config to $CFG" >&2
 fi
 
-exec /usr/local/bin/loom-client "$@"
+if [ "$(id -u)" = "0" ]; then
+    exec runuser -u loom -- /usr/local/bin/loom-client "$@"
+else
+    exec /usr/local/bin/loom-client "$@"
+fi

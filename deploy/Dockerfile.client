@@ -28,7 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=rust-build /out-client /usr/local/bin/loom-client
 COPY deploy/docker-entrypoint-client.sh /usr/local/bin/docker-entrypoint-client.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint-client.sh
-USER loom
+# Starts as root: the entrypoint ownership-heals the state dir then drops
+# to uid 10001 via runuser (host-mounted files are often foreign-uid).
+USER root
 # LOOM_SERVER_URL / LOOM_ENROLL_TOKEN / LOOM_* vars are read at container
 # start by the entrypoint — not baked into the image.
 ENV LOOM_CONFIG=/etc/loom-client/config.toml \

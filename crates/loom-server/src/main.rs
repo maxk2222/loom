@@ -1,3 +1,5 @@
+use anyhow::Context;
+use axum::response::IntoResponse;
 use axum::routing::get;
 use clap::Parser;
 use loom_server::*;
@@ -144,34 +146,50 @@ async fn main() -> anyhow::Result<()> {
     // Shared service instance — a second (plaintext) listener during a TLS
     // migration serves the same AgentSvc.
     let svc = std::sync::Arc::new(svc);
+
+    // TLS config built in the main task — certificate/path mistakes must fail
+    // startup loudly, not panic inside a spawned task while HTTP keeps
+    // serving a half-dead server.
+    // agent_cfg carries client_ca_root (mTLS); bootstrap_cfg is server-auth
+    // only — cert issuance must not require a client cert it is issuing.
+    let (agent_tls_cfg, bootstrap_tls_cfg) = if let Some(t) = grpc_tls.as_ref() {
+        let cert = std::fs::read(&t.cert_path).context("read grpc tls cert")?;
+        let key = std::fs::read(&t.key_path).context("read grpc tls key")?;
+        let mut agent_cfg = tonic::transport::ServerTlsConfig::new().identity(
+            tonic::transport::Identity::from_pem(cert.clone(), key.clone()),
+        );
+        if let Some(ca) = &t.client_ca_path {
+            let pem = std::fs::read(ca).context("read grpc client ca")?;
+            agent_cfg = agent_cfg.client_ca_root(tonic::transport::Certificate::from_pem(pem));
+        }
+        let boot_cfg = tonic::transport::ServerTlsConfig::new()
+            .identity(tonic::transport::Identity::from_pem(cert, key));
+        (Some(agent_cfg), Some(boot_cfg))
+    } else {
+        (None, None)
+    };
+
+    // Listener failures must not be swallowed: a listener task exiting takes
+    // the whole process down (see the select at the bottom of main).
+    let mut listener_tasks = tokio::task::JoinSet::new();
     {
         let svc = svc.clone();
-        tokio::spawn(async move {
-            // Stream fan-out bound per control connection — a rogue client
-            // cannot exhaust server resources through one session. Must stay
-            // comfortably above a client's legitimate inflight count: every
-            // dispatched request occupies its own RequestData stream — a cap
-            // below that resets the whole control session under load bursts.
-            let tls_on = grpc_tls.is_some();
-            let mut b = tonic::transport::Server::builder().concurrency_limit_per_connection(512);
-            if let Some(t) = grpc_tls {
-                let cert = std::fs::read(&t.cert_path).unwrap();
-                let key = std::fs::read(&t.key_path).unwrap();
-                let mut tls_cfg = tonic::transport::ServerTlsConfig::new()
-                    .identity(tonic::transport::Identity::from_pem(cert, key));
-                // mTLS: require client certificates signed by this CA —
-                // unauthenticated clients can't even open a TLS session.
-                if let Some(ca) = &t.client_ca_path {
-                    let pem = std::fs::read(ca).unwrap();
-                    tls_cfg = tls_cfg.client_ca_root(tonic::transport::Certificate::from_pem(pem));
-                }
-                b = b.tls_config(tls_cfg).unwrap();
-            }
-            info!(%grpc_addr, tls = tls_on, "gRPC agent endpoint listening");
+        let tls_on = agent_tls_cfg.is_some();
+        // Stream fan-out bound per control connection — a rogue client
+        // cannot exhaust server resources through one session. Must stay
+        // comfortably above a client's legitimate inflight count: every
+        // dispatched request occupies its own RequestData stream — a cap
+        // below that resets the whole control session under load bursts.
+        let mut b = tonic::transport::Server::builder().concurrency_limit_per_connection(512);
+        if let Some(tls_cfg) = agent_tls_cfg.clone() {
+            b = b.tls_config(tls_cfg).context("grpc agent tls config")?;
+        }
+        info!(%grpc_addr, tls = tls_on, "gRPC agent endpoint listening");
+        listener_tasks.spawn(async move {
             b.add_service(grpc_service::server((*svc).clone()))
                 .serve(grpc_addr)
                 .await
-                .ok();
+                .context("grpc agent listener exited")
         });
     }
     // Optional extra plaintext listener — during TLS migrations, or as the
@@ -183,39 +201,34 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!(%plain, "plaintext gRPC listener on a non-loopback address without any TLS listener — reachable by any client holding a credential");
         }
         let svc = svc.clone();
-        tokio::spawn(async move {
-            if let Ok(addr) = plain.parse::<SocketAddr>() {
-                info!(%addr, "gRPC plaintext listener");
-                tonic::transport::Server::builder()
-                    .concurrency_limit_per_connection(512)
-                    .add_service(grpc_service::server((*svc).clone()))
-                    .serve(addr)
-                    .await
-                    .ok();
-            }
+        let addr: SocketAddr = plain.parse().context("parse grpc_plain_bind")?;
+        info!(%addr, "gRPC plaintext listener");
+        listener_tasks.spawn(async move {
+            tonic::transport::Server::builder()
+                .concurrency_limit_per_connection(512)
+                .add_service(grpc_service::server((*svc).clone()))
+                .serve(addr)
+                .await
+                .context("grpc plaintext listener exited")
         });
     }
     // Bootstrap listener: TLS server-auth without client-cert — new/renewing
     // clients present their CSR in Hello and get a signed cert back.
-    if let (Some(boot), Some(t)) = (cfg.grpc_bootstrap_bind.clone(), cfg.grpc_tls.clone()) {
+    if let (Some(boot), Some(tls_cfg)) =
+        (cfg.grpc_bootstrap_bind.clone(), bootstrap_tls_cfg.clone())
+    {
         let svc = svc.clone();
-        tokio::spawn(async move {
-            if let Ok(addr) = boot.parse::<SocketAddr>() {
-                let cert = std::fs::read(&t.cert_path).unwrap();
-                let key = std::fs::read(&t.key_path).unwrap();
-                info!(%addr, "gRPC bootstrap listener (cert issuance)");
-                tonic::transport::Server::builder()
-                    .concurrency_limit_per_connection(512)
-                    .tls_config(
-                        tonic::transport::ServerTlsConfig::new()
-                            .identity(tonic::transport::Identity::from_pem(cert, key)),
-                    )
-                    .unwrap()
-                    .add_service(grpc_service::server((*svc).clone()))
-                    .serve(addr)
-                    .await
-                    .ok();
-            }
+        let addr: SocketAddr = boot.parse().context("parse grpc_bootstrap_bind")?;
+        info!(%addr, "gRPC bootstrap listener (cert issuance)");
+        listener_tasks.spawn(async move {
+            tonic::transport::Server::builder()
+                .concurrency_limit_per_connection(512)
+                .tls_config(tls_cfg)
+                .context("grpc bootstrap tls config")?
+                .add_service(grpc_service::server((*svc).clone()))
+                .serve(addr)
+                .await
+                .context("grpc bootstrap listener exited")
         });
     }
 
@@ -250,11 +263,36 @@ async fn main() -> anyhow::Result<()> {
     });
     let pool2 = pool.clone();
     let rt2 = rt.clone();
+    let ca_for_route = client_ca.clone();
     let app = axum::Router::new()
         .merge(gw)
         .merge(adm)
         .merge(dashboard_static::router())
         .route("/healthz", get(|| async { "ok" }))
+        // Public CA trust anchor for client bootstrap (TOFU): lets setup
+        // tooling fetch the CA over HTTP instead of copying files. It only
+        // validates server identity — possession grants no access, client
+        // certs still need signing and device credentials still gate sessions.
+        .route(
+            "/api/tls/ca.crt",
+            get(move || {
+                let ca = ca_for_route.clone();
+                async move {
+                    match ca {
+                        Some(ca) => (
+                            [(axum::http::header::CONTENT_TYPE, "application/x-pem-file")],
+                            ca.ca_pem().to_string(),
+                        )
+                            .into_response(),
+                        None => (
+                            axum::http::StatusCode::NOT_FOUND,
+                            "no internal CA (mTLS disabled)",
+                        )
+                            .into_response(),
+                    }
+                }
+            }),
+        )
         .route(
             "/readyz",
             get(move || {
@@ -295,11 +333,23 @@ async fn main() -> anyhow::Result<()> {
     let http_addr: SocketAddr = cfg.http_bind.parse()?;
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
     info!(%http_addr, "HTTP listening (v1 + api + ui)");
-    axum::serve(
+    let http = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    );
+    tokio::select! {
+        r = http => r?,
+        r = listener_tasks.join_next() => {
+            // A listener exiting means the agent channel is gone — a silent
+            // half-dead server is worse than a crash restart loop, so die
+            // loudly and let the supervisor restart us.
+            match r {
+                Some(Ok(Err(e))) => anyhow::bail!("{e:#}"),
+                Some(Err(je)) => anyhow::bail!("listener task panicked: {je}"),
+                Some(Ok(Ok(()))) | None => anyhow::bail!("grpc listener set ended unexpectedly"),
+            }
+        }
+    }
     Ok(())
 }
 
