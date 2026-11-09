@@ -165,48 +165,12 @@ impl BackendAdapter for OllamaAdapter {
 
     /// Ollama: keep_alive:-1 loads the model into memory and pins it.
     async fn warm_up(&self, model: &str) -> Result<(), AdapterError> {
-        let url = format!("{}/api/generate", self.endpoint());
-        let mut req = self
-            .http
-            .post(&url)
-            .json(&serde_json::json!({
-                "model": model, "prompt": "", "keep_alive": -1, "stream": false
-            }))
-            .timeout(std::time::Duration::from_secs(120));
-        if !self.cfg.api_key.is_empty() {
-            req = req.bearer_auth(&self.cfg.api_key);
-        }
-        match req.send().await {
-            Ok(r) if r.status().is_success() => Ok(()),
-            Ok(r) => Err(AdapterError::Upstream {
-                status: r.status().as_u16(),
-                message: "warm_up failed".into(),
-            }),
-            Err(e) => Err(AdapterError::Connect(e.to_string())),
-        }
+        self.keep_alive(model, -1, 120, "warm_up failed").await
     }
 
     /// Ollama: keep_alive:0 evicts the model from memory immediately.
     async fn unload(&self, model: &str) -> Result<(), AdapterError> {
-        let url = format!("{}/api/generate", self.endpoint());
-        let mut req = self
-            .http
-            .post(&url)
-            .json(&serde_json::json!({
-                "model": model, "prompt": "", "keep_alive": 0, "stream": false
-            }))
-            .timeout(std::time::Duration::from_secs(30));
-        if !self.cfg.api_key.is_empty() {
-            req = req.bearer_auth(&self.cfg.api_key);
-        }
-        match req.send().await {
-            Ok(r) if r.status().is_success() => Ok(()),
-            Ok(r) => Err(AdapterError::Upstream {
-                status: r.status().as_u16(),
-                message: "unload failed".into(),
-            }),
-            Err(e) => Err(AdapterError::Connect(e.to_string())),
-        }
+        self.keep_alive(model, 0, 30, "unload failed").await
     }
 
     async fn forward(
@@ -237,6 +201,54 @@ impl BackendAdapter for OllamaAdapter {
 }
 
 impl OllamaAdapter {
+    /// keep_alive drive: /api/generate for chat models, /api/embed fallback for
+    /// embedding-only models (they 400 on generate).
+    async fn keep_alive(
+        &self,
+        model: &str,
+        keep_alive: i64,
+        timeout_secs: u64,
+        err_msg: &'static str,
+    ) -> Result<(), AdapterError> {
+        let mut body = serde_json::json!({
+            "model": model, "prompt": "", "keep_alive": keep_alive, "stream": false
+        });
+        let mut embed_fallback = false;
+        for attempt in 0..2 {
+            let url = format!(
+                "{}/api/{}",
+                self.endpoint(),
+                if embed_fallback { "embed" } else { "generate" }
+            );
+            let mut req = self
+                .http
+                .post(&url)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(timeout_secs));
+            if !self.cfg.api_key.is_empty() {
+                req = req.bearer_auth(&self.cfg.api_key);
+            }
+            match req.send().await {
+                Ok(r) if r.status().is_success() => return Ok(()),
+                Ok(r) if attempt == 0 && r.status().as_u16() == 400 => {
+                    embed_fallback = true;
+                    body = serde_json::json!({
+                        "model": model, "input": "w", "keep_alive": keep_alive, "stream": false
+                    });
+                    continue;
+                }
+                Ok(r) => {
+                    return Err(AdapterError::Upstream {
+                        status: r.status().as_u16(),
+                        message: err_msg.into(),
+                    })
+                }
+                Err(e) => return Err(AdapterError::Connect(e.to_string())),
+            }
+        }
+        unreachable!()
+    }
+
     /// Native /api/embed translation → OpenAI embeddings response shape.
     async fn forward_embeddings_native(
         &self,

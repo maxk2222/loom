@@ -90,22 +90,26 @@ impl ClientRegistry {
         let device_cred = format!("dev_{}", loom_core::ids::opaque_token(32));
         let cred_hash = sha256_hex(&device_cred);
         let cid = ClientId::new().0;
-        sqlx::query(
+        // RETURNING id: on a name conflict the existing row keeps its id — the
+        // client must learn that id, not the freshly generated one, or every
+        // subsequent credential check misses the row.
+        let row_id: (uuid::Uuid,) = sqlx::query_as(
             "INSERT INTO clients (id, name, credential_hash, status, version, platform) VALUES ($1,$2,$3,'active',$4,$5)
-             ON CONFLICT (name) DO UPDATE SET credential_hash=$3, status='active', version=$4, platform=$5, last_seen_at=now()",
+             ON CONFLICT (name) DO UPDATE SET credential_hash=$3, status='active', version=$4, platform=$5, last_seen_at=now()
+             RETURNING id",
         )
         .bind(cid)
         .bind(if name.is_empty() { "client" } else { name })
         .bind(&cred_hash)
         .bind(version)
         .bind(platform)
-        .execute(&self.db)
+        .fetch_one(&self.db)
         .await?;
         sqlx::query("UPDATE enroll_tokens SET used = used + 1 WHERE id = $1")
             .bind(tok_id)
             .execute(&self.db)
             .await?;
-        Ok(Some((cid.to_string(), device_cred)))
+        Ok(Some((row_id.0.to_string(), device_cred)))
     }
 
     /// Mark a client + its deployments online; store session id.
