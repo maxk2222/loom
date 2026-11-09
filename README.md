@@ -337,19 +337,21 @@ flowchart TB
 
 ## Measured overhead
 
-Live fleet (Mac Studio + 2 Proxmox VM clients over mTLS, smollm2:135m /
-qwen3.8-27b), median of 5+ runs:
+What LOOM adds on top of hitting the backend directly — identical
+request/model/prompt, medians over 8+ runs on a live fleet (DGX-class
+server + clients over mTLS, qwen2.5:0.5b / 27B-class models):
 
-| Path | Latency |
+| Path | Extra time vs backend-direct |
 |---|---|
-| Stream TTFB, same-host client | ~15–50 ms |
-| Non-stream, same-host client (27B) | +~50 ms vs direct (0.96 s vs 0.91 s) |
-| Non-stream, LAN client (tiny model) | ~180–205 ms total |
+| First SSE byte (control-plane assign + first chunk) | ~5–35 ms |
+| Non-stream completion, same-host client | ≲30 ms (0.21 s vs 0.20 s) |
 | `heuristic`/hybrid router rule hit | ~14 ms |
 | LLM-classified `loom-auto` pick (27B classifier) | ~7–30 s cold — use heuristic/hybrid when latency matters |
 
-Scheduling itself (lease + candidate fan-out) is ~1–5 ms; TTFB is
-dominated by client→backend first-byte time, not the control plane.
+Scheduling itself (Redis lease + candidate fan-out) is ~1–5 ms; the
+client→backend first-token time dominates end-to-end TTFB, not the
+control plane. Remote members naturally cost their network hop to the
+client — pick same-site members when every millisecond counts.
 
 ## Repository layout
 
