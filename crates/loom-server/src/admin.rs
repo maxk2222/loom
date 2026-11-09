@@ -334,8 +334,8 @@ async fn overview(State(s): State<AdminState>) -> Json<Value> {
         "clients_total": clients.len(),
         "clients_online": online,
         "virtual_models": vms.len(),
-        "queued_5m": queued,
-        "active_5m": active,
+        "queued": queued,
+        "inflight": active,
         "requests_24h": today,
     }))
 }

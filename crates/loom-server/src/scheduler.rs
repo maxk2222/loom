@@ -150,6 +150,9 @@ impl Scheduler {
 
     /// Live (queued, in-flight) request counts for the dashboard overview.
     /// History only stores terminal states, so it can't supply these.
+    /// `queued` is the Redis queue gauge; `active` is the in-process map of
+    /// dispatched requests — `pending` only ever holds *queued* entries, so
+    /// subtracting queued from it undercounts in-flight to ~0.
     pub async fn live_counts(&self) -> (i64, i64) {
         let mut c = self.inner.rt.conn.clone();
         let queued: i64 = redis::cmd("GET")
@@ -157,10 +160,8 @@ impl Scheduler {
             .query_async(&mut c)
             .await
             .unwrap_or(0);
-        let pending = self.inner.pending.lock().await.len() as i64;
-        // pending covers queued + dispatched-but-unfinished; queued is the
-        // Redis zset depth. Active = dispatched minus still-queued.
-        (queued, (pending - queued).max(0))
+        let active = self.inner.active.lock().await.len() as i64;
+        (queued, active)
     }
 
     /// Does `model` currently have at least one dispatchable member?

@@ -90,13 +90,18 @@ function StatusBar() {
   });
   const d = q.data ?? {};
   const connected = isClient ? d.server_connected : true;
+  // In-flight counters live per deployment under capacities[] — sum them.
+  const infl = (d.capacities ?? []).reduce(
+    (a: [number, number], c: any) => [a[0] + (c.inflight_local ?? 0), a[1] + (c.inflight_tier2 ?? 0)],
+    [0, 0],
+  );
   return (
     <div className="mt-auto space-y-2 border-t border-border/60 px-4 py-3 text-[11px]">
       <Badge tone={connected ? "ok" : "err"} dot>
         {isClient ? (connected ? "server" : "offline") : "server live"}
       </Badge>{" "}
       {isClient ? (
-        <Badge tone="muted">l{d.inflight_local ?? 0} · t{d.inflight_tier2 ?? 0}</Badge>
+        <Badge tone="muted">l{infl[0]} · t{infl[1]}</Badge>
       ) : (
         <Badge tone="muted">{d.clients_online ?? 0}/{d.clients_total ?? 0} clients</Badge>
       )}

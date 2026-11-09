@@ -15,8 +15,8 @@ export interface Overview {
   clients_total: number;
   clients_online: number;
   virtual_models: number;
-  queued_5m: number;
-  active_5m: number;
+  queued: number;
+  inflight: number;
   requests_24h: number;
 }
 
