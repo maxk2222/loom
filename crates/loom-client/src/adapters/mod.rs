@@ -79,6 +79,14 @@ pub trait BackendAdapter: Send + Sync {
         None
     }
 
+    /// Candidate set for `model_name == "auto"` binding. Defaults to the
+    /// resident set; adapters whose registry distinguishes model kinds
+    /// (LM Studio) exclude non-chat models — an auto deployment bound to
+    /// an embedding model could never serve a chat request.
+    async fn bindable_models(&self) -> Option<Vec<String>> {
+        self.loaded_models().await
+    }
+
     /// Probe capabilities of a specific model on this backend.
     async fn probe_capabilities(&self, model: &str) -> Result<Capabilities, AdapterError>;
 

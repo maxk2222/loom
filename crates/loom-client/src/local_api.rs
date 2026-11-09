@@ -775,6 +775,15 @@ async fn admin_add_backend(State(s): State<AppState>, Json(body): Json<BackendBo
                 "admin",
             );
         }
+        // "auto" follows the local backend's resident model — hosted/remote
+        // providers have no resident-model concept to bind.
+        if b.remote && d.model_name == loom_core::config::DYNAMIC_MODEL {
+            return err(
+                ErrorCode::InvalidRequest,
+                "model_name \"auto\" is only valid for local backends",
+                "admin",
+            );
+        }
     }
     // Preserve the stored api_key when the update sends none (the UI never
     // receives the plaintext key back, so it can't resend it).

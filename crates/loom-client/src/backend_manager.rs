@@ -40,6 +40,9 @@ struct BackendEntry {
     /// Currently-resident models (`loaded_models()`): `Some` = known set
     /// (possibly empty), `None` = backend exposes no loaded-set concept.
     loaded: Arc<RwLock<Option<Vec<String>>>>,
+    /// `auto`-binding candidates (`bindable_models()`): resident models
+    /// minus kinds that cannot serve chat (e.g. LM Studio embeddings).
+    bindable: Arc<RwLock<Option<Vec<String>>>>,
 }
 
 struct DeploymentEntry {
@@ -142,19 +145,33 @@ impl BackendManager {
                     health,
                     models,
                     loaded: Arc::new(RwLock::new(None)),
+                    bindable: Arc::new(RwLock::new(None)),
                 },
             );
 
             for d in &b.deployments {
-                let caps = deployments
-                    .remove(&d.id)
-                    .map(|e| e.caps)
+                // Carry resolved/caps state forward: a config save must not
+                // drop the dynamic binding (would force a spurious caps
+                // re-probe + inventory push on the next pass).
+                let old = deployments.remove(&d.id);
+                let caps = old
+                    .as_ref()
+                    .map(|e| e.caps.clone())
                     .unwrap_or_else(|| Arc::new(RwLock::new(None)));
+                let resolved_model = old
+                    .as_ref()
+                    .filter(|e| e.backend_id == b.id)
+                    .map(|e| e.resolved_model.clone())
+                    .unwrap_or_else(|| Arc::new(RwLock::new(None)));
+                let warned_multi = old
+                    .as_ref()
+                    .map(|e| e.warned_multi.clone())
+                    .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
                 next_deployments.insert(
                     d.id.clone(),
                     DeploymentEntry {
-                        resolved_model: Arc::new(RwLock::new(None)),
-                        warned_multi: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        resolved_model,
+                        warned_multi,
                         warmed_at: Arc::new(RwLock::new(None)),
                         evict_misses: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                         miss_counted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -212,7 +229,7 @@ impl BackendManager {
         // Probe each backend; mark deployments accordingly.
         let backend_ids: Vec<String> = self.inner.backends.read().await.keys().cloned().collect();
         for bid in backend_ids {
-            let (adapter_health, installed, loaded, remote) = {
+            let (adapter_health, installed, loaded, bindable, remote) = {
                 let backends = self.inner.backends.read().await;
                 let Some(be) = backends.get(&bid) else {
                     continue;
@@ -234,7 +251,13 @@ impl BackendManager {
                     be.adapter.loaded_models().await
                 };
                 *be.loaded.write().await = loaded.clone();
-                (h, installed, loaded, be.cfg.remote)
+                let bindable = if be.cfg.remote {
+                    None
+                } else {
+                    be.adapter.bindable_models().await
+                };
+                *be.bindable.write().await = bindable.clone();
+                (h, installed, loaded, bindable, be.cfg.remote)
             };
 
             let dep_ids: Vec<String> = {
@@ -261,7 +284,7 @@ impl BackendManager {
                 let dynamic = de.cfg.model_name == loom_core::config::DYNAMIC_MODEL && !remote;
                 let effective_model = if dynamic {
                     let resolved =
-                        Self::resolve_dynamic(&de.warned_multi, &did, &loaded, &installed);
+                        Self::resolve_dynamic(&de.warned_multi, &did, &bindable, &installed);
                     let mut rm = de.resolved_model.write().await;
                     if *rm != resolved {
                         if let Some(old) = rm.as_ref() {
@@ -432,7 +455,7 @@ impl BackendManager {
             Some(many) => {
                 if !warned_multi.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     warn!(deployment = %dep_id, models = ?many,
-                          "multiple models loaded — dynamic deployment binds the most recent");
+                          "multiple bindable models loaded — dynamic deployment binds the last entry");
                 }
                 many.last().cloned()
             }
@@ -565,6 +588,16 @@ impl BackendManager {
                 return Some(id.clone());
             }
         }
+        // 4) dynamically-bound model of an "auto" deployment — explicit
+        // static deployments already won above.
+        for (id, d) in deps.iter() {
+            if !d.cfg.enabled || d.cfg.model_name != loom_core::config::DYNAMIC_MODEL {
+                continue;
+            }
+            if d.resolved_model.read().await.as_deref() == Some(model) {
+                return Some(id.clone());
+            }
+        }
         None
     }
 
@@ -593,7 +626,7 @@ impl BackendManager {
     /// `"auto"` deployments — the stored resolution, recomputed live from the
     /// backend's model sets when health_pass has not populated it yet.
     async fn deployment_model(&self, dep_id: &str) -> Result<(String, String), AdapterError> {
-        let (backend_id, model_name, resolved) = {
+        let (backend_id, model_name, resolved, warned) = {
             let deps = self.inner.deployments.read().await;
             let Some(d) = deps.get(dep_id) else {
                 return Err(AdapterError::Protocol(format!(
@@ -601,30 +634,33 @@ impl BackendManager {
                 )));
             };
             let resolved = d.resolved_model.read().await.clone();
-            (d.backend_id.clone(), d.cfg.model_name.clone(), resolved)
+            (
+                d.backend_id.clone(),
+                d.cfg.model_name.clone(),
+                resolved,
+                d.warned_multi.clone(),
+            )
         };
-        if model_name != loom_core::config::DYNAMIC_MODEL {
-            return Ok((backend_id, model_name));
-        }
-        if let Some(m) = resolved {
-            return Ok((backend_id, m));
-        }
         let backends = self.inner.backends.read().await;
         let Some(be) = backends.get(&backend_id) else {
             return Err(AdapterError::Connect(format!(
                 "missing backend {backend_id}"
             )));
         };
-        let loaded = be.loaded.read().await.clone();
+        // "auto" on a remote/hosted backend has no resident-model concept —
+        // a manually-edited config falls through and upstreams the literal
+        // name, which fails cleanly there.
+        if model_name != loom_core::config::DYNAMIC_MODEL || be.cfg.remote {
+            return Ok((backend_id, model_name));
+        }
+        if let Some(m) = resolved {
+            return Ok((backend_id, m));
+        }
+        let loaded = be.bindable.read().await.clone();
         let installed = Some(be.models.read().await.clone());
-        Self::resolve_dynamic(
-            &std::sync::atomic::AtomicBool::new(false),
-            dep_id,
-            &loaded,
-            &installed,
-        )
-        .map(|m| (backend_id.clone(), m))
-        .ok_or_else(|| AdapterError::Connect("auto deployment: no model loaded".into()))
+        Self::resolve_dynamic(&warned, dep_id, &loaded, &installed)
+            .map(|m| (backend_id.clone(), m))
+            .ok_or_else(|| AdapterError::Connect("auto deployment: no model loaded".into()))
     }
 
     /// Unload a deployment's model from backend memory (pressure offload).

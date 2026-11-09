@@ -118,7 +118,12 @@ export default function BackendsPage() {
           api_key: "",
           deployments: [
             ...p.backend.deployments,
-            { ...EMPTY_DEP, id: "", name: p.model, model_name: p.model },
+            {
+              ...EMPTY_DEP,
+              id: "",
+              name: p.model === "auto" ? `${p.backend.name}-auto` : p.model,
+              model_name: p.model,
+            },
           ],
         },
       }),
@@ -243,7 +248,8 @@ export default function BackendsPage() {
                       <Plus size={12} />
                     </button>
                   ))}
-                  {b.detected_models!.some((m) => m.loaded) && (
+                  {b.detected_models!.some((m) => m.loaded) &&
+                    !b.deployments.some((d) => d.model_name === "auto") && (
                     <button
                       className="btn-ghost flex items-center gap-1 border border-accent/50 px-2 py-1 text-xs text-accent"
                       title="Deployment that always uses the model currently loaded in this backend"
