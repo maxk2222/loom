@@ -1037,7 +1037,7 @@ async fn run_request(
                 .map_err(|e| format!("upstream: {e}"))?
         };
 
-        let upstream_status = resp.status;
+        let upstream_status = u32::from(resp.status);
         let mut ttft_ms: i64 = 0;
         let mut usage = loom_core::openai::Usage::default();
         let mut upstream_err: Option<String> = None;
@@ -1048,7 +1048,9 @@ async fn run_request(
         loop {
             let next = tokio::select! {
                 _ = cancel.cancelled() => {
-                    let _ = data_tx.send(frames::end(true, "cancelled")).await;
+                    let _ = data_tx
+                        .send(frames::end(true, "cancelled", upstream_status))
+                        .await;
                     return Err("cancelled".to_string());
                 }
                 v = stream.next() => v,
@@ -1091,11 +1093,15 @@ async fn run_request(
         // A clean stream end only counts as success when the upstream call
         // itself succeeded — a 500 with a proxied error body must not reset
         // the crash counter (it was already counted at forward()).
-        if status == "done" && upstream_status < 400 {
+        if status == "done" && upstream_status < 400u32 {
             state.backends.record_success(&a.deployment_id);
         }
         let _ = data_tx
-            .send(frames::end(status == "cancelled", &finish_reason))
+            .send(frames::end(
+                status == "cancelled",
+                &finish_reason,
+                upstream_status,
+            ))
             .await;
         Ok::<_, String>((status.to_string(), upstream_err, usage, ttft_ms))
     }

@@ -305,11 +305,12 @@ pub mod frames {
         }
     }
 
-    pub fn end(cancelled: bool, finish_reason: &str) -> DataFrame {
+    pub fn end(cancelled: bool, finish_reason: &str, upstream_status: u32) -> DataFrame {
         DataFrame {
             frame: Some(data_frame::Frame::End(End {
                 cancelled,
                 finish_reason: finish_reason.into(),
+                upstream_status,
             })),
         }
     }

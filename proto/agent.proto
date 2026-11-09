@@ -283,6 +283,7 @@ message FrameHead {
 message End {
   bool cancelled = 1;
   string finish_reason = 2;          // mirror of upstream finish reason if known
+  uint32 upstream_status = 3;        // HTTP status of the upstream response (0 = unknown)
 }
 
 message FrameError {

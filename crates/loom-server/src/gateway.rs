@@ -304,7 +304,8 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
     };
 
     let RequestOutcomeParts {
-        rx,
+        mut rx,
+        upstream_status,
         end_rx,
         trace,
         dep,
@@ -405,6 +406,41 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
             .unwrap_or_else(|_| err(ErrorCode::Internal, "response build", &request_id));
     }
 
+    // Non-streaming text responses are fully buffered anyway, so the real
+    // upstream status can be returned — a crashed backend's 500 arrives as
+    // 500 (with its own error body), not as a misleading 200. Streaming
+    // responses cannot do this: response headers are already on the wire
+    // when the upstream status becomes known.
+    if !is_sse {
+        let mut buf = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            match chunk {
+                Ok(b) => buf.extend_from_slice(&b),
+                Err(e) => {
+                    return err(ErrorCode::UpstreamError, e.to_string(), &request_id);
+                }
+            }
+        }
+        let us = upstream_status.load(std::sync::atomic::Ordering::Relaxed);
+        let code = if (100..=599).contains(&us) {
+            us as u16
+        } else {
+            200
+        };
+        let mut rb = Response::builder()
+            .status(StatusCode::from_u16(code).unwrap_or(StatusCode::OK))
+            .header("content-type", "application/json")
+            .header("x-request-id", &request_id);
+        if let Some(ch) = &routed {
+            rb = rb
+                .header("x-loom-routed-model", &ch.model)
+                .header("x-loom-route-reason", &ch.reason);
+        }
+        return rb
+            .body(Body::from(buf))
+            .unwrap_or_else(|_| err(ErrorCode::Internal, "response build", &request_id));
+    }
+
     let stream = async_stream::stream! {
         let mut rx = rx;
         let mut first = true;
@@ -495,6 +531,7 @@ async fn multipart_model(body: &[u8], content_type: &str) -> Option<String> {
 
 struct RequestOutcomeParts {
     rx: tokio::sync::mpsc::Receiver<Result<Bytes, SchedErr>>,
+    upstream_status: std::sync::Arc<std::sync::atomic::AtomicU32>,
     end_rx: tokio::sync::oneshot::Receiver<EndMeta>,
     trace: serde_json::Value,
     dep: String,
@@ -506,6 +543,7 @@ struct RequestOutcomeParts {
 fn split(o: crate::scheduler::RequestOutcome) -> RequestOutcomeParts {
     RequestOutcomeParts {
         rx: o.response_rx,
+        upstream_status: o.upstream_status,
         end_rx: o.end_rx,
         trace: o.routing_trace,
         dep: o.deployment_id,

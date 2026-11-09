@@ -66,6 +66,9 @@ pub struct PendingRequest {
 
 pub struct RequestOutcome {
     pub response_rx: mpsc::Receiver<Result<bytes::Bytes, SchedErr>>,
+    /// HTTP status reported by the client in the data-stream `End` frame
+    /// (0 = unknown/older client).
+    pub upstream_status: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub end_rx: oneshot::Receiver<EndMeta>,
     pub routing_trace: Value,
     pub deployment_id: String,
@@ -883,9 +886,11 @@ impl Scheduler {
         // Bridge task: send request payload via outbound frames, read
         // response_chunk frames from inbound into resp channel.
         let (resp_tx, resp_rx) = mpsc::channel::<Result<bytes::Bytes, SchedErr>>(32);
+        let upstream_status = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cancel = CancellationToken::new();
         {
             let body = req.body.clone();
+            let up_status = upstream_status.clone();
             let cancel2 = cancel.clone();
             let rt = self.inner.rt.clone();
             let sessions2 = self.inner.sessions.clone();
@@ -946,8 +951,10 @@ impl Scheduler {
                             break;
                         }
                         Some(Ok(loom_protocol::pb::DataFrame {
-                            frame: Some(loom_protocol::pb::data_frame::Frame::End(_)),
+                            frame: Some(loom_protocol::pb::data_frame::Frame::End(e)),
                         })) => {
+                            up_status
+                                .store(e.upstream_status, std::sync::atomic::Ordering::Relaxed);
                             tracing::debug!(req = %rid_for_release, "end frame");
                             break;
                         }
@@ -974,6 +981,7 @@ impl Scheduler {
         }
         Ok(RequestOutcome {
             response_rx: resp_rx,
+            upstream_status,
             end_rx,
             routing_trace: json!({}),
             deployment_id: dep_id,
