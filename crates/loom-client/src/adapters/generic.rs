@@ -181,6 +181,24 @@ impl BackendAdapter for GenericAdapter {
         Some(out)
     }
 
+    /// Installed non-embedding models — `/v1/models` ordering is unstable
+    /// (LM Studio puts resident models first), so eligibility must come
+    /// from the typed registry, not list position.
+    async fn bindable_installed(&self) -> Option<Vec<String>> {
+        let url = format!("{}/api/v1/models", self.endpoint());
+        let v = common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(5))
+            .await
+            .ok()?;
+        Some(
+            v["models"]
+                .as_array()?
+                .iter()
+                .filter(|m| m["type"].as_str() != Some("embedding"))
+                .filter_map(|m| m["key"].as_str().map(String::from))
+                .collect(),
+        )
+    }
+
     async fn health(&self) -> Health {
         let url = format!("{}/v1/models", self.endpoint());
         match common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(5)).await {

@@ -43,6 +43,9 @@ struct BackendEntry {
     /// `auto`-binding candidates (`bindable_models()`): resident models
     /// minus kinds that cannot serve chat (e.g. LM Studio embeddings).
     bindable: Arc<RwLock<Option<Vec<String>>>>,
+    /// Installed chat-capable models in preference order — the `auto`
+    /// fallback when nothing is loaded (`bindable_installed()`).
+    bindable_installed: Arc<RwLock<Vec<String>>>,
 }
 
 struct DeploymentEntry {
@@ -146,6 +149,7 @@ impl BackendManager {
                     models,
                     loaded: Arc::new(RwLock::new(None)),
                     bindable: Arc::new(RwLock::new(None)),
+                    bindable_installed: Arc::new(RwLock::new(Vec::new())),
                 },
             );
 
@@ -229,7 +233,7 @@ impl BackendManager {
         // Probe each backend; mark deployments accordingly.
         let backend_ids: Vec<String> = self.inner.backends.read().await.keys().cloned().collect();
         for bid in backend_ids {
-            let (adapter_health, installed, loaded, bindable, remote) = {
+            let (adapter_health, installed, loaded, bindable, installed_bindable, remote) = {
                 let backends = self.inner.backends.read().await;
                 let Some(be) = backends.get(&bid) else {
                     continue;
@@ -257,7 +261,23 @@ impl BackendManager {
                     be.adapter.bindable_models().await
                 };
                 *be.bindable.write().await = bindable.clone();
-                (h, installed, loaded, bindable, be.cfg.remote)
+                let installed_bindable: Vec<String> = if be.cfg.remote {
+                    Vec::new()
+                } else {
+                    match be.adapter.bindable_installed().await {
+                        Some(v) => v,
+                        None => installed.clone().unwrap_or_default(),
+                    }
+                };
+                *be.bindable_installed.write().await = installed_bindable.clone();
+                (
+                    h,
+                    installed,
+                    loaded,
+                    bindable,
+                    installed_bindable,
+                    be.cfg.remote,
+                )
             };
 
             let dep_ids: Vec<String> = {
@@ -283,8 +303,14 @@ impl BackendManager {
                 let health_ok = adapter_health == Health::Healthy;
                 let dynamic = de.cfg.model_name == loom_core::config::DYNAMIC_MODEL && !remote;
                 let effective_model = if dynamic {
-                    let resolved =
-                        Self::resolve_dynamic(&de.warned_multi, &did, &bindable, &installed);
+                    let current = de.resolved_model.read().await.clone();
+                    let resolved = Self::resolve_dynamic(
+                        &de.warned_multi,
+                        &did,
+                        &bindable,
+                        &installed_bindable,
+                        current.as_deref(),
+                    );
                     let mut rm = de.resolved_model.write().await;
                     if *rm != resolved {
                         if let Some(old) = rm.as_ref() {
@@ -438,20 +464,36 @@ impl BackendManager {
         (changed, inv_changed)
     }
 
-    /// Resolve a `model_name == "auto"` deployment: the last entry of the
-    /// backend's loaded set wins (registry order — vLLM's single loaded
-    /// model is the common case), falling back to the first listed model
-    /// when the backend exposes no loaded-set. Multiple loaded models log
-    /// a once-per-deployment warning.
+    /// Resolve a `model_name == "auto"` deployment.
+    ///
+    /// Sticky: while the currently-bound model can still serve it stays
+    /// bound — co-resident models loading/unloading must not flap the
+    /// binding (each swap invalidates probed caps). Otherwise the last
+    /// entry of the backend's bindable set wins (registry order — vLLM's
+    /// single loaded model is the common case). With nothing bindable
+    /// loaded, or no loaded-set at all, falls back to the first installed
+    /// chat-capable model (JIT backends load on request).
     fn resolve_dynamic(
         warned_multi: &std::sync::atomic::AtomicBool,
         dep_id: &str,
-        loaded: &Option<Vec<String>>,
-        installed: &Option<Vec<String>>,
+        bindable: &Option<Vec<String>>,
+        installed_bindable: &[String],
+        current: Option<&str>,
     ) -> Option<String> {
-        match loaded.as_deref() {
+        if let Some(c) = current {
+            let still = match bindable {
+                Some(b) => b.iter().any(|m| m == c),
+                // Loaded-set unknown → cannot prove eviction; hold the
+                // binding while the model is still installed.
+                None => installed_bindable.iter().any(|m| m == c),
+            };
+            if still {
+                return Some(c.to_string());
+            }
+        }
+        match bindable.as_deref() {
             Some([only]) => Some(only.clone()),
-            Some([]) => installed.as_ref().and_then(|l| l.first().cloned()),
+            Some([]) | None => installed_bindable.first().cloned(),
             Some(many) => {
                 if !warned_multi.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     warn!(deployment = %dep_id, models = ?many,
@@ -459,9 +501,6 @@ impl BackendManager {
                 }
                 many.last().cloned()
             }
-            // No loaded-set (plain OpenAI servers): the listed set IS what's
-            // served — first entry.
-            None => installed.as_ref().and_then(|l| l.first().cloned()),
         }
     }
 
@@ -657,8 +696,8 @@ impl BackendManager {
             return Ok((backend_id, m));
         }
         let loaded = be.bindable.read().await.clone();
-        let installed = Some(be.models.read().await.clone());
-        Self::resolve_dynamic(&warned, dep_id, &loaded, &installed)
+        let installed = be.bindable_installed.read().await.clone();
+        Self::resolve_dynamic(&warned, dep_id, &loaded, &installed, resolved.as_deref())
             .map(|m| (backend_id.clone(), m))
             .ok_or_else(|| AdapterError::Connect("auto deployment: no model loaded".into()))
     }
@@ -862,27 +901,59 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
-    fn dyn_resolve(loaded: Option<Vec<&str>>, installed: Option<Vec<&str>>) -> Option<String> {
+    fn dyn_resolve(
+        bindable: Option<Vec<&str>>,
+        installed_bindable: Vec<&str>,
+        current: Option<&str>,
+    ) -> Option<String> {
         let warned = AtomicBool::new(false);
-        let l = loaded.map(|v| v.into_iter().map(String::from).collect());
-        let i = installed.map(|v| v.into_iter().map(String::from).collect());
-        BackendManager::resolve_dynamic(&warned, "dep", &l, &i)
+        let b = bindable.map(|v| v.into_iter().map(String::from).collect());
+        let ib: Vec<String> = installed_bindable.into_iter().map(String::from).collect();
+        BackendManager::resolve_dynamic(&warned, "dep", &b, &ib, current)
     }
 
     #[test]
     fn resolve_dynamic_single_loaded() {
         assert_eq!(
-            dyn_resolve(Some(vec!["m1"]), Some(vec!["m1", "m2"])).as_deref(),
+            dyn_resolve(Some(vec!["m1"]), vec!["m1", "m2"], None).as_deref(),
             Some("m1")
         );
     }
 
     #[test]
     fn resolve_dynamic_multi_loaded_binds_last() {
-        // vLLM-style: last loaded entry wins; order is the backend's
-        // registry order, deterministic across probes.
+        // vLLM-style: last bindable entry wins (registry order is
+        // deterministic across probes).
         assert_eq!(
-            dyn_resolve(Some(vec!["m1", "m2"]), Some(vec!["m1", "m2", "m3"])).as_deref(),
+            dyn_resolve(Some(vec!["m1", "m2"]), vec!["m1", "m2", "m3"], None).as_deref(),
+            Some("m2")
+        );
+    }
+
+    #[test]
+    fn resolve_dynamic_sticky_keeps_current() {
+        // A co-resident model loading must not flap the binding while the
+        // bound model still serves.
+        assert_eq!(
+            dyn_resolve(Some(vec!["m1", "m2"]), vec!["m1", "m2"], Some("m1")).as_deref(),
+            Some("m1")
+        );
+    }
+
+    #[test]
+    fn resolve_dynamic_rebinds_when_current_evicted() {
+        assert_eq!(
+            dyn_resolve(Some(vec!["m2"]), vec!["m1", "m2"], Some("m1")).as_deref(),
+            Some("m2")
+        );
+    }
+
+    #[test]
+    fn resolve_dynamic_sticky_unknown_loaded_set() {
+        // No loaded-set → cannot prove eviction; hold the binding while
+        // the model remains installed.
+        assert_eq!(
+            dyn_resolve(None, vec!["m1", "m2"], Some("m2")).as_deref(),
             Some("m2")
         );
     }
@@ -890,7 +961,7 @@ mod tests {
     #[test]
     fn resolve_dynamic_empty_loaded_falls_back_to_first_installed() {
         assert_eq!(
-            dyn_resolve(Some(vec![]), Some(vec!["m1", "m2"])).as_deref(),
+            dyn_resolve(Some(vec![]), vec!["m1", "m2"], None).as_deref(),
             Some("m1")
         );
     }
@@ -899,14 +970,14 @@ mod tests {
     fn resolve_dynamic_no_loaded_set_uses_listed() {
         // Plain OpenAI servers: loaded-set unknown → listed set is served.
         assert_eq!(
-            dyn_resolve(None, Some(vec!["m1", "m2"])).as_deref(),
+            dyn_resolve(None, vec!["m1", "m2"], None).as_deref(),
             Some("m1")
         );
     }
 
     #[test]
     fn resolve_dynamic_nothing_available() {
-        assert_eq!(dyn_resolve(Some(vec![]), None), None);
-        assert_eq!(dyn_resolve(None, None), None);
+        assert_eq!(dyn_resolve(Some(vec![]), vec![], None), None);
+        assert_eq!(dyn_resolve(None, vec![], None), None);
     }
 }

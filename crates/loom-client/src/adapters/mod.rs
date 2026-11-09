@@ -87,6 +87,14 @@ pub trait BackendAdapter: Send + Sync {
         self.loaded_models().await
     }
 
+    /// Installed models eligible for `auto` binding, in preference order —
+    /// the fallback when nothing is loaded. `None` (default) means the
+    /// full `list_models()` set is eligible. LM Studio filters out
+    /// embedding-only registry entries.
+    async fn bindable_installed(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// Probe capabilities of a specific model on this backend.
     async fn probe_capabilities(&self, model: &str) -> Result<Capabilities, AdapterError>;
 
