@@ -81,7 +81,7 @@ export default function OverviewPage() {
   // "YYYY-MM-DD" beyond that.
   const tickFmt = win === "24h" ? fmtTime : win === "7d" || win === "30d" ? fmtDayT : fmtDay;
   const buckets = series.data?.buckets ?? [];
-  const chart = buckets.map(b => ({ t: tickFmt(b.t), n: b.requests }));
+  const chart = buckets.map(b => ({ t: tickFmt(b.t), n: b.requests, tok: b.prompt_tokens + b.completion_tokens }));
   const ttftChart = buckets.filter(b => b.ttft_ms > 0).map(b => ({ t: tickFmt(b.t), ttft: Math.round(b.ttft_ms) }));
   const latChart = buckets.map(b => ({ t: tickFmt(b.t), p50: Math.round(b.p50_ms), p95: Math.round(b.p95_ms), p99: Math.round(b.p99_ms) }));
   const tokSeries = buckets.map(b => ({
@@ -222,13 +222,16 @@ export default function OverviewPage() {
         <div className="card p-4">
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">Requests</div>
           <ResponsiveContainer width="100%" height={160}>
-            <AreaChart data={chart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+            <ComposedChart data={chart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
               <CartesianGrid stroke="#1c2740" vertical={false} />
               <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={fmtNum} />
+              <YAxis yAxisId="l" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={fmtNum} />
+              <YAxis yAxisId="r" orientation="right" tick={{ fontSize: 10, fill: "#8fb3d9" }} tickLine={false} axisLine={false} tickFormatter={fmtNum} />
               <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
-              <Area type="monotone" dataKey="n" stroke="#3d6fae" fill="#3d6fae" fillOpacity={0.16} strokeWidth={2} isAnimationActive={false} />
-            </AreaChart>
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Area yAxisId="l" type="monotone" dataKey="n" name="requests" stroke="#3d6fae" fill="#3d6fae" fillOpacity={0.16} strokeWidth={2} isAnimationActive={false} />
+              <Area yAxisId="r" type="monotone" dataKey="tok" name="tokens" stroke="#8fb3d9" fill="none" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+            </ComposedChart>
           </ResponsiveContainer>
         </div>
       )}

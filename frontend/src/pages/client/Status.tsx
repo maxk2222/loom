@@ -231,6 +231,26 @@ function ClientCharts() {
     for (const r of rows) m.set(r.class, (m.get(r.class) ?? 0) + 1);
     return [...m.entries()].map(([name, n]) => ({ name: name === "local" ? "tier-1 local" : "tier-2 shared", n }));
   })();
+  // Time-bucketed requests + total tokens — mirrors the server's requests
+  // chart. Window "all" derives its span from the oldest sample.
+  const reqSeries = (() => {
+    if (rows.length === 0) return [];
+    const span = Number.isFinite(WIN_MS[win])
+      ? WIN_MS[win]
+      : Date.now() - rows[0].ended_unix_ms;
+    const end = Date.now();
+    const N = Math.min(30, Math.max(6, Math.floor(rows.length / 3)));
+    const bw = span / N;
+    const bkt = Array.from({ length: N }, (_, i) => ({
+      t: fmtTimeS(end - span + (i + 0.5) * bw), n: 0, tok: 0,
+    }));
+    for (const r of rows) {
+      const i = Math.min(N - 1, Math.max(0, Math.floor((r.ended_unix_ms - (end - span)) / bw)));
+      bkt[i].n++;
+      bkt[i].tok += (r.prompt_tokens ?? 0) + (r.completion_tokens ?? 0);
+    }
+    return bkt;
+  })();
   const latChart = rows.slice(-30).map((r: any) => ({ t: fmtTimeS(r.ended_unix_ms), ms: r.duration_ms }));
   const tokRows = rows.slice(-30).map((r: any) => ({
     t: fmtTimeS(r.ended_unix_ms),
@@ -247,6 +267,23 @@ function ClientCharts() {
       <div className="text-xs font-medium uppercase tracking-wide text-muted">Request analytics</div>
       <WindowPicker value={win} onChange={setWin} options={CLIENT_WINDOWS} />
     </div>
+    {reqSeries.length > 0 && (
+      <div className="card p-4">
+        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">requests over time</div>
+        <ResponsiveContainer width="100%" height={150}>
+          <ComposedChart data={reqSeries} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+            <CartesianGrid stroke="#1c2740" vertical={false} />
+            <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+            <YAxis yAxisId="l" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={fmtNum} />
+            <YAxis yAxisId="r" orientation="right" tick={{ fontSize: 10, fill: "#8fb3d9" }} tickLine={false} axisLine={false} tickFormatter={fmtNum} />
+            <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Area yAxisId="l" type="monotone" dataKey="n" name="requests" stroke="#3d6fae" fill="#3d6fae" fillOpacity={0.16} strokeWidth={2} isAnimationActive={false} />
+            <Area yAxisId="r" type="monotone" dataKey="tok" name="tokens" stroke="#8fb3d9" fill="none" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+    )}
     <div className="grid gap-4 md:grid-cols-2">
       {byClass.length > 0 && (
         <div className="card p-4">
