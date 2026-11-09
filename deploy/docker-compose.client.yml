@@ -53,6 +53,15 @@ services:
       - "127.0.0.1:8391:8391"
     # Host-wide stats: with no memory limit the monitor sees real host
     # pressure via procfs. Setting mem_limit scopes ram_pct to the container.
+    # NVIDIA hosts (needs container toolkit): uncomment for GPU utilization
+    # in the dashboard — monitoring only, the client never computes on GPU.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
   # Optional: run Ollama as a sidecar in the same compose project instead of
   # on the host. Then use LOOM_BACKEND_URL=http://ollama:11434.

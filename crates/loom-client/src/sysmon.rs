@@ -206,10 +206,17 @@ async fn probe_nvidia() -> Option<GpuStats> {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    // Aggregate across GPUs: max utilization, summed memory.
+    // Aggregate across GPUs: max utilization, summed memory. Fields the
+    // driver reports as "[N/A]" (e.g. FB memory on unified-memory GB10)
+    // stay None instead of collapsing to a bogus 0.
     let mut name = String::new();
-    let mut util = 0.0f32;
-    let (mut used, mut total) = (0u64, 0u64);
+    let mut util: Option<f32> = None;
+    let (mut used, mut total) = (None::<u64>, None::<u64>);
+    let acc = |slot: &mut Option<u64>, s: &str| {
+        if let Ok(v) = s.parse::<u64>() {
+            *slot = Some(slot.unwrap_or(0) + v * 1_048_576); // MiB → B
+        }
+    };
     for line in text.lines() {
         let cols: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
         if cols.len() < 4 {
@@ -218,15 +225,17 @@ async fn probe_nvidia() -> Option<GpuStats> {
         if name.is_empty() {
             name = cols[0].to_string();
         }
-        util = util.max(cols[1].parse().unwrap_or(0.0));
-        used += cols[2].parse::<u64>().unwrap_or(0) * 1_048_576; // MiB → B
-        total += cols[3].parse::<u64>().unwrap_or(0) * 1_048_576;
+        if let Ok(v) = cols[1].parse::<f32>() {
+            util = Some(util.map_or(v, |u| u.max(v)));
+        }
+        acc(&mut used, cols[2]);
+        acc(&mut total, cols[3]);
     }
     (!name.is_empty()).then_some(GpuStats {
         name,
-        util_pct: Some(util),
-        mem_used_bytes: Some(used),
-        mem_total_bytes: Some(total),
+        util_pct: util,
+        mem_used_bytes: used,
+        mem_total_bytes: total,
     })
 }
 

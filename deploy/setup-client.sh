@@ -220,11 +220,23 @@ fi
 # --- config.toml ------------------------------------------------------------------
 CFG="$DIR/config.toml"
 ENROLLED=0; KEEP_ID=""; KEEP_CRED=""
-if [ -s "$CFG" ] && grep -q '^client_id = "[0-9a-f]' "$CFG"; then
-    ENROLLED=1
-    KEEP_ID=$(grep -m1 '^client_id = "' "$CFG" || true)
-    KEEP_CRED=$(grep -m1 '^device_credential = "' "$CFG" || true)
+# The client persists its device credential in the state VOLUME, not the
+# seed config — on --reconfigure recover it from wherever it lives:
+# running container → named volume → seed file.
+EFF_CFG=""
+if [ -f "$DIR/docker-compose.yml" ]; then
+    CTR=$(docker compose -f "$DIR/docker-compose.yml" ps -q 2>/dev/null | head -1 || true)
+    [ -n "$CTR" ] && EFF_CFG=$(docker exec "$CTR" cat /etc/loom-client/config.toml 2>/dev/null || true)
+    if ! printf '%s' "$EFF_CFG" | grep -q 'device_credential = "dev_'; then
+        VPROJ=$(grep -m1 '^name:' "$DIR/docker-compose.yml" | awk '{print $2}' || true)
+        [ -n "$VPROJ" ] && EFF_CFG=$(docker run --rm -v "${VPROJ}_loom-client-state:/v" alpine \
+            cat /v/config.toml 2>/dev/null || true)
+    fi
 fi
+printf '%s' "$EFF_CFG" | grep -q 'device_credential = "dev_' || EFF_CFG=$(cat "$CFG" 2>/dev/null || true)
+KEEP_ID=$(printf '%s\n' "$EFF_CFG" | grep -m1 '^client_id = "' || true)
+KEEP_CRED=$(printf '%s\n' "$EFF_CFG" | grep -m1 '^device_credential = "' || true)
+{ [ -s "$CFG" ] && grep -q '^client_id = "[0-9a-f]' "$CFG"; } || [ -n "$KEEP_ID" ] && ENROLLED=1
 if [ "$ENROLLED" = "1" ] && [ "$RECONFIGURE" = "0" ]; then
     ok "existing enrolled config reused (client_id present)"
     { [ "$PROBE_OLLAMA" = "0" ] || [ "$PROBE_VLLM" = "0" ] || [ "$PROBE_LMS" = "0" ] || [ "$ADD_AUTO" = "1" ] || [ -n "$MODELS" ]; } && \
@@ -280,6 +292,21 @@ uname -s | grep -qi darwin && NET="    extra_hosts:
     ports:
       - \"127.0.0.1:$LAPI_PORT:8391\""
 
+# GPU monitoring: give the container read access to the NVIDIA driver so
+# sysmon can report GPU utilization (e.g. DGX GB10). Only when a GPU and
+# the container toolkit exist — the container never computes on the GPU.
+GPU_BLOCK=""
+if ! uname -s | grep -qi darwin && [ -e /dev/nvidia0 ] && command -v nvidia-smi >/dev/null; then
+    GPU_BLOCK="    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]"
+    ok "nvidia gpu detected — container gets monitoring access"
+fi
+
 # Project name derives from the install dir so multiple client installs on
 # one host never adopt/replace each other's containers.
 BASE="$(basename "$DIR" | tr -cd 'a-zA-Z0-9_-')"
@@ -293,7 +320,8 @@ services:
   client:
 $BUILD_BLOCK
     restart: unless-stopped
-$NET
+${GPU_BLOCK:+$GPU_BLOCK
+}$NET
     environment:
       LOOM_ENROLL_TOKEN: \${LOOM_ENROLL_TOKEN:-}
       LOOM_CONFIG: /etc/loom-client/config.toml
