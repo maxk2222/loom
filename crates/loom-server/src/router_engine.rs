@@ -75,6 +75,86 @@ pub fn user_excerpt(body: &Value, max_chars: usize) -> String {
     text
 }
 
+/// True when an effort value means "reasoning on" — every off-spelling
+/// (none/minimal/off/false/0) maps to disabled, everything else enables.
+fn reasoning_on(effort: &Value) -> bool {
+    match effort {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_i64().unwrap_or(0) > 0,
+        Value::String(s) => !matches!(
+            s.as_str(),
+            "" | "none" | "minimal" | "off" | "false" | "disabled"
+        ),
+        _ => false,
+    }
+}
+
+/// Write the reasoning intent into every dialect the fleet understands:
+/// OpenAI flat `reasoning_effort`, Responses-style `reasoning.effort`,
+/// the Qwen3 chat-template switch `chat_template_kwargs.enable_thinking`
+/// (vLLM/LM Studio/sglang), and Ollama's `think`. Unknown fields are
+/// ignored by each backend; backends that understand any one dialect
+/// get a consistent on/off instead of a silently ignored effort.
+fn set_reasoning_fields(b: &mut serde_json::Map<String, Value>, effort: Value) {
+    let on = reasoning_on(&effort);
+    let eff = if on {
+        effort.clone()
+    } else {
+        Value::from("none")
+    };
+    b.insert("reasoning_effort".into(), eff.clone());
+    match b.get_mut("reasoning") {
+        Some(Value::Object(o)) => {
+            o.insert("effort".into(), eff);
+        }
+        Some(slot) => *slot = json!({"effort": eff}),
+        None => {
+            b.insert("reasoning".into(), json!({"effort": eff}));
+        }
+    }
+    match b.get_mut("chat_template_kwargs") {
+        Some(Value::Object(o)) => {
+            o.insert("enable_thinking".into(), Value::from(on));
+        }
+        Some(slot) => *slot = json!({"enable_thinking": on}),
+        None => {
+            b.insert(
+                "chat_template_kwargs".into(),
+                json!({"enable_thinking": on}),
+            );
+        }
+    }
+    b.insert("think".into(), Value::from(on));
+}
+
+/// The classifier call body. Reasoning defaults OFF — the engine only
+/// names a member, and chain-of-thought just burns seconds of routing
+/// latency (measured: ~3.3s on a reasoning-heavy LM Studio 9b vs ~0.4s
+/// on a same-host vLLM). `engine_reasoning` in the router config opts
+/// back in ("low"|"medium"|"high"|"max").
+fn classify_body(router_model: &str, system: &str, excerpt: &str, cfg: &Value) -> Value {
+    let mut b = json!({
+        "model": router_model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": excerpt},
+        ],
+        "temperature": 0,
+        // Engines that still reason despite the off-switches need headroom —
+        // 24-48 tokens get eaten by chain-of-thought before the member name.
+        "max_tokens": 256,
+        "stream": false,
+    });
+    let cfg_effort = cfg_str(cfg, "engine_reasoning");
+    let effort = if cfg_effort.is_empty() {
+        Value::from("none")
+    } else {
+        Value::from(cfg_effort)
+    };
+    set_reasoning_fields(b.as_object_mut().unwrap(), effort);
+    b
+}
+
 /// Run the classifier once: builds the routing prompt, submits a tiny
 /// non-streaming chat request to `router_model` through the normal scheduler
 /// path (queueing, readiness gates, fallbacks all apply), returns raw text.
@@ -142,21 +222,7 @@ async fn classify(
     if let Some(hit) = cache_get(cache_key) {
         return Ok(hit);
     }
-    let body = json!({
-        "model": router_model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": excerpt},
-        ],
-        "temperature": 0,
-        // Prefer the classifier quiet: reasoning engines that honor
-        // reasoning_effort skip thinking entirely. Those that ignore it still
-        // need headroom — 24-48 tokens get eaten by chain-of-thought and the
-        // answer (the member name) comes back empty.
-        "reasoning_effort": "none",
-        "max_tokens": 256,
-        "stream": false,
-    });
+    let body = classify_body(router_model, &system, excerpt, cfg);
     let now = crate::client_registry::now_ms();
     let pending = PendingRequest {
         request_id: RequestId::new(),
@@ -569,8 +635,9 @@ fn effort_at_least(effort: u8, v: &Value) -> bool {
 /// `reasoning_effort` is special-cased: the lowest escalation tier disables
 /// reasoning, and "off" must stick regardless of which request shape the
 /// caller used — flat `reasoning_effort` or Responses-style
-/// `reasoning.effort`. Both fields are set so an object-form override cannot
-/// silently re-enable reasoning against a flat "none".
+/// `reasoning.effort`. All dialects are set (`set_reasoning_fields`) so an
+/// object-form override or a template-only backend cannot silently
+/// re-enable reasoning against a flat "none".
 /// `model`/`messages`/`stream` can never be hijacked by member config.
 pub fn merge_set_overrides(body: &mut Value, set: &Value) {
     let (Some(b), Some(over)) = (body.as_object_mut(), set.as_object()) else {
@@ -580,18 +647,10 @@ pub fn merge_set_overrides(body: &mut Value, set: &Value) {
         if matches!(k.as_str(), "model" | "messages" | "stream") {
             continue;
         }
-        b.insert(k.clone(), v.clone());
         if k == "reasoning_effort" {
-            let effort = v.clone();
-            match b.get_mut("reasoning") {
-                Some(Value::Object(o)) => {
-                    o.insert("effort".into(), effort);
-                }
-                Some(slot) => *slot = json!({"effort": effort}),
-                None => {
-                    b.insert("reasoning".into(), json!({"effort": effort}));
-                }
-            }
+            set_reasoning_fields(b, v.clone());
+        } else {
+            b.insert(k.clone(), v.clone());
         }
     }
 }
@@ -1065,13 +1124,17 @@ mod tests {
         assert_eq!(body["reasoning_effort"], "none");
         assert_eq!(body["reasoning"]["effort"], "none");
         assert_eq!(body["reasoning"]["summary"], "auto"); // untouched keys kept
-                                                          // Object form created when absent; scalar `reasoning` replaced.
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(body["think"], false);
+        // Object form created when absent; scalar `reasoning` replaced.
         let mut b2 = json!({"model": "x"});
         merge_set_overrides(
             &mut b2,
             &json!({"reasoning_effort": "high", "temperature": 0.2}),
         );
         assert_eq!(b2["reasoning"]["effort"], "high");
+        assert_eq!(b2["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(b2["think"], true);
         assert_eq!(b2["temperature"], 0.2);
         let mut b3 = json!({"reasoning": "garbage"});
         merge_set_overrides(&mut b3, &json!({"reasoning_effort": "none"}));
@@ -1097,5 +1160,29 @@ mod tests {
         let ch = heuristic_choice(&c, &req_metrics(&body)).unwrap();
         assert_eq!(ch.set["temperature"], 0.1);
         assert_eq!(ch.set["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn classifier_reasoning_off_by_default() {
+        let b = classify_body("vm-flash", "sys", "excerpt", &json!({}));
+        assert_eq!(b["reasoning_effort"], "none");
+        assert_eq!(b["reasoning"]["effort"], "none");
+        assert_eq!(b["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(b["think"], false);
+        assert_eq!(b["stream"], false);
+    }
+
+    #[test]
+    fn classifier_reasoning_opt_in_via_config() {
+        for off in ["none", "off", "false"] {
+            let b = classify_body("vm-flash", "s", "e", &json!({"engine_reasoning": off}));
+            assert_eq!(b["reasoning_effort"], "none");
+            assert_eq!(b["chat_template_kwargs"]["enable_thinking"], false);
+        }
+        let b = classify_body("vm-flash", "s", "e", &json!({"engine_reasoning": "high"}));
+        assert_eq!(b["reasoning_effort"], "high");
+        assert_eq!(b["reasoning"]["effort"], "high");
+        assert_eq!(b["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(b["think"], true);
     }
 }
