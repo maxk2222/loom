@@ -162,11 +162,10 @@ impl Auth {
     /// Entries may be virtual-model ids (UUIDs, as stored by the admin UI) or
     /// api_names — both are accepted.
     pub async fn model_allowed(&self, ctx: &ApiKeyCtx, vm_api_name: &str) -> Result<bool> {
-        if ctx.allowed_models.iter().any(|m| m == "*") {
-            return Ok(true);
-        }
-        // Resolve once: needed for id-entries in allowed_models and for the
-        // project-grant fallback.
+        // Resolve once: existence gate (also for "*" — a wildcard grants all
+        // *existing* models, unknown names must still 404 rather than fall
+        // through to a scheduling 503), id-entries in allowed_models, and
+        // the project-grant fallback.
         let vm_id: Option<String> = sqlx::query_scalar(
             "SELECT id::text FROM virtual_models WHERE api_name = $1 AND enabled = true",
         )
@@ -174,6 +173,9 @@ impl Auth {
         .fetch_optional(&self.db)
         .await?;
         let Some(vm_id) = vm_id else { return Ok(false) };
+        if ctx.allowed_models.iter().any(|m| m == "*") {
+            return Ok(true);
+        }
         if !ctx.allowed_models.is_empty() {
             return Ok(ctx
                 .allowed_models
