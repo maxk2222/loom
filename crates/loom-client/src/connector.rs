@@ -7,6 +7,7 @@
 //!   bytes flow client->server.
 //! - Reconnect with exponential backoff + session recovery + config full-sync.
 
+use crate::adapters::AdapterError;
 use crate::backend_manager::BackendManager;
 use crate::config::ConfigStore;
 use crate::scheduler::{LocalScheduler, RequestClass};
@@ -1042,6 +1043,7 @@ async fn run_request(
         let mut usage = loom_core::openai::Usage::default();
         let mut upstream_err: Option<String> = None;
         let mut finish_reason = String::new();
+        let mut saw_output = false;
         let mut stream = resp.stream;
 
         // Bridge upstream bytes -> response_chunk frames, until End.
@@ -1063,7 +1065,7 @@ async fn run_request(
                     }
                     debug!(req = %request_id, n = bytes.len(), "upstream chunk → data stream");
                     // Opportunistically parse usage/finish from SSE tail.
-                    inspect_sse_tail(&bytes, &mut usage, &mut finish_reason);
+                    inspect_sse_tail(&bytes, &mut usage, &mut finish_reason, &mut saw_output);
                     if data_tx
                         .send(frames::response_chunk(bytes.to_vec()))
                         .await
@@ -1083,6 +1085,19 @@ async fn run_request(
             }
         }
 
+        // A wedged backend can answer 200 with zero tokens and no content —
+        // count that zombie response as a crash so the breaker still trips.
+        if upstream_err.is_none() && !cancel.is_cancelled() {
+            if let Some(e) = empty_generation_failure(
+                api.is_text_family(),
+                upstream_status as u16,
+                saw_output,
+                &usage,
+            ) {
+                state.backends.record_failure(&a.deployment_id, &e);
+                upstream_err = Some(e.to_string());
+            }
+        }
         let status = if cancel.is_cancelled() {
             "cancelled"
         } else if upstream_err.is_some() || upstream_status >= 400 {
@@ -1188,10 +1203,13 @@ async fn run_request(
 }
 
 /// Parse trailing SSE data for usage + finish_reason (best effort).
+/// `saw_output` is set once any parsed payload carries generated content —
+/// used to detect zombie backends that answer 200 with zero tokens.
 pub(crate) fn inspect_sse_tail(
     bytes: &bytes::Bytes,
     usage: &mut loom_core::openai::Usage,
     finish_reason: &mut String,
+    saw_output: &mut bool,
 ) {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return;
@@ -1212,6 +1230,9 @@ pub(crate) fn inspect_sse_tail(
                 .and_then(|f| f.as_str())
             {
                 *finish_reason = fr.to_string();
+            }
+            if json_has_output(&v) {
+                *saw_output = true;
             }
         }
         return;
@@ -1241,6 +1262,56 @@ pub(crate) fn inspect_sse_tail(
         {
             *finish_reason = fr.to_string();
         }
+        if json_has_output(&v) {
+            *saw_output = true;
+        }
+    }
+}
+
+/// True when a response/chunk carries any generated payload — chat/completion
+/// text, tool calls, reasoning, embeddings data or transcription text.
+pub(crate) fn json_has_output(v: &serde_json::Value) -> bool {
+    let ne = |x: &serde_json::Value| x.as_str().is_some_and(|s| !s.is_empty());
+    if ne(&v["text"]) || ne(&v["response"]) {
+        return true;
+    }
+    if v["data"].as_array().is_some_and(|a| !a.is_empty()) {
+        return true;
+    }
+    let Some(choices) = v["choices"].as_array() else {
+        return false;
+    };
+    choices.iter().any(|c| {
+        ne(&c["text"])
+            || [&c["message"], &c["delta"]].iter().any(|h| {
+                ne(&h["content"])
+                    || ne(&h["reasoning_content"])
+                    || h["tool_calls"].as_array().is_some_and(|a| !a.is_empty())
+                    || h["audio"].is_object()
+            })
+    })
+}
+
+/// A 200 text-family response that produced zero tokens and no content comes
+/// from a wedged generation pipeline (loaded model, dead runner) — it counts
+/// as a crash-classified failure for the recovery breaker.
+pub(crate) fn empty_generation_failure(
+    api_text: bool,
+    upstream_status: u16,
+    saw_output: bool,
+    usage: &loom_core::openai::Usage,
+) -> Option<AdapterError> {
+    if api_text
+        && upstream_status < 400
+        && !saw_output
+        && usage.prompt_tokens == 0
+        && usage.completion_tokens == 0
+    {
+        Some(AdapterError::Io(
+            "empty generation: 200 with 0 tokens and no content".into(),
+        ))
+    } else {
+        None
     }
 }
 
@@ -1311,5 +1382,53 @@ mod tls_policy_tests {
         assert!(Connector::endpoint_tls(&c, "host:50051", None, None)
             .await
             .is_err());
+    }
+
+    #[test]
+    fn json_has_output_detects_content() {
+        use serde_json::json;
+        assert!(!super::json_has_output(
+            &json!({"choices":[{"message":{"role":"","content":""}}]})
+        ));
+        assert!(super::json_has_output(
+            &json!({"choices":[{"message":{"content":"hi"}}]})
+        ));
+        assert!(super::json_has_output(
+            &json!({"choices":[{"delta":{"content":"x"}}]})
+        ));
+        assert!(super::json_has_output(
+            &json!({"choices":[{"delta":{"tool_calls":[{"f":1}]}}]})
+        ));
+        assert!(super::json_has_output(
+            &json!({"choices":[{"delta":{"reasoning_content":"r"}}]})
+        ));
+        assert!(super::json_has_output(&json!({"choices":[{"text":"abc"}]})));
+        assert!(super::json_has_output(
+            &json!({"data":[{"embedding":[0.1]}]})
+        ));
+        assert!(!super::json_has_output(&json!({"data":[]})));
+        assert!(super::json_has_output(&json!({"text":"transcribed"})));
+        assert!(super::json_has_output(&json!({"response":"ollama native"})));
+    }
+
+    #[test]
+    fn empty_generation_flags_zombie_only() {
+        use loom_core::openai::Usage;
+        let zero = Usage::default();
+        // Zombie: 200, no output, zero tokens -> crash-classified failure.
+        let e = super::empty_generation_failure(true, 200, false, &zero);
+        assert!(matches!(e, Some(AdapterError::Io(_))));
+        // Real output -> never flagged.
+        assert!(super::empty_generation_failure(true, 200, true, &zero).is_none());
+        // Upstream error statuses handled elsewhere.
+        assert!(super::empty_generation_failure(true, 500, false, &zero).is_none());
+        // Empty content but tokens were consumed -> legit generation.
+        let used = Usage {
+            prompt_tokens: 10,
+            ..Default::default()
+        };
+        assert!(super::empty_generation_failure(true, 200, false, &used).is_none());
+        // Non-text apis (binary audio) are exempt.
+        assert!(super::empty_generation_failure(false, 200, false, &zero).is_none());
     }
 }

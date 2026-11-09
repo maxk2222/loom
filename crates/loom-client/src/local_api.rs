@@ -511,12 +511,15 @@ async fn openai_inference_raw(
         let rid = request_id.clone();
         let dep_id = dep_id.clone();
         let upstream_status = resp.status;
+        let text_family = api.is_text_family();
         let mut stream = resp.stream;
         tokio::spawn(async move {
             let _token = token; // keep slot until stream ends
             use futures_util::StreamExt;
             let mut usage = loom_core::openai::Usage::default();
             let mut finish_reason = String::new();
+            let mut saw_output = false;
+            let mut outcome = "done";
             let mut ttft_ms: i64 = 0;
             loop {
                 let next = tokio::select! {
@@ -528,7 +531,12 @@ async fn openai_inference_raw(
                         if ttft_ms == 0 {
                             ttft_ms = started.elapsed().as_millis() as i64;
                         }
-                        crate::connector::inspect_sse_tail(&b, &mut usage, &mut finish_reason);
+                        crate::connector::inspect_sse_tail(
+                            &b,
+                            &mut usage,
+                            &mut finish_reason,
+                            &mut saw_output,
+                        );
                         if tx.send(Ok(b)).await.is_err() {
                             // caller disconnected -> abort upstream work
                             cancel.cancel();
@@ -538,6 +546,7 @@ async fn openai_inference_raw(
                     Some(Err(e)) => {
                         warn!(error = %e, "upstream stream error");
                         s.backends.record_failure(&dep_id, &e);
+                        outcome = "failed";
                         let msg = bytes::Bytes::from(
                             "data: {\"error\":{\"message\":\"upstream stream error\"}}\n\n",
                         );
@@ -546,21 +555,39 @@ async fn openai_inference_raw(
                     }
                     None => {
                         // Same rule as the tier-2 path: a proxied 5xx error
-                        // body is not a success — it already counted.
+                        // body is not a success — it already counted. A 200
+                        // with zero tokens/content is a wedged pipeline —
+                        // crash-classified for the breaker, not a success.
                         if upstream_status < 400 {
-                            s.backends.record_success(&dep_id);
+                            outcome = match crate::connector::empty_generation_failure(
+                                text_family,
+                                upstream_status,
+                                saw_output,
+                                &usage,
+                            ) {
+                                Some(e) => {
+                                    s.backends.record_failure(&dep_id, &e);
+                                    "failed"
+                                }
+                                None => {
+                                    s.backends.record_success(&dep_id);
+                                    "done"
+                                }
+                            };
+                        } else {
+                            outcome = "failed";
                         }
                         break;
                     }
                 }
             }
-            telemetry::req_finished("done");
+            telemetry::req_finished(outcome);
             telemetry::req_duration(started.elapsed().as_secs_f64(), "local");
             sched.finish_request(&rid);
             finish_req(
                 &s,
                 &rid,
-                "done",
+                outcome,
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 ttft_ms,
