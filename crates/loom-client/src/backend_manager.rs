@@ -814,6 +814,11 @@ impl BackendManager {
         ctx.inventory_notify.notify_one();
 
         loop {
+            // Deployment removed by config sync → nothing left to heal.
+            if self.deployment(dep_id).await.is_none() {
+                self.inner.tracker.finish_recovery(dep_id);
+                return;
+            }
             // Backend-wide outage → the adapter health loop owns this; a
             // model reload against a dead server would just burn attempts.
             while self.backend_health(dep_id).await != Health::Healthy {
