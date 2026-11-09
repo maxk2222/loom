@@ -338,20 +338,21 @@ flowchart TB
 ## Measured overhead
 
 What LOOM adds on top of hitting the backend directly — identical
-request/model/prompt, medians over 8+ runs on a live fleet (DGX-class
-server + clients over mTLS, qwen2.5:0.5b / 27B-class models):
+request/model/prompt, 50 paired samples against the same Ollama
+deployment (gateway and client on the same host, mTLS, qwen2.5:0.5b):
 
 | Path | Extra time vs backend-direct |
 |---|---|
-| First SSE byte (control-plane assign + first chunk) | ~5–35 ms |
-| Non-stream completion, same-host client | ≲30 ms (0.21 s vs 0.20 s) |
-| `heuristic`/hybrid router rule hit | ~14 ms |
-| LLM-classified `loom-auto` pick (27B classifier) | ~7–30 s cold — use heuristic/hybrid when latency matters |
+| Non-stream completion, same-host client | **+6 ms median** (paired; p90 +32 ms — mostly per-request jitter) |
+| First SSE byte (admission → stream head) | **~5 ms** |
+| `heuristic`/hybrid router rule hit | **~0 ms** (in-process rule eval; TTFB 4.5 ms vs 5.2 ms without router) |
+| LLM-classified pick (cold 27B classifier) | ~7–30 s — use heuristic/hybrid when latency matters |
 
-Scheduling itself (Redis lease + candidate fan-out) is ~1–5 ms; the
-client→backend first-token time dominates end-to-end TTFB, not the
-control plane. Remote members naturally cost their network hop to the
-client — pick same-site members when every millisecond counts.
+Scheduling itself (Redis lease + candidate fan-out) is ~1–5 ms and sits
+inside the numbers above; the client→backend first-token time dominates
+end-to-end TTFB, not the control plane. Remote members naturally cost
+their network hop to the client — pick same-site members when every
+millisecond counts.
 
 ## Repository layout
 
