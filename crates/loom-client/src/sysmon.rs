@@ -126,14 +126,19 @@ pub fn spawn(
             // user's own and are never touched. Failures are per-deployment
             // and non-fatal — the gate alone already protects local resources.
             if gated && cfg.unload_models {
-                let shared: std::collections::HashSet<String> = sched
-                    .capacity_snapshot()
+                let snapshot = sched.capacity_snapshot();
+                // Only shared deployments whose model is actually resident —
+                // unloading an absent model is a no-op that would spam the
+                // log every tick for the whole pressure event.
+                let unloadable: std::collections::HashSet<String> = snapshot
                     .into_iter()
-                    .filter(|c| c.sharing_mode != loom_core::config::SharingMode::Private)
+                    .filter(|c| {
+                        c.sharing_mode != loom_core::config::SharingMode::Private && c.model_ready
+                    })
                     .map(|c| c.deployment_id)
                     .collect();
                 for dep_id in sched.idle_deployments() {
-                    if !shared.contains(&dep_id) {
+                    if !unloadable.contains(&dep_id) {
                         continue;
                     }
                     match backends.unload(&dep_id).await {
