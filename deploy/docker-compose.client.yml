@@ -9,10 +9,11 @@
 # The client container only proxies HTTP to your inference backends — the GPU
 # stays wherever the backend runs (host, another container, another machine).
 #
-# State persistence note: mount a HOST DIRECTORY at /etc/loom-client rather
-# than a single config.toml file — the client persists its device credential
-# via atomic rename, which a file bind-mount breaks (enrollment would be lost
-# on every restart).
+# State persistence note: use a NAMED VOLUME at /etc/loom-client — the client
+# persists its device credential via atomic rename (a single config.toml
+# bind-mount breaks that, and a directory bind-mount gets re-owned to the
+# container uid). To supply your own config.toml/ca.crt, mount their host
+# directory read-only at /etc/loom-seed — the entrypoint copies them in.
 name: loom-client
 
 services:
@@ -42,9 +43,10 @@ services:
       # the Docker host (native on Docker Desktop, explicit on Linux).
       - "host.docker.internal:host-gateway"
     volumes:
-      # A named volume works out of the box; for a mounted config.toml mount
-      # the containing directory instead: - ./state:/etc/loom-client
-      - ${LOOM_CLIENT_STATE:-loom-client-data}:/etc/loom-client
+      # Named volume keeps client_id + device credential + issued certs safe.
+      - loom-client-data:/etc/loom-client
+      # Optional: seed your own config.toml / ca.crt (refreshed when newer):
+      # - ./seed:/etc/loom-seed:ro
     ports:
       # Local dashboard + priority API — loopback-only by default; expose
       # wider only together with LOOM_LOCAL_API_KEY.

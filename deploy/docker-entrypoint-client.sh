@@ -30,8 +30,23 @@ CFG="${LOOM_CONFIG:-/etc/loom-client/config.toml}"
 # ownership-healed regardless of the host-side uid, then drops to `loom`.
 if [ "$(id -u)" = "0" ]; then
     mkdir -p "$(dirname "$CFG")"
+    # Seed files (config.toml, ca.crt, …) from a read-only host mount into the
+    # state dir. Copies on first boot and whenever the seed file is newer —
+    # a re-run of setup-client.sh refreshes config.toml without wiping state.
+    SEED="${LOOM_SEED_DIR:-/etc/loom-seed}"
+    if [ -d "$SEED" ]; then
+        for f in "$SEED"/*; do
+            [ -f "$f" ] || continue
+            dest="$(dirname "$CFG")/$(basename "$f")"
+            if [ ! -f "$dest" ] || [ "$f" -nt "$dest" ]; then
+                cp "$f" "$dest"
+                echo "loom-client: seeded $(basename "$f")" >&2
+            fi
+        done
+    fi
     chown -R loom:loom "$(dirname "$CFG")" 2>/dev/null || true
     chmod 700 "$(dirname "$CFG")" 2>/dev/null || true
+    [ -f "$CFG" ] && chmod 600 "$CFG" 2>/dev/null || true
 fi
 
 # Strip characters that would break the TOML string literals below.

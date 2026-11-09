@@ -23,6 +23,15 @@ loaded). `GET /api/tls/ca.crt` serves the public CA trust anchor — use it
 for TOFU client setup (verify the fingerprint out-of-band on untrusted
 networks).
 
+The client keeps its state (client_id, device credential, issued certs) in
+a named Docker volume. Your `--dir` only holds the generated config, CA and
+compose file and is mounted read-only at `/etc/loom-seed` — the entrypoint
+copies files into the volume whenever they are newer, so no host-uid
+juggling is needed and atomic config updates always work. To change
+backends/options on an installed client, re-run with `--reconfigure` — the
+existing `client_id` and device credential are carried over, no new enroll
+token is required.
+
 ## Server (Docker Compose, manual)
 
 ```bash

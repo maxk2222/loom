@@ -25,6 +25,8 @@
 #   --lmstudio URL      add LM Studio backend(default: probe localhost:1234)
 #   --models a,b        restrict discovered models to this list
 #   --auto              give every backend a dynamic "auto" deployment too
+#   --reconfigure       regenerate config for an existing install (keeps
+#                       client_id + device credential — no new token needed)
 #   --sharing           sharing on/off       (default: true)
 #   --pressure-cpu N    tier-2 gate %        (default: 0 = off)
 #   --pressure-ram N    tier-2 gate %        (default: 0 = off)
@@ -35,7 +37,7 @@ DIR="./loom-client-state"; SRC=""; IMAGE=""
 CA_FILE=""; CA_URL=""; SERVER_HTTP=""
 OLLAMA=""; VLLM=""; VLLM_KEY=""; LMSTUDIO=""
 MODELS=""; ADD_AUTO=0; SHARING=true; PCPU=0; PRAM=0
-PROBE_OLLAMA=1; PROBE_VLLM=1; PROBE_LMS=1
+PROBE_OLLAMA=1; PROBE_VLLM=1; PROBE_LMS=1; RECONFIGURE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -54,6 +56,7 @@ while [ $# -gt 0 ]; do
         --lmstudio) LMSTUDIO="$2"; PROBE_LMS=0; shift 2;;
         --models) MODELS="$2"; shift 2;;
         --auto) ADD_AUTO=1; shift;;
+        --reconfigure) RECONFIGURE=1; shift;;
         --sharing) SHARING="$2"; shift 2;;
         --pressure-cpu) PCPU="$2"; shift 2;;
         --pressure-ram) PRAM="$2"; shift 2;;
@@ -78,6 +81,17 @@ SPORT=$(printf '%s' "$SERVER" | grep -oE ':[0-9]+' | tail -1 | tr -d ':' || true
 [ -z "$SPORT" ] && SPORT=443
 [ -z "$SERVER_HTTP" ] && SERVER_HTTP="http://$SHOST:8080"
 
+# --- free port picker (multiple clients on one host must not collide) -------
+port_free() {
+    ! { ss -tlnH "sport = :$1" 2>/dev/null || netstat -tln 2>/dev/null; } | grep -q ":$1 "
+}
+pick_port() { local p="$1" i=0; while [ $i -lt 51 ]; do port_free "$p" && { echo "$p"; return; }; p=$((p+1)); i=$((i+1)); done; echo "$1"; }
+LAPI_PORT=$(pick_port 8391)
+# Inside the container the API always binds 8391; on host-networking (linux)
+# that IS the host port, on bridge (darwin) the port map translates.
+CFG_LAPI_PORT=8391
+uname -s | grep -qi darwin || CFG_LAPI_PORT="$LAPI_PORT"
+
 # --- CA trust anchor ----------------------------------------------------------
 mkdir -p "$DIR"; chmod 700 "$DIR"
 if [ -z "$CA_FILE" ]; then
@@ -95,11 +109,12 @@ grep -q "BEGIN CERTIFICATE" "$CA_FILE" || die "$CA_FILE is not a PEM certificate
 ok "ca.crt ← $CA_FILE (TOFU — verify fingerprint out-of-band for untrusted networks)"
 
 # --- backend discovery ----------------------------------------------------------
-get() { curl -fsS --max-time 4 -o /dev/null -w '%{http_code}' ${3:+-H "Authorization: Bearer $3"} "$1" 2>/dev/null || echo 000; }
+# No -f: we want the status code itself (000 on connect failure).
+get() { curl -sS --max-time 4 -o /dev/null -w '%{http_code}' ${3:+-H "Authorization: Bearer $3"} "$1" 2>/dev/null || true; }
 models_of() { # url authkey → newline list (openai /v1/models OR ollama /api/tags)
     local u="$1" k="$2" j
-    j=$(curl -fsS --max-time 4 ${k:+-H "Authorization: Bearer $k"} "$u/v1/models" 2>/dev/null) || j=""
-    [ -z "$j" ] && j=$(curl -fsS --max-time 4 "$u/api/tags" 2>/dev/null) || j=""
+    j=$(curl -fsS --max-time 4 ${k:+-H "Authorization: Bearer $k"} "$u/v1/models" 2>/dev/null || true)
+    [ -n "$j" ] || j=$(curl -fsS --max-time 4 "$u/api/tags" 2>/dev/null || true)
     printf '%s' "$j" | grep -oE '"id"\s*:\s*"[^"]+"|"name"\s*:\s*"[^"]+"' | cut -d'"' -f4 | sort -u
 }
 container_key() { # port → --api-key/-api_key value from a local container's args/env
@@ -199,8 +214,16 @@ fi
 
 # --- config.toml ------------------------------------------------------------------
 CFG="$DIR/config.toml"
+ENROLLED=0; KEEP_ID=""; KEEP_CRED=""
 if [ -s "$CFG" ] && grep -q '^client_id = "[0-9a-f]' "$CFG"; then
+    ENROLLED=1
+    KEEP_ID=$(grep -m1 '^client_id = "' "$CFG" || true)
+    KEEP_CRED=$(grep -m1 '^device_credential = "' "$CFG" || true)
+fi
+if [ "$ENROLLED" = "1" ] && [ "$RECONFIGURE" = "0" ]; then
     ok "existing enrolled config reused (client_id present)"
+    { [ "$PROBE_OLLAMA" = "0" ] || [ "$PROBE_VLLM" = "0" ] || [ "$PROBE_LMS" = "0" ] || [ "$ADD_AUTO" = "1" ] || [ -n "$MODELS" ]; } && \
+        warn "backend options ignored on an existing install — pass --reconfigure to apply them"
 else
     LKEY=$(openssl rand -hex 24)
     cat > "$CFG" <<EOF
@@ -208,9 +231,10 @@ name = "$NAME"
 server_url = "$SERVER"
 connect_enabled = true
 sharing_enabled = $SHARING
-
+$KEEP_ID
+$KEEP_CRED
 [local_api]
-bind = "127.0.0.1:8391"
+bind = "127.0.0.1:$CFG_LAPI_PORT"
 api_key = "$LKEY"
 serve_ui = true
 
@@ -235,7 +259,8 @@ EOF
     ok "config.toml written"
 fi
 chmod 600 "$CFG" || true
-chown -R 10001:10001 "$DIR" 2>/dev/null || true   # container uid; entrypoint heals otherwise
+# NOTE: $DIR stays host-owned — it is mounted read-only as /etc/loom-seed and
+# copied into the state volume by the entrypoint, so no uid juggling needed.
 
 # --- compose ----------------------------------------------------------------------
 BUILD_BLOCK="    build:
@@ -248,15 +273,18 @@ NET="    network_mode: host"
 uname -s | grep -qi darwin && NET="    extra_hosts:
       - \"host.docker.internal:host-gateway\"
     ports:
-      - \"127.0.0.1:8391:8391\""
+      - \"127.0.0.1:$LAPI_PORT:8391\""
+
+# Project name derives from the install dir so multiple client installs on
+# one host never adopt/replace each other's containers.
+PROJ="loom-client-$(basename "$DIR" | tr -cd 'a-zA-Z0-9_-')"
 
 cat > "$DIR/docker-compose.yml" <<EOF
 # Generated by deploy/setup-client.sh — safe to re-run.
-name: loom-client
+name: $PROJ
 
 services:
   client:
-    container_name: loom-client
 $BUILD_BLOCK
     restart: unless-stopped
 $NET
@@ -265,7 +293,12 @@ $NET
       LOOM_CONFIG: /etc/loom-client/config.toml
       RUST_LOG: "info,loom_client=debug"
     volumes:
-      - $DIR:/etc/loom-client
+      # host seed (read-only): config.toml + ca.crt land in the state volume
+      - $DIR:/etc/loom-seed:ro
+      - loom-client-state:/etc/loom-client
+
+volumes:
+  loom-client-state:
 EOF
 
 say "starting client"
@@ -275,26 +308,24 @@ env $TOKEN_ENV docker compose -f "$DIR/docker-compose.yml" up -d --build >/dev/n
 
 # --- verify registration -----------------------------------------------------------
 say "waiting for enrollment/registration"
+LOGS() { docker compose -f "$DIR/docker-compose.yml" logs client 2>&1; }
 REG=""
 for i in $(seq 1 30); do
-    if docker logs loom-client 2>&1 | grep -q "registered with server"; then REG=1; break; fi
-    if docker logs loom-client 2>&1 | grep -qE "rejected|failed"; then
-        sleep 6   # give retries a chance, then report
-    fi
+    if LOGS | grep -q "registered with server"; then REG=1; break; fi
     sleep 2
 done
 if [ -n "$REG" ]; then
-    CID=$(docker logs loom-client 2>&1 | grep -oE 'client_id.{0,50}' | tail -1 | grep -oE '[0-9a-f-]{36}')
+    CID=$(LOGS | grep -oE 'client_id.{0,50}' | tail -1 | grep -oE '[0-9a-f-]{36}' || true)
     ok "registered with server (client_id $CID)"
 else
-    docker logs loom-client --tail 15 2>&1 | sed 's/^/    /'
+    LOGS | tail -15 | sed 's/^/    /'
     die "client did not register — see logs above"
 fi
 
 cat <<EOS
 
 $(say "LOOM client up")
-  local api : http://127.0.0.1:8391/ (key in $DIR/config.toml)
+  local api : http://127.0.0.1:$LAPI_PORT/ (key in $DIR/config.toml)
   state     : $DIR
-  backends  : $(docker exec loom-client ls /etc/loom-client >/dev/null 2>&1 && echo configured)
+  compose   : $DIR/docker-compose.yml  (project $PROJ)
 EOS
