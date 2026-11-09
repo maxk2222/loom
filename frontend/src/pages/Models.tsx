@@ -1,17 +1,17 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { GripVertical, Plus, Trash2 } from "lucide-react";
+import { useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { Badge, Card, Field, Modal, Select, Spinner, Toggle } from "../components/ui";
 import type { DeploymentRow, Member, VirtualModel } from "../lib/types";
 
 const STRATEGIES = [
-  { value: "priority", label: "Priority" },
-  { value: "least_in_flight", label: "Least in flight" },
-  { value: "weighted", label: "Weighted" },
-  { value: "round_robin", label: "Round robin" },
-  { value: "manual", label: "Manual (pinned)" },
+  { value: "priority", label: "Priority — first reachable member wins", hint: "Requests go to the earliest member that can serve them. Drag members to order them." },
+  { value: "least_in_flight", label: "Least in flight — least busy member", hint: "Requests go to the member with the most free capacity right now." },
+  { value: "weighted", label: "Weighted — split by weight", hint: "Higher weight receives proportionally more requests." },
+  { value: "round_robin", label: "Round robin — rotate evenly", hint: "Members take turns in order." },
+  { value: "manual", label: "Manual — pinned members only", hint: "Only members marked pin can be picked (for router rules that pin a member explicitly)." },
 ];
 const API_TYPES = [
   { value: "chat", label: "Chat completions" },
@@ -46,6 +46,10 @@ const EMPTY: FormState = {
   enabled: true, members: [],
 };
 
+function SectionTitle({ children }: { children: string }) {
+  return <div className="border-t border-border pt-4 text-xs font-medium uppercase tracking-wide text-muted">{children}</div>;
+}
+
 export default function ModelsPage() {
   const qc = useQueryClient();
   const vms = useQuery({ queryKey: ["vms"], queryFn: () => api.get<{ models: VirtualModel[] }>("/api/models") });
@@ -55,6 +59,9 @@ export default function ModelsPage() {
   const [open, setOpen] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [f, setF] = useState<FormState>(EMPTY);
+  // Drag state for member reordering (HTML5 native — no extra deps).
+  const dragIdx = useRef<number | null>(null);
+  const [overIdx, setOverIdx] = useState<number | null>(null);
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["vms"] });
 
@@ -64,13 +71,15 @@ export default function ModelsPage() {
     const m = d.model;
     const rc = (m.required_capabilities ?? {}) as Record<string, boolean>;
     setEditId(id);
+    // Sort members by stored priority so list order matches routing order.
+    const members = [...(d.members ?? [])].sort((a, b) => a.priority - b.priority);
     setF({
       api_name: m.api_name, description: m.description ?? "", api_type: m.api_type,
       routing_strategy: m.routing_strategy, allow_heterogeneous: m.allow_heterogeneous,
       fallback_virtual_model_id: m.fallback_virtual_model_id ?? "",
       req_tools: !!rc.tools, req_vision: !!rc.vision,
       req_streaming: !!rc.streaming, req_json_mode: !!rc.json_mode,
-      enabled: m.enabled, members: d.members ?? [],
+      enabled: m.enabled, members,
     });
     setOpen(true);
   };
@@ -84,6 +93,11 @@ export default function ModelsPage() {
       routing_strategy: f.routing_strategy,
       allow_heterogeneous: f.allow_heterogeneous,
       enabled: f.enabled,
+      // List order IS the priority — derived on save so drag order is
+      // the single source of truth (lower value = earlier pick).
+      members: f.members
+        .filter((m) => m.deployment_id)
+        .map((m, i) => ({ ...m, priority: (i + 1) * 10 })),
       required_capabilities: {
         ...(f.req_tools ? { tools: true } : {}),
         ...(f.req_vision ? { vision: true } : {}),
@@ -93,7 +107,6 @@ export default function ModelsPage() {
     };
     if (f.fallback_virtual_model_id) body.fallback_virtual_model_id = f.fallback_virtual_model_id;
     if (editId) {
-      body.members = f.members;
       await api.put(`/api/models/${editId}`, body);
     } else {
       await api.post("/api/models", body);
@@ -108,10 +121,21 @@ export default function ModelsPage() {
     refresh();
   };
 
-  useEffect(() => { /* form unchanged */ }, [f]);
+  const setMember = (i: number, patch: Partial<Member>) => {
+    const ms = [...f.members];
+    ms[i] = { ...ms[i], ...patch };
+    setF({ ...f, members: ms });
+  };
 
-  const addMember = () =>
-    setF({ ...f, members: [...f.members, { deployment_id: "", priority: 100, weight: 1, manual_pinned: false, enabled: true }] });
+  const memberDepIds = new Set(f.members.map(m => m.deployment_id));
+  const availableDeps = (deps.data?.deployments ?? []).filter((d: any) => d.enabled !== false && !memberDepIds.has(d.id));
+  // Group available deployments by client for the optgroup picker.
+  const depsByClient = availableDeps.reduce<Record<string, any[]>>((acc, d: any) => {
+    (acc[cname(d.client_id)] ??= []).push(d);
+    return acc;
+  }, {});
+
+  const strat = STRATEGIES.find(s => s.value === f.routing_strategy);
 
   return (
     <div className="space-y-5">
@@ -154,6 +178,7 @@ export default function ModelsPage() {
 
       <Modal open={open} title={editId ? `Edit ${f.api_name}` : "New virtual model"} onClose={() => setOpen(false)} wide>
         <form onSubmit={save} className="space-y-4">
+          <SectionTitle>Basics</SectionTitle>
           <div className="grid grid-cols-2 gap-4">
             <Field label="API name" hint="Model id used in /v1 requests">
               <input className="input font-mono" value={f.api_name} disabled={!!editId} onChange={(e) => setF({ ...f, api_name: e.target.value })} required placeholder="vm-llama3" />
@@ -161,9 +186,13 @@ export default function ModelsPage() {
             <Field label="API type"><Select value={f.api_type} onChange={(v) => setF({ ...f, api_type: v })} options={API_TYPES} /></Field>
           </div>
           <Field label="Description"><input className="input" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></Field>
+
+          <SectionTitle>Routing</SectionTitle>
           <div className="grid grid-cols-2 gap-4">
-            <Field label="Routing strategy"><Select value={f.routing_strategy} onChange={(v) => setF({ ...f, routing_strategy: v })} options={STRATEGIES} /></Field>
-            <Field label="Fallback model">
+            <Field label="Strategy" hint={strat?.hint}>
+              <Select value={f.routing_strategy} onChange={(v) => setF({ ...f, routing_strategy: v })} options={STRATEGIES.map(s => ({ value: s.value, label: s.label }))} />
+            </Field>
+            <Field label="Fallback model" hint="Used when no member can serve">
               <Select value={f.fallback_virtual_model_id} onChange={(v) => setF({ ...f, fallback_virtual_model_id: v })}
                 options={[{ value: "", label: "— none —" }, ...(vms.data?.models ?? []).filter((m) => m.id !== editId).map((m) => ({ value: m.id, label: m.api_name }))]} />
             </Field>
@@ -181,34 +210,98 @@ export default function ModelsPage() {
             <Toggle checked={f.enabled} onChange={(v) => setF({ ...f, enabled: v })} label="enabled" />
           </div>
 
-          {editId && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="label mb-0">Members (deployments)</label>
-                <button type="button" className="btn-outline py-1 text-xs" onClick={addMember}><Plus size={14} /> Add</button>
-              </div>
-              {f.members.map((m, i) => (
-                <div key={i} className="flex items-center gap-2 rounded-md border border-border bg-panel2 p-2">
-                  <select className="input flex-1" value={m.deployment_id}
-                    onChange={(e) => { const ms = [...f.members]; ms[i] = { ...m, deployment_id: e.target.value }; setF({ ...f, members: ms }); }}>
-                    <option value="">— deployment —</option>
-                    {(deps.data?.deployments ?? []).filter((d: any) => d.enabled !== false).map((d: any) => (
-                      <option key={d.id} value={d.id}>{cname(d.client_id)} · {d.model_name}</option>
-                    ))}
-                  </select>
-                  <input className="input w-20" type="number" title="priority" value={m.priority}
-                    onChange={(e) => { const ms = [...f.members]; ms[i] = { ...m, priority: +e.target.value }; setF({ ...f, members: ms }); }} />
-                  <input className="input w-16" type="number" title="weight" value={m.weight}
-                    onChange={(e) => { const ms = [...f.members]; ms[i] = { ...m, weight: +e.target.value }; setF({ ...f, members: ms }); }} />
-                  <Toggle checked={m.manual_pinned} onChange={(v) => { const ms = [...f.members]; ms[i] = { ...m, manual_pinned: v }; setF({ ...f, members: ms }); }} label="pin" />
-                  <button type="button" className="btn-ghost p-1.5 text-err" onClick={() => setF({ ...f, members: f.members.filter((_, j) => j !== i) })}>
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              ))}
-              {f.members.length === 0 && <div className="text-xs text-muted">No members — add deployments to make this model routable.</div>}
+          <SectionTitle>Members</SectionTitle>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted">
+                {f.routing_strategy === "priority"
+                  ? "Order = routing priority. Drag to reorder — earlier members are tried first."
+                  : f.routing_strategy === "weighted"
+                    ? "Set each member's weight — share = weight ÷ Σ weights."
+                    : f.routing_strategy === "manual"
+                      ? "Mark members pin to make them routable."
+                      : "All members participate equally."}
+              </span>
+              {f.members.length > 0 && (
+                <button type="button" className="btn-ghost py-1 text-xs text-muted" onClick={() => setF({ ...f, members: [] })}>Clear all</button>
+              )}
             </div>
-          )}
+            {f.members.map((m, i) => (
+              <div
+                key={m.deployment_id || i}
+                draggable
+                onDragStart={() => { dragIdx.current = i; }}
+                onDragEnter={() => {
+                  const from = dragIdx.current;
+                  if (from === null || from === i) return;
+                  const ms = [...f.members];
+                  const [mv] = ms.splice(from, 1);
+                  ms.splice(i, 0, mv);
+                  dragIdx.current = i;
+                  setF({ ...f, members: ms });
+                  setOverIdx(i);
+                }}
+                onDragOver={(e) => e.preventDefault()}
+                onDragEnd={() => { dragIdx.current = null; setOverIdx(null); }}
+                className={`flex items-center gap-2 rounded-md border bg-panel2 p-2 transition-colors ${overIdx === i ? "border-accent" : "border-border"}`}
+              >
+                <span className="cursor-grab text-muted hover:text-text active:cursor-grabbing" title="Drag to reorder"><GripVertical size={15} /></span>
+                <span className="w-6 shrink-0 text-center text-[10px] font-semibold text-muted">#{i + 1}</span>
+                <select className="input flex-1" value={m.deployment_id}
+                  onChange={(e) => setMember(i, { deployment_id: e.target.value })}>
+                  <option value="">— pick deployment —</option>
+                  {Object.entries(depsByClient).map(([client, list]) => (
+                    <optgroup key={client} label={client}>
+                      {list.filter(d => d.id === m.deployment_id || !memberDepIds.has(d.id)).map(d => (
+                        <option key={d.id} value={d.id}>{d.name || d.model_name}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                  {/* keep the current selection renderable even if its client group is empty */}
+                  {m.deployment_id && !availableDeps.some(d => d.id === m.deployment_id) && (
+                    <option value={m.deployment_id}>{(deps.data?.deployments ?? []).find(d => d.id === m.deployment_id)?.model_name ?? m.deployment_id.slice(0, 8)}</option>
+                  )}
+                </select>
+                {f.routing_strategy === "weighted" && (
+                  <input className="input w-16" type="number" min={1} title="weight" placeholder="w"
+                    value={m.weight} onChange={(e) => setMember(i, { weight: +e.target.value })} />
+                )}
+                {f.routing_strategy === "manual" && (
+                  <Toggle checked={m.manual_pinned} onChange={(v) => setMember(i, { manual_pinned: v })} label="pin" />
+                )}
+                <Toggle checked={m.enabled} onChange={(v) => setMember(i, { enabled: v })} label="on" />
+                <button type="button" className="btn-ghost p-1.5 text-err" title="Remove"
+                  onClick={() => setF({ ...f, members: f.members.filter((_, j) => j !== i) })}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+            {/* Add member — dropdown lists deployments not already in the list */}
+            {availableDeps.length > 0 ? (
+              <select
+                className="input w-full border-dashed text-muted"
+                value=""
+                onChange={(e) => {
+                  if (!e.target.value) return;
+                  setF({ ...f, members: [...f.members, { deployment_id: e.target.value, priority: (f.members.length + 1) * 10, weight: 1, manual_pinned: false, enabled: true }] });
+                }}
+              >
+                <option value="">＋ Add deployment…</option>
+                {Object.entries(depsByClient).map(([client, list]) => (
+                  <optgroup key={client} label={client}>
+                    {list.map(d => <option key={d.id} value={d.id}>{d.name || d.model_name}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+            ) : f.members.length === 0 ? (
+              <div className="rounded-md border border-dashed border-border p-3 text-center text-xs text-muted">
+                No enabled deployments available — create one under Deployments first.
+              </div>
+            ) : null}
+            {f.members.length === 0 && availableDeps.length > 0 && (
+              <div className="text-xs text-muted">No members yet — add deployments to make this model routable.</div>
+            )}
+          </div>
 
           <button className="btn-primary w-full justify-center">{editId ? "Save" : "Create"}</button>
         </form>
