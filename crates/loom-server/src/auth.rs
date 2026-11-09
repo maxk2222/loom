@@ -198,10 +198,12 @@ impl Auth {
         let res: String = redis::Script::new(crate::lua::RL_CHECK)
             .key(self.rt.k(&format!("rl:key:{}:rpm", ctx.api_key_id)))
             .key(self.rt.k(&format!("inflight:key:{}", ctx.api_key_id)))
+            .key(self.rt.k(&format!("rl:key:{}:tpm", ctx.api_key_id)))
             .arg(now)
             .arg(60_000)
             .arg(ctx.rpm_limit)
             .arg(ctx.max_concurrent)
+            .arg(ctx.tpm_limit)
             .invoke_async(&mut c)
             .await
             .map_err(|_| "redis")?;
@@ -219,9 +221,27 @@ impl Auth {
                 Ok(())
             }
             "RPM" => Err("rate_limited"),
+            "TPM" => Err("tpm_limited"),
             "CONCURRENCY" => Err("concurrency_exceeded"),
             _ => Err("rate_limited"),
         }
+    }
+
+    /// Charge a completed request's token spend into the key's 60s sliding
+    /// TPM window. Called by the request finalizer once real usage is known.
+    pub async fn rl_charge_tpm(&self, api_key_id: &str, request_id: &str, tokens: u64) {
+        if tokens == 0 {
+            return;
+        }
+        let mut c = self.rt.conn.clone();
+        let _: String = redis::Script::new(crate::lua::TPM_CHARGE)
+            .key(self.rt.k(&format!("rl:key:{api_key_id}:tpm")))
+            .arg(now_ms())
+            .arg(format!("{request_id}:{tokens}"))
+            .arg(60_000)
+            .invoke_async(&mut c)
+            .await
+            .unwrap_or_default();
     }
 
     pub async fn rl_release(&self, api_key_id: &str) {

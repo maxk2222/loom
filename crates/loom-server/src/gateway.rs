@@ -351,7 +351,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
             };
             usage
                 .record(crate::usage::UsageRecord {
-                    request_id: rid_f,
+                    request_id: rid_f.clone(),
                     api_key_id: key_id.clone(),
                     project_id: project_id.clone(),
                     virtual_model_id: vm_id.clone(),
@@ -370,6 +370,9 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                     error_code: meta.error_code,
                     routing_trace: trace,
                 })
+                .await;
+            auth2
+                .rl_charge_tpm(&key_id, &rid_f, (prompt_tokens + completion_tokens) as u64)
                 .await;
             auth2.rl_release(&key_id).await;
             let _ = cancel_f;

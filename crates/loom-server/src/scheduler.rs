@@ -287,6 +287,13 @@ impl Scheduler {
         let rid = req.request_id.to_string();
         // Register pending BEFORE enqueueing — a dispatcher pop between the
         // enqueue script and the insert would otherwise drop the request.
+        let (prio, ets, proj, model, dl) = (
+            req.prio,
+            req.enqueue_ts,
+            req.project_id.clone(),
+            req.model.clone(),
+            req.deadline_ts,
+        );
         let (done_tx, done_rx) = oneshot::channel();
         self.inner
             .pending
@@ -294,18 +301,6 @@ impl Scheduler {
             .await
             .insert(rid.clone(), PendingEntry { req, done_tx });
         let mut c = self.inner.rt.conn.clone();
-        // pull fields out under the guard, then drop it before the lua await
-        let (prio, ets, proj, model, dl) = {
-            let p = self.inner.pending.lock().await;
-            let r = &p.get(&rid).unwrap().req;
-            (
-                r.prio,
-                r.enqueue_ts,
-                r.project_id.clone(),
-                r.model.clone(),
-                r.deadline_ts,
-            )
-        };
         let res: String = redis::Script::new(crate::lua::QUEUE_ENQUEUE)
             .key(self.inner.rt.k(&format!("queue:{prio}")))
             .key(self.inner.rt.k(&format!("req:{rid}")))
@@ -408,6 +403,42 @@ impl Scheduler {
             for rid in swept {
                 // reserved lease died → dispatcher retries next candidate
                 self.handle_assign_ack(&rid, false, "lease_expired").await;
+            }
+            // c) active leases past the request deadline → free slot + fail
+            // the request (backend hang would otherwise burn the slot).
+            let deadline = self.inner.cfg.request_deadline_secs as i64 * 1000;
+            let timed_out: Vec<String> = redis::Script::new(crate::lua::ACTIVE_LEASE_SWEEP)
+                .key(self.inner.rt.k(&format!("dep:{dep}:leases")))
+                .key(self.inner.rt.k(&format!("dep:{dep}")))
+                .arg(now)
+                .arg(deadline)
+                .invoke_async(&mut c)
+                .await
+                .unwrap_or_default();
+            for rid in timed_out {
+                // Tell the owning client to abort too — the request is dead
+                // server-side but its backend call may still be running.
+                if let Some((client_id, fencing)) =
+                    self.inner.active.lock().await.get(&rid).cloned()
+                {
+                    let _ = self
+                        .inner
+                        .sessions
+                        .send(
+                            &client_id,
+                            server_msgs::cancel(&rid, fencing, "request_deadline"),
+                        )
+                        .await;
+                }
+                self.complete_end(
+                    &rid,
+                    EndMeta {
+                        status: "failed".into(),
+                        error_code: "request_deadline".into(),
+                        ..Default::default()
+                    },
+                )
+                .await;
             }
         }
     }
@@ -792,6 +823,7 @@ impl Scheduler {
         let _: String = redis::Script::new(crate::lua::LEASE_ACTIVATE)
             .key(self.inner.rt.k(&format!("lease:{lease_id}")))
             .arg(fencing)
+            .arg(crate::client_registry::now_ms())
             .invoke_async(&mut c)
             .await
             .unwrap_or_default();
@@ -819,6 +851,8 @@ impl Scheduler {
             let body = req.body.clone();
             let cancel2 = cancel.clone();
             let rt = self.inner.rt.clone();
+            let sessions2 = self.inner.sessions.clone();
+            let client2 = client_id.clone();
             let lease2 = lease_id.clone();
             let dep2 = dep_id.clone();
             let rid_for_release = rid.clone();
@@ -851,7 +885,20 @@ impl Scheduler {
                         })) => {
                             tracing::debug!(req = %rid_for_release, n = b.len(), "response_chunk");
                             if resp_tx.send(Ok(b.into())).await.is_err() {
-                                // caller gone: cancel upstream by closing outbound
+                                // Caller gone: tell the client to abort backend
+                                // generation — merely stop reading would leave
+                                // the model burning a tier-2 slot until natural
+                                // completion.
+                                let _ = sessions2
+                                    .send(
+                                        &client2,
+                                        server_msgs::cancel(
+                                            &rid_for_release,
+                                            fencing,
+                                            "caller_disconnected",
+                                        ),
+                                    )
+                                    .await;
                                 break;
                             }
                         }

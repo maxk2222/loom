@@ -97,13 +97,39 @@ return 'OK'
 "#;
 
 /// lease_activate: reserved|confirmed -> active (request streaming)
-/// KEYS=[lease:{lid}] ARGV=[fencing] -> "OK"|"STALE"|"NOT_FOUND"
+/// KEYS=[lease:{lid}] ARGV=[fencing, now_ms] -> "OK"|"STALE"|"NOT_FOUND"
 pub const LEASE_ACTIVATE: &str = r#"
 local f = redis.call('HGET', KEYS[1], 'fencing')
 if not f then return 'NOT_FOUND' end
 if tonumber(f) ~= tonumber(ARGV[1]) then return 'STALE' end
-redis.call('HSET', KEYS[1], 'state', 'active')
+redis.call('HSET', KEYS[1], 'state', 'active', 'activated_at', ARGV[2])
 return 'OK'
+"#;
+
+/// active_lease_sweep: fail active leases older than the request deadline —
+/// a client that accepts work and then hangs forever (backend stuck, stream
+/// never ends) would otherwise burn the tier-2 slot indefinitely.
+/// KEYS=[dep:{id}:leases, dep:{id}] ARGV=[now_ms, deadline_ms]
+/// -> {request_ids freed}  (frees the slot atomically inside the script)
+pub const ACTIVE_LEASE_SWEEP: &str = r#"
+local lset = KEYS[1]
+local dep = KEYS[2]
+local now = tonumber(ARGV[1])
+local deadline = tonumber(ARGV[2])
+local out = {}
+local leases = redis.call('ZRANGE', lset, 0, -1)
+for _,lkey in ipairs(leases) do
+  local st = redis.call('HGET', lkey, 'state')
+  local at = tonumber(redis.call('HGET', lkey, 'activated_at') or '0')
+  if st == 'active' and at > 0 and now - at > deadline then
+    local rq = redis.call('HGET', lkey, 'request_id')
+    table.insert(out, rq or lkey)
+    redis.call('DEL', lkey)
+    redis.call('ZREM', lset, lkey)
+    redis.call('HINCRBY', dep, 'tier2_free', 1)
+  end
+end
+return out
 "#;
 
 /// lease_release: KEYS=[lease:{lid}, dep:{id}, dep:{id}:leases]
@@ -188,6 +214,27 @@ if rpm > 0 then
   local c = redis.call('ZCARD', KEYS[1])
   if c >= rpm then return 'RPM' end
 end
+local tpm = tonumber(ARGV[5]) or 0
+if tpm > 0 then
+  redis.call('ZREMRANGEBYSCORE', KEYS[3], 0, now - win)
+  local members = redis.call('ZRANGE', KEYS[3], 0, -1)
+  local sum = 0
+  for _,m in ipairs(members) do
+    local t = m:match(':(%d+)$')
+    if t then sum = sum + tonumber(t) end
+  end
+  if sum >= tpm then return 'TPM' end
+end
+return 'OK'
+"#;
+
+/// tpm_charge: record a completed request's token spend in the sliding
+/// window zset (member = "request_id:total_tokens").
+/// KEYS=[rl:key:{id}:tpm] ARGV=[now_ms, member, window_ms]
+pub const TPM_CHARGE: &str = r#"
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, tonumber(ARGV[1]) - tonumber(ARGV[3]))
+redis.call('ZADD', KEYS[1], tonumber(ARGV[1]), ARGV[2])
+redis.call('EXPIRE', KEYS[1], math.ceil(tonumber(ARGV[3]) / 1000) + 10)
 return 'OK'
 "#;
 

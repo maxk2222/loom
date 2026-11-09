@@ -9,9 +9,15 @@
 **with hard guarantees that local workloads always come first.**
 
 [![CI](https://github.com/maxk2222/loom/actions/workflows/ci.yml/badge.svg)](https://github.com/maxk2222/loom/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/maxk2222/loom?logo=github&label=release)](https://github.com/maxk2222/loom/releases)
+[![Release](https://github.com/maxk2222/loom/actions/workflows/release.yml/badge.svg)](https://github.com/maxk2222/loom/releases)
+[![Version](https://img.shields.io/github/v/release/maxk2222/loom?logo=github&label=v)](https://github.com/maxk2222/loom/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 [![Rust](https://img.shields.io/badge/rust-2024-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](https://redis.io)
+[![gRPC + mTLS](https://img.shields.io/badge/gRPC-mTLS-244c5a?logo=grpc&logoColor=white)](docs/protocol.md)
+[![Docker Compose](https://img.shields.io/badge/deploy-Docker%20Compose-2496ED?logo=docker&logoColor=white)](deploy/)
 [![OpenAI compatible](https://img.shields.io/badge/API-OpenAI--compatible-412991)](docs/protocol.md)
 
 </div>
