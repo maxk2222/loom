@@ -346,7 +346,7 @@ deployment (gateway and client on the same host, mTLS, qwen2.5:0.5b):
 | Non-stream completion, same-host client | **+6 ms median** (paired; p90 +32 ms — mostly per-request jitter) |
 | First SSE byte (admission → stream head) | **~5 ms** |
 | `heuristic`/hybrid router rule hit | **~0 ms** (in-process rule eval; TTFB 4.5 ms vs 5.2 ms without router) |
-| LLM-classified pick (`mode:"llm"`) | one full classifier round-trip: **~0.4 s** same-host vLLM (vm-flash), **~3.3 s** remote LM Studio 9b over LAN (n=20; identical prompts are cached ~2 min) — use heuristic/hybrid when latency matters |
+| LLM-classified pick (`mode:"llm"`) | one full classifier round-trip: **~0.4 s** same-host vLLM (vm-flash), **~1.6 s** remote LM Studio 9b over LAN (reasoning disabled by the router; ~3.3 s without) — identical prompts hit the ~2 min classify cache; use heuristic/hybrid when latency matters |
 
 Remote members cost their network hop to the client on top of that —
 measured on a MacBook client reachable over a ~25 ms RTT tailscale
