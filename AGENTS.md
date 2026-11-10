@@ -36,7 +36,7 @@ Agent-channel TLS/mTLS (production-style, all outbound client-initiated):
 # listeners: strict mTLS + cert-issuance bootstrap + optional plaintext migration
 LOOM_GRPC_BIND=0.0.0.0:50052 LOOM_GRPC_TLS_CERT=…/server.crt \
   LOOM_GRPC_TLS_KEY=…/server.key LOOM_MTLS=1 \
-  LOOM_GRPC_BOOTSTRAP_BIND=0.0.0.0:50053 LOOM_GRPC_PLAIN_BIND=0.0.0.0:50051 \
+  LOOM_GRPC_BOOTSTRAP_BIND=0.0.0.0:50053 LOOM_GRPC_PLAIN_BIND=127.0.0.1:50054 \
   cargo run -p loom-server
 # internal CA lives at $LOOM_DATA_DIR/tls/ca.{crt,key} (auto-created/reused);
 # clients auto-issue+renew certs via CSR in Hello — config.toml only needs
@@ -69,6 +69,16 @@ curl -X POST http://server:8080/api/clients/<id>/update -H "Cookie: loom_session
 curl http://127.0.0.1:8391/local/api/update-check
 curl -X POST http://127.0.0.1:8391/local/api/update
 ```
+
+New-client install is one command: the gateway serves `deploy/install-client.sh`
+at `GET /install-client.sh` with the `scope=public` URL from the `endpoint_hints`
+setting (`public_base` fallback) substituted as `SERVER_URL`. The script resolves
+the latest GitHub release, detects arch, sha256-verifies, installs client+CLI,
+and writes config/token/systemd-or-launchd unit.
+
+Server image re-seed: docker entrypoints seed `$DATA_DIR/bin/` from
+`/etc/loom-build-id` (image build epoch), not the version string — same-version
+rebuilds propagate, binaries swapped via atomic rename (running exe → ETXTBSY).
 
 Building x86_64 binaries from Apple Silicon requires an explicit
 platform (otherwise aarch64 → `203/EXEC` on the nodes):
