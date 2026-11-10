@@ -610,10 +610,11 @@ impl Connector {
                 "{}-{}{}",
                 std::env::consts::OS,
                 std::env::consts::ARCH,
-                // Docker clients can't self-update (binary lives on the
-                // image layer) — the suffix lets the dashboard offer the
-                // right update path instead of a doomed button push.
-                if crate::updater::in_container() {
+                // Container clients self-update only when the exe runs from
+                // a persistent writable volume (image entrypoint layout) —
+                // the suffix tells the dashboard to offer the image-pull
+                // path for deployments where it isn't.
+                if crate::updater::in_container() && !crate::updater::can_self_update() {
                     "-container"
                 } else {
                     ""

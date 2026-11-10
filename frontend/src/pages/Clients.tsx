@@ -92,7 +92,7 @@ export default function ClientsPage() {
                       {c.online && (
                         c.platform?.endsWith("-container") ? (
                           <button className="btn-outline py-1 text-xs opacity-50 cursor-not-allowed" disabled
-                            title="Container install — update by pulling a newer image, self-update can't swap a running container's binary">
+                            title="Container install without volume-backed binary — update by pulling a newer image">
                             Update
                           </button>
                         ) : (

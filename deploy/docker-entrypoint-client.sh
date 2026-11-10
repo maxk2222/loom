@@ -93,9 +93,10 @@ if [ ! -f "$CFG" ]; then
         echo "unload_models = $UNLOAD"
         echo "cooldown_secs = $COOLDOWN"
         echo ""
-        # Self-update makes no sense inside a container — pull a newer image.
+        # The binary runs from the state volume (see below), so self-update
+        # works inside the container: swap → exit → restart policy.
         echo "[updater]"
-        echo "enabled = false"
+        echo "enabled = true"
         echo ""
         echo "[tray]"
         echo "enabled = false"
@@ -136,8 +137,29 @@ if [ ! -f "$CFG" ]; then
     echo "loom-client: wrote initial config to $CFG" >&2
 fi
 
-if [ "$(id -u)" = "0" ]; then
-    exec runuser -u loom -- /usr/local/bin/loom-client "$@"
+# Self-update support: run the binary from the persistent state dir so the
+# updater's atomic swap survives `docker compose up` recreates and the
+# restart policy acts as the supervisor. /usr/local/bin/loom-client stays
+# the immutable image seed. Re-seed when the image is strictly newer
+# (self-updated volume binaries are newer than the image and are kept).
+STATE_DIR="$(dirname "$CFG")"
+BIN="$STATE_DIR/bin/loom-client"
+SEED_BIN=/usr/local/bin/loom-client
+ver() { "$1" --version 2>/dev/null | awk '{print $NF}'; }
+if [ -x "$BIN" ]; then
+    IMG_V="$(ver "$SEED_BIN")"; VOL_V="$(ver "$BIN")"
+    NEWER="$(printf '%s\n%s\n' "$IMG_V" "$VOL_V" | sort -V | tail -1)"
+    if [ -n "$IMG_V" ] && [ "$IMG_V" != "$VOL_V" ] && [ "$NEWER" = "$IMG_V" ]; then
+        cp "$SEED_BIN" "$BIN" && echo "loom-client: re-seeded binary v$IMG_V (volume had v$VOL_V)" >&2
+    fi
 else
-    exec /usr/local/bin/loom-client "$@"
+    mkdir -p "$STATE_DIR/bin"
+    cp "$SEED_BIN" "$BIN"
+fi
+[ "$(id -u)" = "0" ] && chown -R loom:loom "$STATE_DIR/bin" 2>/dev/null || true
+
+if [ "$(id -u)" = "0" ]; then
+    exec runuser -u loom -- "$BIN" "$@"
+else
+    exec "$BIN" "$@"
 fi

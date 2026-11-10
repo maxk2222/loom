@@ -402,13 +402,39 @@ fn ensure_self_update_supported() -> Result<()> {
     if cfg!(windows) {
         bail!("self-update is not supported on Windows; install the new release manually");
     }
-    // Inside a container the binary lives on the image layer: a swap would not
-    // survive a restart anyway and typically fails on permissions. The correct
-    // update path is pulling a newer image.
-    if in_container() {
-        bail!("running inside a container — pull a newer image instead of self-updating");
+    if in_container() && !can_self_update() {
+        bail!("binary not on a writable path — run via the image entrypoint (volume-backed binary) or pull a newer image");
     }
     Ok(())
+}
+
+/// Whether this process can atomically swap its own binary: always true
+/// outside containers; inside a container only when the exe sits on a
+/// writable path (the image entrypoint runs it from the persistent state
+/// volume — the probe is a real write test, not a path guess). The image
+/// layer itself is discarded on recreate, so an unwritable exe means the
+/// deployment must be updated by pulling a newer image.
+pub(crate) fn can_self_update() -> bool {
+    if cfg!(windows) {
+        return false;
+    }
+    if !in_container() {
+        return true;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    let probe = dir.join(".loom-write-probe");
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Best-effort container detection (Docker, Podman, k8s pods, …).
