@@ -1140,6 +1140,54 @@ async fn delete_deployment(
             .into_response();
     };
     let referenced_by = dep_referenced_by(&s, &id).await;
+    // Push the desired state to the owning client so the change sticks:
+    // hard → `removed` drops it from the client's own config (the next
+    // inventory report no longer carries it and the upsert can't
+    // re-create the row); soft → `enabled:false` so reports keep it
+    // disabled instead of flipping it back on. Desired state persists in
+    // Postgres — an offline client still applies it on next GetConfig,
+    // and apply_inventory skips removed ids as a safety net.
+    let client_id: Option<String> =
+        sqlx::query_scalar("SELECT client_id::text FROM deployments WHERE id=$1::uuid")
+            .bind(&id)
+            .fetch_optional(&s.db)
+            .await
+            .unwrap_or(None);
+    if let Some(cid) = client_id {
+        let path = format!("{{deployments,{id}}}");
+        let desired_dep = if hard {
+            json!({"removed": true})
+        } else {
+            json!({"enabled": false})
+        };
+        let row: Option<(i64, Value)> = sqlx::query_as(
+            "UPDATE clients SET desired_config = jsonb_set(
+                 jsonb_set(COALESCE(desired_config,'{}'::jsonb), '{deployments}',
+                           COALESCE(desired_config->'deployments','{}'::jsonb), true),
+                 $2::text[],
+                 COALESCE(desired_config->'deployments'->$3,'{}'::jsonb) || $4::jsonb,
+                 true),
+                 config_version = config_version + 1
+             WHERE id = $1::uuid RETURNING config_version, desired_config",
+        )
+        .bind(&cid)
+        .bind(&path)
+        .bind(&id)
+        .bind(&desired_dep)
+        .fetch_optional(&s.db)
+        .await
+        .unwrap_or(None);
+        if let Some((version, desired)) = row {
+            let payload = serde_json::to_vec(&desired).unwrap_or_else(|_| b"{}".to_vec());
+            let _ = s
+                .sessions
+                .send(
+                    &cid,
+                    loom_protocol::server_msgs::config_push(version.max(0) as u64, payload, false),
+                )
+                .await;
+        }
+    }
     if hard {
         let _ = sqlx::query("DELETE FROM deployments WHERE id=$1::uuid")
             .bind(&id)

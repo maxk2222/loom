@@ -701,6 +701,15 @@ impl Connector {
                     c.sharing_enabled = v;
                 }
                 for (dep_id, dd) in &desired.deployments {
+                    // `removed` deletes the deployment from client config
+                    // entirely — subsequent inventory reports no longer carry
+                    // it, so the server-side row stays deleted.
+                    if dd.removed == Some(true) {
+                        for b in &mut c.backends {
+                            b.deployments.retain(|d| &d.id != dep_id);
+                        }
+                        continue;
+                    }
                     for b in &mut c.backends {
                         for d in &mut b.deployments {
                             if &d.id == dep_id {
@@ -730,6 +739,9 @@ impl Connector {
             .scheduler
             .set_sharing_enabled(cfg.sharing_enabled);
         for (dep_id, dd) in &desired.deployments {
+            if dd.removed == Some(true) {
+                continue;
+            }
             self.state.scheduler.update_limits(
                 dep_id,
                 dd.tier2_max,
@@ -737,6 +749,20 @@ impl Connector {
                 dd.sharing_mode,
                 dd.enabled,
             );
+        }
+        if desired
+            .deployments
+            .values()
+            .any(|dd| dd.removed == Some(true))
+        {
+            let deps: Vec<_> = cfg
+                .backends
+                .iter()
+                .flat_map(|b| b.deployments.clone())
+                .collect();
+            self.state.scheduler.sync_deployments(&deps);
+            self.state.backends.sync_from_config(&cfg).await;
+            self.state.push_inventory().await;
         }
         self.notify_capacity();
 

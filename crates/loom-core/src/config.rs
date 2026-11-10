@@ -448,6 +448,11 @@ pub struct DesiredDeployment {
     pub sharing_mode: Option<SharingMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Server-side delete: the client drops this deployment from its own
+    /// config entirely. Without it a hard-deleted deployment would be
+    /// re-created by the next inventory report (upsert is authoritative).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

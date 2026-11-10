@@ -4,7 +4,7 @@ use crate::redisx::Rt;
 use anyhow::Result;
 use loom_core::ids::{sha256_hex, ClientId};
 use loom_protocol::pb::{DeploymentCapacity, DeploymentReport, InventoryReport};
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::PgPool;
 
 #[derive(Clone)]
@@ -173,10 +173,52 @@ impl ClientRegistry {
     }
 
     /// Process an inventory report: upsert deployments (Postgres reported side),
+    /// Deployment ids tombstoned via desired.deployments[id].removed —
+    /// reports for these must not resurrect runtime state or DB rows.
+    async fn removed_dep_ids(&self, client_id: &str) -> Vec<String> {
+        let desired_deps: Value = sqlx::query_scalar(
+            "SELECT COALESCE(desired_config->'deployments','{}'::jsonb) FROM clients WHERE id=$1::uuid",
+        )
+        .bind(client_id)
+        .fetch_optional(&self.db)
+        .await
+        .unwrap_or_default()
+        .unwrap_or_else(|| json!({}));
+        desired_deps
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .filter(|(_, v)| v["removed"].as_bool() == Some(true))
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// update runtime dep hashes (Redis).
     pub async fn apply_inventory(&self, client_id: &str, inv: &InventoryReport) -> Result<()> {
         let mut c = self.rt.conn.clone();
+        // Tombstones: deployments the admin hard-deleted carry
+        // desired.deployments[id].removed — a report that still contains
+        // one (sent before the ConfigPush landed) must not re-create the
+        // row, and any row that slipped through gets deleted here.
+        let removed_ids = self.removed_dep_ids(client_id).await;
+        if !removed_ids.is_empty() {
+            let _ = sqlx::query("DELETE FROM deployments WHERE id::text = ANY($1)")
+                .bind(&removed_ids)
+                .execute(&self.db)
+                .await;
+        }
         for d in &inv.deployments {
+            if removed_ids.iter().any(|r| r == &d.deployment_id) {
+                let _: () = redis::cmd("DEL")
+                    .arg(self.rt.k(&format!("dep:{}", d.deployment_id)))
+                    .arg(self.rt.k(&format!("dep:{}:leases", d.deployment_id)))
+                    .query_async(&mut c)
+                    .await
+                    .unwrap_or(());
+                continue;
+            }
             upsert_deployment(&self.db, client_id, d).await?;
             write_dep_runtime(&mut c, &self.rt, client_id, d, None).await?;
             // Patch the routing snapshot: without this, fresh probe results
@@ -219,8 +261,13 @@ impl ClientRegistry {
                 .patch_deployment(dep_id, None, Some(false))
                 .await;
         }
-        self.apply_capacity(client_id, &inv.capacities, None)
-            .await?;
+        let caps: Vec<_> = inv
+            .capacities
+            .iter()
+            .filter(|c| !removed_ids.iter().any(|r| r == &c.deployment_id))
+            .cloned()
+            .collect();
+        self.apply_capacity(client_id, &caps, None).await?;
         Ok(())
     }
 
@@ -232,6 +279,7 @@ impl ClientRegistry {
         host: Option<&loom_protocol::pb::HostStats>,
     ) -> Result<()> {
         let mut c = self.rt.conn.clone();
+        let removed_ids = self.removed_dep_ids(client_id).await;
         if let Some(h) = host {
             let _: () = redis::cmd("HSET")
                 .arg(self.rt.k(&format!("client:{client_id}")))
@@ -261,6 +309,9 @@ impl ClientRegistry {
                 .await?;
         }
         for cap in caps {
+            if removed_ids.iter().any(|r| r == &cap.deployment_id) {
+                continue;
+            }
             let key = self.rt.k(&format!("dep:{}", cap.deployment_id));
             let state = if cap.accepting {
                 "available"

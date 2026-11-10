@@ -1,14 +1,21 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Badge, Card, Spinner } from "../components/ui";
 import type { DeploymentRow } from "../lib/types";
 
 export default function DeploymentsPage() {
+  const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["deployments"],
     queryFn: () => api.get<{ deployments: DeploymentRow[] }>("/api/deployments"),
     refetchInterval: 5000,
   });
+
+  const del = async (d: DeploymentRow) => {
+    if (!confirm(`Delete "${d.name}" (${d.model_name})? The deployment is removed on the client too and cannot be undone.`)) return;
+    await api.del(`/api/deployments/${d.id}?hard=true`);
+    qc.invalidateQueries({ queryKey: ["deployments"] });
+  };
 
   return (
     <div className="space-y-5">
@@ -20,6 +27,7 @@ export default function DeploymentsPage() {
               <th className="th">Name</th><th className="th">Backend</th><th className="th">Model</th>
               <th className="th">Client</th><th className="th">APIs</th>
               <th className="th">Runtime</th><th className="th">Tier-2</th><th className="th">Enabled</th>
+              <th className="th"></th>
             </tr></thead>
             <tbody>
               {(q.data?.deployments ?? []).map((d) => {
@@ -54,6 +62,9 @@ export default function DeploymentsPage() {
                     {d.runtime ? `${d.runtime.tier2_free}/${d.runtime.tier2_total}` : "—"}
                   </td>
                   <td className="td">{d.enabled ? <Badge tone="ok">enabled</Badge> : <Badge tone="err">disabled</Badge>}</td>
+                  <td className="td text-right">
+                    <button className="btn-danger px-2 py-0.5 text-xs" onClick={() => del(d)}>Delete</button>
+                  </td>
                 </tr>
               );})}
               {(q.data?.deployments ?? []).length === 0 && (
