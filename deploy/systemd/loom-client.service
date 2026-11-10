@@ -18,7 +18,9 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/loom-client
+# /etc/loom-client must be writable too: the daemon keeps co-located state
+# there (mTLS store, enrollment credentials, wizard users, config-version).
+ReadWritePaths=/var/lib/loom-client /etc/loom-client
 
 [Install]
 WantedBy=multi-user.target

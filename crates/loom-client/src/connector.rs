@@ -88,7 +88,14 @@ impl Connector {
         scheduler: LocalScheduler,
     ) -> Self {
         let cert_store = crate::tls_pki::CertStore::new(&cfg_store.dir().to_string_lossy())
-            .unwrap_or_else(|_| crate::tls_pki::CertStore::new(".").unwrap());
+            .or_else(|e| {
+                // Under ProtectSystem=strict a non-writable config dir must not
+                // panic the whole client — degrade to a temp dir (certs are
+                // re-issued on restart; mTLS endpoints still work).
+                tracing::warn!(error = %e, "cert store next to config not writable — using temp dir");
+                crate::tls_pki::CertStore::new(&std::env::temp_dir().to_string_lossy())
+            })
+            .expect("cert store unusable in config dir and temp dir");
         Self {
             state: Arc::new(ConnectorState {
                 cfg_store,

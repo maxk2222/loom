@@ -199,6 +199,11 @@ if [[ -n "$ENROLL_TOKEN" ]]; then
   [[ "$OS" == "Linux" ]] && chown root:loom-client "${CONFIG_DIR}/enroll.env"
 fi
 
+# The daemon writes state next to the config — the mTLS cert store, enrollment
+# credentials, setup-wizard users, config-version. It must own the directory
+# (systemd ReadWritePaths below grants the write permission).
+[[ "$OS" == "Linux" ]] && chown -R loom-client:loom-client "$CONFIG_DIR"
+
 if [[ "$OS" == "Linux" ]] && command -v systemctl >/dev/null 2>&1; then
   echo ">> Installing systemd unit"
   cat > /etc/systemd/system/loom-client.service <<'UNIT'
@@ -220,7 +225,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/loom-client
+ReadWritePaths=/var/lib/loom-client /etc/loom-client
 
 [Install]
 WantedBy=multi-user.target
