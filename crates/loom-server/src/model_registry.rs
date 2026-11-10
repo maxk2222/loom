@@ -259,5 +259,6 @@ fn merge_caps(a: &RequiredCaps, b: &RequiredCaps) -> RequiredCaps {
         vision: a.vision || b.vision,
         streaming: a.streaming || b.streaming,
         json_mode: a.json_mode || b.json_mode,
+        video: a.video || b.video,
     }
 }

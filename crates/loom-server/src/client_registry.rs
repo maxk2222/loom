@@ -570,6 +570,7 @@ fn dep_caps_json(c: &loom_protocol::pb::Capabilities) -> serde_json::Value {
         "images": c.images, "audio_speech": c.audio_speech,
         "audio_transcription": c.audio_transcription,
         "audio_translation": c.audio_translation, "video": c.video,
+        "video_input": c.video_input,
     })
 }
 

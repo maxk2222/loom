@@ -5,6 +5,14 @@ import { api } from "../../lib/api";
 import { fmtMs } from "../../lib/format";
 import { Badge, Card, ConfirmModal, Empty, Field, Modal, PageHeader, Select, Spinner, Toggle } from "../../components/ui";
 
+interface CapsForm {
+  vision?: boolean;
+  video_input?: boolean;
+  tools?: boolean;
+  json_mode?: boolean;
+  modalities?: string[];
+}
+
 interface DepForm {
   auto_load?: boolean;
   id: string;
@@ -16,6 +24,8 @@ interface DepForm {
   tier2_max: number;
   sharing_mode: string;
   enabled: boolean;
+  capability_overrides?: boolean;
+  capabilities?: CapsForm;
 }
 
 interface BackendForm {
@@ -154,6 +164,12 @@ export default function BackendsPage() {
   };
 
   const upd = (b: BackendForm, patch: Partial<BackendForm>) => setEditing({ ...b, ...patch });
+  const updCap = (b: BackendForm, i: number, patch: Partial<CapsForm>) => {
+    const ds = b.deployments.map((d, j) =>
+      j === i ? { ...d, capabilities: { ...(d.capabilities ?? {}), ...patch } } : d,
+    );
+    upd(b, { deployments: ds });
+  };
   const updDep = (b: BackendForm, i: number, patch: Partial<DepForm>) => {
     const ds = b.deployments.map((d, j) => (j === i ? { ...d, ...patch } : d));
     upd(b, { deployments: ds });
@@ -218,7 +234,17 @@ export default function BackendsPage() {
                 <tbody>
                   {b.deployments.map((d) => (
                     <tr key={d.id}>
-                      <td className="td">{d.name}</td>
+                      <td className="td">
+                        {d.name}
+                        {d.capability_overrides && (
+                          <span className="ml-1.5 inline-flex gap-1 align-middle">
+                            {d.capabilities?.vision && <Badge tone="accent">vision</Badge>}
+                            {d.capabilities?.video_input && <Badge tone="accent">video</Badge>}
+                            {d.capabilities?.tools && <Badge tone="muted">tools</Badge>}
+                            {(d.capabilities?.modalities ?? []).includes("video") && !d.capabilities?.video_input && <Badge tone="muted">video-mod</Badge>}
+                          </span>
+                        )}
+                      </td>
                       <td className="td font-mono text-xs text-muted">
                         {d.model_name === "auto" ? (
                           <>
@@ -382,6 +408,11 @@ export default function BackendsPage() {
                     <div className="flex items-center gap-4">
                       <Toggle checked={d.enabled} onChange={(v) => updDep(editing, i, { enabled: v })} label="enabled" />
                       <Toggle checked={!!d.auto_load} onChange={(v) => updDep(editing, i, { auto_load: v })} label="auto-load" />
+                      <Toggle
+                        checked={!!d.capability_overrides}
+                        onChange={(v) => updDep(editing, i, { capability_overrides: v })}
+                        label="capability overrides"
+                      />
                     </div>
                     {editing.deployments.length > 1 && (
                       <button
@@ -392,6 +423,28 @@ export default function BackendsPage() {
                       </button>
                     )}
                   </div>
+                  {d.capability_overrides && (
+                    <div className="space-y-2 border-t border-border/50 pt-2">
+                      <div className="flex flex-wrap items-center gap-4">
+                        <Toggle checked={!!d.capabilities?.vision} onChange={(v) => updCap(editing, i, { vision: v })} label="vision" />
+                        <Toggle checked={!!d.capabilities?.video_input} onChange={(v) => updCap(editing, i, { video_input: v })} label="video input" />
+                        <Toggle checked={!!d.capabilities?.tools} onChange={(v) => updCap(editing, i, { tools: v })} label="tools" />
+                        <Toggle checked={!!d.capabilities?.json_mode} onChange={(v) => updCap(editing, i, { json_mode: v })} label="json mode" />
+                      </div>
+                      <Field label="Modalities" hint="comma-separated, unioned with probed values — e.g. text,image,video">
+                        <input
+                          className="input font-mono text-xs"
+                          value={(d.capabilities?.modalities ?? []).join(",")}
+                          placeholder="text,image,video"
+                          onChange={(e) =>
+                            updCap(editing, i, {
+                              modalities: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                            })
+                          }
+                        />
+                      </Field>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

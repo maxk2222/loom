@@ -1095,6 +1095,7 @@ fn merge_overrides(probed: &mut Capabilities, overrides: &Capabilities) {
     probed.audio_transcription |= overrides.audio_transcription;
     probed.audio_translation |= overrides.audio_translation;
     probed.video |= overrides.video;
+    probed.video_input |= overrides.video_input;
     probed.tools |= overrides.tools;
     probed.vision |= overrides.vision;
     probed.json_mode |= overrides.json_mode;
@@ -1123,6 +1124,7 @@ pub fn caps_to_pb(c: &Capabilities) -> loom_protocol::pb::Capabilities {
         audio_transcription: c.audio_transcription,
         audio_translation: c.audio_translation,
         video: c.video,
+        video_input: c.video_input,
     }
 }
 
@@ -1142,6 +1144,7 @@ pub fn caps_from_pb(c: &loom_protocol::pb::Capabilities) -> Capabilities {
         audio_transcription: c.audio_transcription,
         audio_translation: c.audio_translation,
         video: c.video,
+        video_input: c.video_input,
     }
 }
 

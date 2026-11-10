@@ -118,6 +118,11 @@ pub struct Capabilities {
     /// POST /v1/videos.
     #[serde(default)]
     pub video: bool,
+    /// Chat video *input* (video_url / input_video parts) — multimodal
+    /// video understanding, not generation. Also implied by a "video"
+    /// entry in `modalities`.
+    #[serde(default)]
+    pub video_input: bool,
     #[serde(default)]
     pub tools: bool,
     #[serde(default)]
@@ -155,6 +160,7 @@ impl Capabilities {
             && (!req.vision || self.vision)
             && (!req.streaming || self.streaming)
             && (!req.json_mode || self.json_mode)
+            && (!req.video || self.video_input || self.modalities.contains("video"))
     }
 }
 
@@ -169,6 +175,11 @@ pub struct RequiredCaps {
     pub streaming: bool,
     #[serde(default)]
     pub json_mode: bool,
+    /// Content parts carrying video input (video_url / input_video) —
+    /// routes only to multimodal deployments that declare video_input or
+    /// a "video" modality.
+    #[serde(default)]
+    pub video: bool,
 }
 
 /// Backend implementation families.

@@ -264,16 +264,21 @@ pub fn required_caps_from_request(body: &Value) -> crate::RequiredCaps {
         }
     }
     // vision: any message content part with type image_url / input_image / image
+    // video: any content part carrying video input (video_url / input_video / video)
     if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
-        'outer: for m in msgs {
+        for m in msgs {
             if let Some(parts) = m.get("content").and_then(|c| c.as_array()) {
                 for p in parts {
                     let t = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    if t.contains("image") || t == "image_url" || t == "input_image" {
+                    if t.contains("video") {
+                        req.video = true;
+                    } else if t.contains("image") || t == "image_url" || t == "input_image" {
                         req.vision = true;
-                        break 'outer;
                     }
                 }
+            }
+            if req.vision && req.video {
+                break;
             }
         }
     }
@@ -301,3 +306,62 @@ pub fn sse_data_line(v: &Value) -> String {
 }
 
 pub const SSE_DONE: &str = "data: [DONE]\n\n";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn detects_video_input_parts() {
+        let body = json!({"messages":[{"role":"user","content":[
+            {"type":"text","text":"describe"},
+            {"type":"video_url","video_url":{"url":"x.mp4"}}
+        ]}]});
+        let req = required_caps_from_request(&body);
+        assert!(req.video);
+        assert!(!req.vision);
+
+        // input_video / video spellings count too
+        for t in ["input_video", "video"] {
+            let body = json!({"messages":[{"role":"user","content":[{"type":t}]}]});
+            assert!(required_caps_from_request(&body).video, "type {t}");
+        }
+        // mixed image+video sets both
+        let body = json!({"messages":[{"role":"user","content":[
+            {"type":"image_url","image_url":{"url":"x"}},
+            {"type":"video_url","video_url":{"url":"x"}}
+        ]}]});
+        let req = required_caps_from_request(&body);
+        assert!(req.vision && req.video);
+    }
+
+    #[test]
+    fn satisfies_gates_video_input() {
+        use crate::capability::{Capabilities, RequiredCaps};
+        let req = RequiredCaps {
+            video: true,
+            ..Default::default()
+        };
+        // text-only deployment fails
+        assert!(!Capabilities::default().satisfies(&req));
+        // vision-only image VLM fails — video needs explicit support
+        let image_vlm = Capabilities {
+            vision: true,
+            ..Default::default()
+        };
+        assert!(!image_vlm.satisfies(&req));
+        // video_input flag satisfies
+        let v = Capabilities {
+            video_input: true,
+            ..Default::default()
+        };
+        assert!(v.satisfies(&req));
+        // "video" in modalities satisfies too
+        let m = Capabilities {
+            modalities: ["video".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!(m.satisfies(&req));
+    }
+}
