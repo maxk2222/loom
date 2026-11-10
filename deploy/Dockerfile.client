@@ -27,7 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && mkdir -p /etc/loom-client && chown loom:loom /etc/loom-client
 COPY --from=rust-build /out-client /usr/local/bin/loom-client
 COPY deploy/docker-entrypoint-client.sh /usr/local/bin/docker-entrypoint-client.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint-client.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint-client.sh && \
+    date +%s > /etc/loom-build-id
 # Starts as root: the entrypoint ownership-heals the state dir then drops
 # to uid 10001 via runuser (host-mounted files are often foreign-uid).
 USER root
