@@ -9,7 +9,7 @@ use loom_client::scheduler::LocalScheduler;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -211,6 +211,16 @@ async fn async_main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "127.0.0.1:8391".parse().unwrap());
     let app = local_api::router(state);
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    if !bind_addr.ip().is_loopback()
+        && cfg.local_api.api_key.is_empty()
+        && cfg.local_api.user_hash.is_empty()
+    {
+        warn!(
+            %bind_addr,
+            "local API is reachable from the network with NO authentication — \
+             set local_api.api_key or a UI user before exposing it"
+        );
+    }
     info!(%bind_addr, "local API + UI listening");
 
     let shutdown = connector.clone();

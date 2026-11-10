@@ -258,8 +258,8 @@ KEEP_CRED=$(printf '%s\n' "$EFF_CFG" | grep -m1 '^device_credential = "' || true
 { [ -s "$CFG" ] && grep -q '^client_id = "[0-9a-f]' "$CFG"; } || [ -n "$KEEP_ID" ] && ENROLLED=1
 if [ "$ENROLLED" = "1" ] && [ "$RECONFIGURE" = "0" ]; then
     ok "existing enrolled config reused (client_id present)"
-    { [ "$PROBE_OLLAMA" = "0" ] || [ "$PROBE_VLLM" = "0" ] || [ "$PROBE_LMS" = "0" ] || [ "$ADD_AUTO" = "1" ] || [ -n "$MODELS" ]; } && \
-        warn "backend options ignored on an existing install — pass --reconfigure to apply them"
+    { [ "$PROBE_OLLAMA" = "0" ] || [ "$PROBE_VLLM" = "0" ] || [ "$PROBE_LMS" = "0" ] || [ "$ADD_AUTO" = "1" ] || [ -n "$MODELS" ] || [ "$LAPI_BIND" != "127.0.0.1" ]; } && \
+        warn "backend/bind options ignored on an existing install — pass --reconfigure to apply them"
 else
     LKEY=$(openssl rand -hex 24)
     cat > "$CFG" <<EOF

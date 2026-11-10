@@ -65,6 +65,11 @@ if [ ! -f "$CFG" ]; then
 
     NAME="$(esc "${LOOM_CLIENT_NAME:-$(hostname)}")"
     BIND="$(esc "${LOOM_LOCAL_API_BIND:-0.0.0.0:8391}")"
+    case "$BIND" in
+        127.0.0.1:*|localhost:*|\[::1\]:*) ;;
+        *) [ -n "${LOOM_LOCAL_API_KEY:-}" ] || \
+            echo "loom-client: WARNING — local API binds $BIND with no LOOM_LOCAL_API_KEY set; unauthenticated from the network" >&2 ;;
+    esac
     SHARING="$(bool "${LOOM_SHARING:-}" true)"
     CPU="$(num "${LOOM_PRESSURE_CPU:-}" 0)"; [ "$CPU" -le 100 ] || CPU=100
     RAM="$(num "${LOOM_PRESSURE_RAM:-}" 0)"; [ "$RAM" -le 100 ] || RAM=100
