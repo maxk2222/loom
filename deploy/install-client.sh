@@ -43,27 +43,35 @@ if [[ "$EUID" -ne 0 ]] && [[ "$OS" == "Linux" ]]; then
   exit 1
 fi
 
-find_bin() {
+# Staging dir for binaries downloaded by this script (kept out of the caller's
+# ./bin on purpose — we may be running as root in someone's $HOME).
+STAGE_DIR=""
+trap '[[ -n "$STAGE_DIR" ]] && rm -rf "$STAGE_DIR"' EXIT
+
+lookup_bin() {
   local bin="$1"
   if command -v "$bin" >/dev/null 2>&1; then
     command -v "$bin"
   elif [[ -x "./bin/$bin" ]]; then
     echo "./bin/$bin"
+  elif [[ -n "$STAGE_DIR" && -x "${STAGE_DIR}/${bin}" ]]; then
+    echo "${STAGE_DIR}/${bin}"
   else
-    echo "!! $bin not found — place release binaries under ./bin/ or PATH" >&2
-    exit 1
+    return 1
   fi
+}
+
+find_bin() {
+  local bin="$1"
+  lookup_bin "$bin" && return 0
+  echo "!! $bin not found — place release binaries under ./bin/ or PATH" >&2
+  return 1
 }
 
 # Optional binaries (e.g. the loom CLI before it shipped in releases): install
 # when present, skip with a notice otherwise.
 find_bin_opt() {
-  local bin="$1"
-  if command -v "$bin" >/dev/null 2>&1; then
-    command -v "$bin"
-  elif [[ -x "./bin/$bin" ]]; then
-    echo "./bin/$bin"
-  fi
+  lookup_bin "$1"
 }
 
 # --- newest-release download -------------------------------------------------
@@ -97,27 +105,26 @@ latest_tag() {
   printf '%s' "$tag"
 }
 
-# Download loom-client (+ loom when the release ships it) into ./bin so the
-# regular find_bin path picks them up. sha256 is verified when published.
+# Download loom-client (+ loom when the release ships it) into $STAGE_DIR so the
+# find_bin path picks them up. sha256 is verified when published.
 download_release() {
-  local arch ver base tmp f want got
+  local arch ver base f want got
   arch="$(release_arch)" || { echo "!! no release for platform ${OS}-$(uname -m)" >&2; return 1; }
   ver="$LOOM_VERSION"
   [[ "$ver" == latest ]] && ver="$(latest_tag)"
   [[ -n "$ver" ]] || { echo "!! could not resolve latest release tag" >&2; return 1; }
   ver="${ver#v}"
   base="https://github.com/${LOOM_REPO}/releases/download/v${ver}"
-  tmp="$(mktemp -d)"
-  mkdir -p ./bin
+  STAGE_DIR="$(mktemp -d)"
   for b in loom-client loom; do
     f="${b}-${ver}-${arch}"
-    if curl -fsSL -o "${tmp}/${f}" "${base}/${f}" 2>/dev/null; then
-      if curl -fsSL -o "${tmp}/${f}.sha256" "${base}/${f}.sha256" 2>/dev/null; then
-        want="$(tr -d '[:space:]' < "${tmp}/${f}.sha256")"
-        got="$(sha256_of "${tmp}/${f}")"
+    if curl -fsSL -o "${STAGE_DIR}/${f}" "${base}/${f}" 2>/dev/null; then
+      if curl -fsSL -o "${STAGE_DIR}/${f}.sha256" "${base}/${f}.sha256" 2>/dev/null; then
+        want="$(tr -d '[:space:]' < "${STAGE_DIR}/${f}.sha256")"
+        got="$(sha256_of "${STAGE_DIR}/${f}")"
         [[ "$want" == "$got" ]] || { echo "!! sha256 mismatch for ${f}" >&2; return 1; }
       fi
-      install -m 0755 "${tmp}/${f}" "./bin/${b}"
+      install -m 0755 "${STAGE_DIR}/${f}" "${STAGE_DIR}/${b}"
       echo ">> downloaded ${f}"
     elif [[ "$b" == loom ]]; then
       echo ">> loom CLI not in release — skipping (optional)"
@@ -126,7 +133,6 @@ download_release() {
       return 1
     fi
   done
-  rm -rf "$tmp"
 }
 
 # Fetch the newest release when the client binary isn't already available.
@@ -146,7 +152,8 @@ if [[ "$OS" == "Linux" ]]; then
   # ProtectSystem=strict, which makes ${PREFIX} read-only — a binary under
   # ReadWritePaths is the only location the self-updater may swap in place.
   # /usr/local/bin/loom-client stays a convenience symlink for manual runs.
-  install -m 0755 "$(find_bin loom-client)" "${DATA_DIR}/bin/loom-client"
+  client_bin="$(find_bin loom-client)"
+  install -m 0755 "$client_bin" "${DATA_DIR}/bin/loom-client"
   chown -R loom-client:loom-client "$DATA_DIR"
   if loom_bin="$(find_bin_opt loom)" && [[ -n "$loom_bin" ]]; then
     install -m 0755 "$loom_bin" "${BIN_DIR}/loom"
@@ -157,7 +164,8 @@ if [[ "$OS" == "Linux" ]]; then
 else
   CONFIG_DIR="${HOME}/Library/Application Support/loom-client"
   mkdir -p "$CONFIG_DIR"
-  install -m 0755 "$(find_bin loom-client)" "${BIN_DIR}/loom-client"
+  client_bin="$(find_bin loom-client)"
+  install -m 0755 "$client_bin" "${BIN_DIR}/loom-client"
   if loom_bin="$(find_bin_opt loom)" && [[ -n "$loom_bin" ]]; then
     install -m 0755 "$loom_bin" "${BIN_DIR}/loom"
   else
