@@ -271,8 +271,29 @@ or reuse an existing CA dir via `LOOM_DATA_DIR`). Clients handle the rest:
   dropped after repeated TLS failures and re-issued automatically.
 - Manual `client_cert_path`/`client_key_path` remain supported;
   `connector.bootstrap_url` overrides the issuance endpoint (default:
-  server port + 1). `LOOM_GRPC_PLAIN_BIND` keeps a legacy plaintext
-  listener for zero-downtime migrations — remove once the fleet is over.
+  server port + 1). `LOOM_GRPC_PLAIN_BIND` opens a plaintext h2c agent
+  listener — for migrations, or as the tunnel-facing origin for a
+  public Cloudflare fallback path (see `docs/runbooks/cloudflare.md`);
+  keep it on the compose/loopback network, never map it to a host port.
+
+**Multi-endpoint failover** — a client can carry an ordered endpoint
+list and roams between networks automatically:
+
+```toml
+[connector]
+endpoints = [
+  { url = "https://loom.lan:50052", pki = true },          # LAN
+  { url = "https://loom.ts.net:50052", pki = true },       # Tailscale
+  { url = "https://grpc.loom.example.com", pki = false },  # public fallback
+]
+```
+
+Earlier entries win. On failure the client walks the list with backoff;
+on a fallback it re-probes the preferred endpoints every ~45 s and
+migrates back when LAN/Tailscale returns. `pki = false` disables cert
+bootstrap/CSR on that endpoint (Cloudflare terminates TLS — the device
+credential still gates session identity). `server_url` keeps working as
+the implicit single pki endpoint.
 
 TLS policy on the client: `[connector] tls = "require"` upgrades any
 `http://` URL, `"off"` forces plaintext, `"auto"` follows the scheme;

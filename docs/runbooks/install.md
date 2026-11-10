@@ -55,8 +55,9 @@ LOOM_GRPC_TLS_CERT=/etc/loom/server.crt
 LOOM_GRPC_TLS_KEY=/etc/loom/server.key
 LOOM_MTLS=1                            # require client certs signed by the CA
 LOOM_GRPC_BOOTSTRAP_BIND=0.0.0.0:50053 # cert issuance (TLS, no client cert)
-# optional during migration only:
-LOOM_GRPC_PLAIN_BIND=0.0.0.0:50051     # legacy plaintext — remove once done
+# optional: migrations, or the tunnel-facing origin for a public
+# Cloudflare fallback — see runbooks/cloudflare.md; never map to a host port:
+# LOOM_GRPC_PLAIN_BIND=0.0.0.0:50054
 ```
 
 The server creates an internal CA at `$LOOM_DATA_DIR/tls/ca.{crt,key}` on
@@ -137,6 +138,11 @@ loom status                                   # local admin API
 curl http://127.0.0.1:8391/healthz
 curl http://127.0.0.1:8391/v1/models          # local priority API
 ```
+
+The local UI/API binds loopback by default. For LAN access pass `--lan`
+to `setup-client.sh` (docker) or set `local_api.bind = "0.0.0.0:8391"`
+(native) — always keep `local_api.api_key` configured; the setup script
+generates one automatically.
 
 ## Smoke test (central)
 

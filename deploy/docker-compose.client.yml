@@ -48,9 +48,10 @@ services:
       # Optional: seed your own config.toml / ca.crt (refreshed when newer):
       # - ./seed:/etc/loom-seed:ro
     ports:
-      # Local dashboard + priority API — loopback-only by default; expose
-      # wider only together with LOOM_LOCAL_API_KEY.
-      - "127.0.0.1:8391:8391"
+      # Local dashboard + priority API — loopback-only by default. Set
+      # LOOM_UI_BIND=0.0.0.0 to reach it from the LAN; keep
+      # LOOM_LOCAL_API_KEY set so the exposed API stays authenticated.
+      - "${LOOM_UI_BIND:-127.0.0.1}:8391:8391"
     # Host-wide stats: with no memory limit the monitor sees real host
     # pressure via procfs. Setting mem_limit scopes ram_pct to the container.
     # NVIDIA hosts (needs container toolkit): uncomment for GPU utilization

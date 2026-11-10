@@ -30,6 +30,8 @@
 #   --sharing           sharing on/off       (default: true)
 #   --pressure-cpu N    tier-2 gate %        (default: 0 = off)
 #   --pressure-ram N    tier-2 gate %        (default: 0 = off)
+#   --lan               bind local UI/API on 0.0.0.0 (default: 127.0.0.1;
+#                       the generated api_key keeps it authenticated)
 set -euo pipefail
 
 SERVER=""; TOKEN="${LOOM_ENROLL_TOKEN:-}"; NAME="$(hostname)"
@@ -38,6 +40,9 @@ CA_FILE=""; CA_URL=""; SERVER_HTTP=""
 OLLAMA=""; VLLM=""; VLLM_KEY=""; LMSTUDIO=""
 MODELS=""; ADD_AUTO=0; SHARING=true; PCPU=0; PRAM=0
 PROBE_OLLAMA=1; PROBE_VLLM=1; PROBE_LMS=1; RECONFIGURE=0
+# Loopback-only by default; --lan binds the local UI/API on all interfaces
+# (api_key is always generated, so LAN exposure stays authenticated).
+LAPI_BIND="127.0.0.1"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -58,6 +63,7 @@ while [ $# -gt 0 ]; do
         --auto) ADD_AUTO=1; shift;;
         --reconfigure) RECONFIGURE=1; shift;;
         --sharing) SHARING="$2"; shift 2;;
+        --lan) LAPI_BIND="0.0.0.0"; shift;;
         --pressure-cpu) PCPU="$2"; shift 2;;
         --pressure-ram) PRAM="$2"; shift 2;;
         *) echo "unknown option: $1" >&2; exit 2;;
@@ -264,7 +270,7 @@ sharing_enabled = $SHARING
 $KEEP_ID
 $KEEP_CRED
 [local_api]
-bind = "127.0.0.1:$CFG_LAPI_PORT"
+bind = "$LAPI_BIND:$CFG_LAPI_PORT"
 api_key = "$LKEY"
 serve_ui = true
 
@@ -304,7 +310,7 @@ NET="    network_mode: host"
 uname -s | grep -qi darwin && NET="    extra_hosts:
       - \"host.docker.internal:host-gateway\"
     ports:
-      - \"127.0.0.1:$LAPI_PORT:8391\""
+      - \"$LAPI_BIND:$LAPI_PORT:8391\""
 
 # GPU monitoring: give the container read access to the NVIDIA driver so
 # sysmon can report GPU utilization (e.g. DGX GB10). Only when a GPU and
