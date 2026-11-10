@@ -268,7 +268,7 @@ export default function RoutersPage() {
       {open && (
         <Modal open title={editId ? "Edit router" : "New router"} onClose={() => setOpen(false)}>
           <form onSubmit={save} className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="API name">
                 <input className="input font-mono" required value={f.api_name} placeholder="loom-auto"
                   onChange={(e) => setF({ ...f, api_name: e.target.value })} />
@@ -415,7 +415,7 @@ export default function RoutersPage() {
               )}
             </div>
 
-            <div className={`grid gap-3 ${isHeuristic ? "" : "grid-cols-2"}`}>
+            <div className={`grid gap-3 ${isHeuristic ? "" : "grid-cols-1 sm:grid-cols-2"}`}>
               <Field label="Fallback model" hint={isHeuristic ? "used when no rule matches (else a catch-all member is required)" : undefined}>
                 <Select value={f.config.fallback_model}
                   options={[{ value: "", label: "none" }, ...engines.map((m) => ({ value: m.api_name, label: m.api_name }))]}

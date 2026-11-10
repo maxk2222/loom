@@ -205,7 +205,7 @@ export default function BackendsPage() {
                   </button>
                 </div>
               </div>
-              <table className="w-full">
+              <div className="overflow-x-auto"><table className="w-full">
                 <thead>
                   <tr>
                     <th className="th">Deployment</th>
@@ -237,7 +237,7 @@ export default function BackendsPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
               {(b.detected_models?.length ?? 0) > 0 && (
                 <div className="flex flex-wrap items-center gap-2 border-t border-border/40 pt-3">
                   <span className="text-xs text-muted">Detected:</span>
@@ -273,7 +273,7 @@ export default function BackendsPage() {
       <Modal open={!!editing} title={editing?.id ? "Edit backend" : "Add backend"} onClose={() => { setEditing(null); setTesting(null); }} wide>
         {editing && (
           <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <Field label="Name">
                 <input className="input" value={editing.name} onChange={(e) => upd(editing, { name: e.target.value })} placeholder="e.g. ollama-main" />
               </Field>
@@ -356,7 +356,7 @@ export default function BackendsPage() {
               </div>
               {editing.deployments.map((d, i) => (
                 <div key={i} className="card space-y-2 border-border/70 p-3">
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <Field label="Deployment name">
                       <input className="input" value={d.name} onChange={(e) => updDep(editing, i, { name: e.target.value })} placeholder="llama-8b" />
                     </Field>
@@ -364,7 +364,7 @@ export default function BackendsPage() {
                       <input className="input font-mono" value={d.model_name} onChange={(e) => updDep(editing, i, { model_name: e.target.value })} placeholder='llama3.1:8b or "auto"' />
                     </Field>
                   </div>
-                  <div className="grid grid-cols-4 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
                     <Field label="Max">
                       <input className="input" type="number" min={1} value={d.max_concurrent} onChange={(e) => updDep(editing, i, { max_concurrent: +e.target.value })} />
                     </Field>

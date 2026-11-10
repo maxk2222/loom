@@ -111,7 +111,7 @@ export default function NotesPage() {
           <Field label="Body" hint="shown under the title on client dashboards">
             <textarea className="input min-h-[90px]" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Details, instructions, links…" />
           </Field>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="Severity">
               <Select value={severity} onChange={setSeverity} options={[
                 { value: "info", label: "info" },
@@ -123,7 +123,7 @@ export default function NotesPage() {
               <Select value={target} onChange={setTarget} options={targetOpts} />
             </Field>
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="Expires after (hours)" hint="0 = never">
               <input className="input" type="number" min={0} value={expiresHours} onChange={(e) => setExpiresHours(+e.target.value)} />
             </Field>

@@ -181,7 +181,7 @@ export default function ModelsPage() {
       <Modal open={open} title={editId ? `Edit ${f.api_name}` : "New virtual model"} onClose={() => setOpen(false)} wide>
         <form onSubmit={save} className="space-y-4">
           <SectionTitle>Basics</SectionTitle>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="API name" hint="Model id used in /v1 requests">
               <input className="input font-mono" value={f.api_name} disabled={!!editId} onChange={(e) => setF({ ...f, api_name: e.target.value })} required placeholder="vm-llama3" />
             </Field>
@@ -190,7 +190,7 @@ export default function ModelsPage() {
           <Field label="Description"><input className="input" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></Field>
 
           <SectionTitle>Routing</SectionTitle>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="Strategy" hint={strat?.hint}>
               <Select value={f.routing_strategy} onChange={(v) => setF({ ...f, routing_strategy: v })} options={STRATEGIES.map(s => ({ value: s.value, label: s.label }))} />
             </Field>

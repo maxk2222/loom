@@ -25,7 +25,7 @@ export default function SchedulerPage() {
   return (
     <div className="space-y-6">
       <h1 className="text-lg font-semibold">Scheduler</h1>
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
         {(state.data?.queues ?? []).map((q) => (
           <Card key={q.class}>
             <div className="text-xs text-muted">Priority class {q.class}</div>

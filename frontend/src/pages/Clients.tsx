@@ -130,7 +130,7 @@ export default function ClientsPage() {
         ) : (
           <form onSubmit={issue} className="space-y-4">
             <Field label="Label"><input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="workstation-a12" /></Field>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="Max uses"><input className="input" type="number" min={1} value={maxUses} onChange={(e) => setMaxUses(+e.target.value)} /></Field>
               <Field label="Expires (hours)"><input className="input" type="number" min={1} value={hours} onChange={(e) => setHours(+e.target.value)} /></Field>
             </div>

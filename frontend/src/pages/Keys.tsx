@@ -90,7 +90,7 @@ export default function KeysPage() {
                 options={[{ value: "", label: "— select —" }, ...(projects.data?.projects ?? []).map((p) => ({ value: p.id, label: p.slug }))]} />
             </Field>
             <Field label="Name"><input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="batch-jobs" /></Field>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <Field label="RPM limit"><input className="input" type="number" min={0} value={f.rpm_limit} onChange={(e) => setF({ ...f, rpm_limit: +e.target.value })} /></Field>
               <Field label="TPM limit"><input className="input" type="number" min={0} value={f.tpm_limit} onChange={(e) => setF({ ...f, tpm_limit: +e.target.value })} /></Field>
               <Field label="Concurrency"><input className="input" type="number" min={0} value={f.max_concurrent} onChange={(e) => setF({ ...f, max_concurrent: +e.target.value })} /></Field>

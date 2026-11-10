@@ -81,7 +81,7 @@ export default function MonitoringPage() {
           <WindowPicker value={win} onChange={setWin} />
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <Card><div className="text-xs text-muted">TTFT p50</div><div className="mt-1 text-2xl font-semibold">{fmtMs(p50)}</div></Card>
         <Card><div className="text-xs text-muted">TTFT p99</div><div className="mt-1 text-2xl font-semibold">{fmtMs(p99)}</div></Card>
         <Card><div className="text-xs text-muted">Failures (recent)</div><div className="mt-1 text-2xl font-semibold text-err">{failures}</div></Card>

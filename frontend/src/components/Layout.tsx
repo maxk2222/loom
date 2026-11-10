@@ -10,6 +10,7 @@ import {
   LogOut,
   Megaphone,
   MonitorCog,
+  Menu,
   UserCog,
   ScrollText,
   Settings as SettingsIcon,
@@ -116,6 +117,7 @@ function StatusBar() {
 export default function Layout() {
   const brand = useBranding();
   const nav = useNavigate();
+  const [drawer, setDrawer] = useState(false);
   const items = APP_VARIANT === "client" ? CLIENT_NAV : SERVER_NAV;
 
   const logout = async () => {
@@ -127,66 +129,90 @@ export default function Layout() {
     nav("/login");
   };
 
-  return (
-    <div className="flex min-h-screen">
-      <aside className="sticky top-0 flex h-screen w-56 shrink-0 flex-col border-r border-border bg-panel/60 backdrop-blur">
-        <div className="grad-line" />
-        <div className="flex items-center gap-2.5 px-4 pb-4 pt-4">
-          <Logo size={30} />
-          <div className="min-w-0">
-            <div className="grad-text text-sm font-bold leading-tight tracking-wide">
-              {brand.app_name}
-            </div>
-            <div className="truncate text-[10px] leading-tight text-muted">
-              {APP_VARIANT === "client" ? "Workstation Client" : "Server Dashboard"}
-            </div>
+  const sidebar = (
+    <>
+      <div className="grad-line" />
+      <div className="flex items-center gap-2.5 px-4 pb-4 pt-4">
+        <Logo size={30} />
+        <div className="min-w-0">
+          <div className="grad-text text-sm font-bold leading-tight tracking-wide">
+            {brand.app_name}
+          </div>
+          <div className="truncate text-[10px] leading-tight text-muted">
+            {APP_VARIANT === "client" ? "Workstation Client" : "Server Dashboard"}
           </div>
         </div>
-        <nav className="flex-1 space-y-0.5 overflow-y-auto px-2.5">
-          {items.map((it) => (
-            <NavLink
-              key={it.to}
-              to={it.to}
-              end={it.to === "/"}
-              className={({ isActive }) =>
-                clsx(
-                  "group relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-all",
-                  isActive
-                    ? "bg-accent/12 text-text"
-                    : "text-muted hover:bg-panel2 hover:text-text",
-                )
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <span
-                    className={clsx(
-                      "absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full transition-all",
-                      isActive ? "bg-accent opacity-100" : "opacity-0",
-                    )}
-                    style={isActive ? { background: "var(--grad)" } : undefined}
-                  />
-                  <span className={isActive ? "text-accent" : "text-muted/70 group-hover:text-muted"}>
-                    {it.icon}
-                  </span>
-                  {it.label}
-                </>
-              )}
-            </NavLink>
-          ))}
-        </nav>
-        
-        <StatusBar /><div className="space-y-1 border-t border-border p-2.5">
-          {APP_VARIANT === "server" && (
-            <button onClick={logout} className="btn-ghost w-full justify-start px-3">
-              <LogOut size={16} /> Sign out
-            </button>
-          )}
-          <VersionTag />
-        </div>
+      </div>
+      <nav className="flex-1 space-y-0.5 overflow-y-auto px-2.5" onClick={() => setDrawer(false)}>
+        {items.map((it) => (
+          <NavLink
+            key={it.to}
+            to={it.to}
+            end={it.to === "/"}
+            className={({ isActive }) =>
+              clsx(
+                "group relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-all",
+                isActive
+                  ? "bg-accent/12 text-text"
+                  : "text-muted hover:bg-panel2 hover:text-text",
+              )
+            }
+          >
+            {({ isActive }) => (
+              <>
+                <span
+                  className={clsx(
+                    "absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full transition-all",
+                    isActive ? "bg-accent opacity-100" : "opacity-0",
+                  )}
+                  style={isActive ? { background: "var(--grad)" } : undefined}
+                />
+                <span className={isActive ? "text-accent" : "text-muted/70 group-hover:text-muted"}>
+                  {it.icon}
+                </span>
+                {it.label}
+              </>
+            )}
+          </NavLink>
+        ))}
+      </nav>
+      <StatusBar />
+      <div className="space-y-1 border-t border-border p-2.5">
+        {APP_VARIANT === "server" && (
+          <button onClick={logout} className="btn-ghost w-full justify-start px-3">
+            <LogOut size={16} /> Sign out
+          </button>
+        )}
+        <VersionTag />
+      </div>
+    </>
+  );
+
+  return (
+    <div className="flex min-h-screen">
+      {/* Desktop sidebar */}
+      <aside className="sticky top-0 hidden h-screen w-56 shrink-0 flex-col border-r border-border bg-panel/60 backdrop-blur md:flex">
+        {sidebar}
       </aside>
+      {/* Mobile drawer */}
+      {drawer && (
+        <div className="fixed inset-0 z-40 md:hidden">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setDrawer(false)} />
+          <aside className="page-enter absolute left-0 top-0 flex h-full w-64 flex-col border-r border-border bg-panel">
+            {sidebar}
+          </aside>
+        </div>
+      )}
       <div className="flex min-w-0 flex-1 flex-col">
-        <main className="min-w-0 flex-1 p-6 lg:p-8">
+        {/* Mobile top bar */}
+        <header className="sticky top-0 z-30 flex items-center gap-3 border-b border-border bg-bg/80 px-4 py-3 backdrop-blur md:hidden">
+          <button className="btn-ghost p-1.5" onClick={() => setDrawer(true)} aria-label="Open menu">
+            <Menu size={18} />
+          </button>
+          <Logo size={22} />
+          <span className="grad-text text-sm font-bold tracking-wide">{brand.app_name}</span>
+        </header>
+        <main className="min-w-0 flex-1 p-4 sm:p-6 lg:p-8">
         <div className="page-enter mx-auto w-full max-w-6xl">
           <Outlet />
         </div>

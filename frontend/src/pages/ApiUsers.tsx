@@ -246,7 +246,7 @@ export default function ApiUsersPage() {
               ))}
             </div>
           </Field>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <Field label="rpm"><input className="input w-full" type="number" min={1} value={f.rpm_limit} onChange={(e) => setF({ ...f, rpm_limit: +e.target.value })} /></Field>
             <Field label="tpm"><input className="input w-full" type="number" min={1} value={f.tpm_limit} onChange={(e) => setF({ ...f, tpm_limit: +e.target.value })} /></Field>
             <Field label="concurrent"><input className="input w-full" type="number" min={1} value={f.max_concurrent} onChange={(e) => setF({ ...f, max_concurrent: +e.target.value })} /></Field>
@@ -270,7 +270,7 @@ export default function ApiUsersPage() {
               ))}
             </div>
           </Field>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <Field label="rpm"><input className="input w-full" type="number" min={1} value={editLimits.rpm_limit} onChange={(e) => setEditLimits({ ...editLimits, rpm_limit: +e.target.value })} /></Field>
             <Field label="tpm"><input className="input w-full" type="number" min={1} value={editLimits.tpm_limit} onChange={(e) => setEditLimits({ ...editLimits, tpm_limit: +e.target.value })} /></Field>
             <Field label="concurrent"><input className="input w-full" type="number" min={1} value={editLimits.max_concurrent} onChange={(e) => setEditLimits({ ...editLimits, max_concurrent: +e.target.value })} /></Field>

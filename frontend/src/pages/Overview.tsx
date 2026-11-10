@@ -361,7 +361,7 @@ export default function OverviewPage() {
       </div>
       <div className="card">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Connected clients</div>
-        <table className="w-full">
+        <div className="overflow-x-auto"><table className="w-full">
           <thead><tr><th className="th">Name</th><th className="th">Status</th><th className="th">Version</th><th className="th">Platform</th><th className="th">Last seen</th></tr></thead>
           <tbody>
             {(clients.data?.clients ?? []).map((c) => (
@@ -377,7 +377,7 @@ export default function OverviewPage() {
               <tr><td className="td text-center text-muted" colSpan={5}>No clients registered</td></tr>
             )}
           </tbody>
-        </table>
+        </table></div>
       </div>
     </div>
   );

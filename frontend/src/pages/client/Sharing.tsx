@@ -66,7 +66,7 @@ export default function SharingPage() {
           </div>
           <Toggle checked={p.enabled} onChange={(v) => setP({ ...p, enabled: v })} />
         </div>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Field label="CPU limit %" hint="0 = ignore cpu">
             <input className="input" type="number" min={0} max={100} value={p.cpu_pct} onChange={(e) => setP({ ...p, cpu_pct: +e.target.value })} />
           </Field>
@@ -74,7 +74,7 @@ export default function SharingPage() {
             <input className="input" type="number" min={0} max={100} value={p.ram_pct} onChange={(e) => setP({ ...p, ram_pct: +e.target.value })} />
           </Field>
         </div>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Field label="Cooldown (seconds)" hint="hysteresis against flapping">
             <input className="input" type="number" min={0} value={p.cooldown_secs} onChange={(e) => setP({ ...p, cooldown_secs: +e.target.value })} />
           </Field>

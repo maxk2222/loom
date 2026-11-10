@@ -96,7 +96,7 @@ export default function ClientStatusPage() {
   return (
     <div className="space-y-6">
       <h1 className="text-lg font-semibold">Status</h1>
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 md:grid-cols-4">
         <Stat label="Server connection" value={<Badge tone={d?.server_connected ? "ok" : "err"}>{d?.server_connected ? "connected" : "offline"}</Badge>} />
         <Stat label="Uptime" value={fmtUptime(d?.uptime_secs ?? 0)} />
         <Stat label="Sharing" value={<Badge tone={d?.sharing_enabled ? "ok" : "muted"}>{d?.sharing_enabled ? "enabled" : "off"}</Badge>} />

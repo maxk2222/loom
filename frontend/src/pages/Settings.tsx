@@ -92,7 +92,7 @@ export default function SettingsPage() {
           <h2 className="text-sm font-medium">Scheduler</h2>
           {saved === "scheduler" && <Badge tone="ok">saved</Badge>}
         </div>
-        <form onSubmit={saveSched} className="grid grid-cols-2 gap-4">
+        <form onSubmit={saveSched} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <Field label="Max queue depth"><input className="input" type="number" value={s.max_queue} onChange={(e) => setS({ ...s, max_queue: +e.target.value })} /></Field>
           <Field label="Queue timeout (s)"><input className="input" type="number" value={s.queue_timeout_secs} onChange={(e) => setS({ ...s, queue_timeout_secs: +e.target.value })} /></Field>
           <Field label="Assign-ack timeout (ms)"><input className="input" type="number" value={s.assign_ack_timeout_ms} onChange={(e) => setS({ ...s, assign_ack_timeout_ms: +e.target.value })} /></Field>
