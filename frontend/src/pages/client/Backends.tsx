@@ -3,7 +3,7 @@ import { PlugZap, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../../lib/api";
 import { fmtMs } from "../../lib/format";
-import { Badge, Card, Empty, Field, Modal, PageHeader, Select, Spinner, Toggle } from "../../components/ui";
+import { Badge, Card, ConfirmModal, Empty, Field, Modal, PageHeader, Select, Spinner, Toggle } from "../../components/ui";
 
 interface DepForm {
   auto_load?: boolean;
@@ -104,9 +104,13 @@ export default function BackendsPage() {
       setEditing(null);
     },
   });
+  const [pendingDel, setPendingDel] = useState<{ id: string; name: string } | null>(null);
   const del = useMutation({
     mutationFn: (id: string) => api.del(`/local/api/backends/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["client-backends"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["client-backends"] });
+      setPendingDel(null);
+    },
   });
 
   // One-click deploy of a detected model: append a deployment with fleet
@@ -195,7 +199,7 @@ export default function BackendsPage() {
                   </button>
                   <button
                     className="btn-ghost px-2 py-1 text-xs text-err"
-                    onClick={() => confirm(`Delete backend "${b.name}"?`) && del.mutate(b.id)}
+                    onClick={() => setPendingDel({ id: b.id, name: b.name })}
                   >
                     <Trash2 size={14} />
                   </button>
@@ -407,6 +411,15 @@ export default function BackendsPage() {
           </div>
         )}
       </Modal>
+      <ConfirmModal
+        open={pendingDel !== null}
+        title="Delete backend"
+        danger
+        confirmLabel="Delete"
+        body={pendingDel ? `Delete backend "${pendingDel.name}" and all its deployments?` : ""}
+        onConfirm={() => pendingDel && del.mutate(pendingDel.id)}
+        onClose={() => setPendingDel(null)}
+      />
     </div>
   );
 }

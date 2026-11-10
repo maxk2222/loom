@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../lib/api";
-import { Card, Spinner } from "../components/ui";
+import { Card, ConfirmModal, Spinner } from "../components/ui";
 import type { HistoryRow, ApiUser, UsageStat } from "../lib/types";
 import { fmtTs, fmtTimeS, fmtMs, fmtNum } from "../lib/format";
 import { WindowPicker } from "./Overview";
@@ -33,12 +33,20 @@ export default function MonitoringPage() {
   const [win, setWin] = useState("24h");
   const [dim, setDim] = useState<typeof DIMS[number]["v"]>("models");
   const qc = useQueryClient();
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [purgeResult, setPurgeResult] = useState<string | null>(null);
+  const [purgeBusy, setPurgeBusy] = useState(false);
   const purge = async () => {
-    if (!confirm("Delete stats/history rows for models, clients and deployments that no longer exist? This cannot be undone.")) return;
-    const r = await api.post<{ deleted_history_rows: Record<string, number>; deleted_redis_keys: number }>("/api/stats/purge-orphans", {});
-    const n = Object.values(r.deleted_history_rows).reduce((a, b) => a + b, 0);
-    alert(`Purged ${n} history rows and ${r.deleted_redis_keys} runtime keys.`);
-    qc.invalidateQueries();
+    setPurgeBusy(true);
+    try {
+      const r = await api.post<{ deleted_history_rows: Record<string, number>; deleted_redis_keys: number }>("/api/stats/purge-orphans", {});
+      const n = Object.values(r.deleted_history_rows).reduce((a, b) => a + b, 0);
+      setPurgeOpen(false);
+      setPurgeResult(`Purged ${n} history rows and ${r.deleted_redis_keys} runtime keys.`);
+      qc.invalidateQueries();
+    } finally {
+      setPurgeBusy(false);
+    }
   };
   const usage = useQuery({ queryKey: ["usage"], queryFn: () => api.get<{ usage_24h: UsageStat[] }>("/api/stats/usage"), refetchInterval: 10000 });
   const hist = useQuery({ queryKey: ["hist"], queryFn: () => api.get<{ requests: HistoryRow[] }>("/api/history?limit=200"), refetchInterval: 5000 });
@@ -69,7 +77,7 @@ export default function MonitoringPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold">Monitoring</h1>
         <div className="flex items-center gap-3">
-          <button className="btn-ghost px-2 py-1 text-xs text-muted" onClick={purge}>Purge orphaned stats</button>
+          <button className="btn-ghost px-2 py-1 text-xs text-muted" onClick={() => setPurgeOpen(true)}>Purge orphaned stats</button>
           <WindowPicker value={win} onChange={setWin} />
         </div>
       </div>
@@ -171,6 +179,25 @@ export default function MonitoringPage() {
           </tbody>
         </table>
       </Card>
+      <ConfirmModal
+        open={purgeOpen}
+        title="Purge orphaned stats"
+        danger
+        busy={purgeBusy}
+        confirmLabel="Purge"
+        body="Delete stats/history rows for models, clients and deployments that no longer exist? This cannot be undone."
+        onConfirm={purge}
+        onClose={() => setPurgeOpen(false)}
+      />
+      <ConfirmModal
+        open={purgeResult !== null}
+        alert
+        title="Purge complete"
+        confirmLabel="OK"
+        body={purgeResult ?? ""}
+        onConfirm={() => setPurgeResult(null)}
+        onClose={() => setPurgeResult(null)}
+      />
     </div>
   );
 }

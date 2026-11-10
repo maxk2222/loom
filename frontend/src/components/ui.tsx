@@ -147,6 +147,49 @@ export function Modal({
   );
 }
 
+export function ConfirmModal({
+  open,
+  title,
+  body,
+  confirmLabel = "Confirm",
+  danger,
+  alert,
+  busy,
+  onConfirm,
+  onClose,
+}: {
+  open: boolean;
+  title: string;
+  body: ReactNode;
+  confirmLabel?: string;
+  danger?: boolean;
+  /** alert mode: single dismiss button, no cancel */
+  alert?: boolean;
+  busy?: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal open={open} title={title} onClose={onClose}>
+      <div className="text-sm text-muted">{body}</div>
+      <div className="mt-5 flex justify-end gap-2">
+        {!alert && (
+          <button className="btn-ghost px-3 py-1.5 text-sm" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+        )}
+        <button
+          className={clsx("px-3 py-1.5 text-sm", danger && !alert ? "btn-danger" : "btn")}
+          onClick={onConfirm}
+          disabled={busy}
+        >
+          {busy ? "…" : confirmLabel}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 export function Field({
   label,
   children,

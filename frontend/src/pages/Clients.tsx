@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
-import { Badge, Card, Field, Modal, Spinner } from "../components/ui";
+import { Badge, Card, ConfirmModal, Field, Modal, Spinner } from "../components/ui";
 import type { ClientRow } from "../lib/types";
 import { fmtPct, fmtTs } from "../lib/format";
 
@@ -26,14 +26,17 @@ export default function ClientsPage() {
     await api.post(`/api/clients/${id}/status`, { status });
     await q.refetch();
   };
-  const remove = async (id: string, name: string) => {
-    if (!confirm(`Remove client "${name}" permanently? Its deployments leave all virtual models and the device credential stops working.`)) return;
-    await api.del(`/api/clients/${id}`);
+  const [pendingRemove, setPendingRemove] = useState<{ id: string; name: string } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const remove = async () => {
+    if (!pendingRemove) return;
+    await api.del(`/api/clients/${pendingRemove.id}`);
+    setPendingRemove(null);
     await q.refetch();
   };
   const pushUpdate = async (id: string) => {
     const r = await api.post<{ live?: boolean }>(`/api/clients/${id}/update`).catch(() => null);
-    if (r) alert(r.live ? "Update pushed to the live session." : "Update queued — applies on the client's next check-in.");
+    if (r) setNotice(r.live ? "Update pushed to the live session." : "Update queued — applies on the client's next check-in.");
     q.refetch();
   };
 
@@ -104,7 +107,7 @@ export default function ClientsPage() {
                       ) : (
                         <button className="btn-outline py-1 text-xs" onClick={() => setStatus(c.id, "active")}>Activate</button>
                       )}
-                      <button className="btn-outline py-1 text-xs text-red-400" onClick={() => remove(c.id, c.name)}>Remove</button>
+                      <button className="btn-outline py-1 text-xs text-red-400" onClick={() => setPendingRemove({ id: c.id, name: c.name })}>Remove</button>
                     </span>
                   </td>
                 </tr>
@@ -135,6 +138,24 @@ export default function ClientsPage() {
           </form>
         )}
       </Modal>
+      <ConfirmModal
+        open={pendingRemove !== null}
+        title="Remove client"
+        danger
+        confirmLabel="Remove"
+        body={pendingRemove ? `Remove client "${pendingRemove.name}" permanently? Its deployments leave all virtual models and the device credential stops working.` : ""}
+        onConfirm={remove}
+        onClose={() => setPendingRemove(null)}
+      />
+      <ConfirmModal
+        open={notice !== null}
+        alert
+        title="Client update"
+        confirmLabel="OK"
+        body={notice ?? ""}
+        onConfirm={() => setNotice(null)}
+        onClose={() => setNotice(null)}
+      />
     </div>
   );
 }

@@ -3,7 +3,7 @@ import { GripVertical, Plus, Trash2 } from "lucide-react";
 import { useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
-import { Badge, Card, Field, Modal, Select, Spinner, Toggle } from "../components/ui";
+import { Badge, Card, ConfirmModal, Field, Modal, Select, Spinner, Toggle } from "../components/ui";
 import type { DeploymentRow, Member, VirtualModel } from "../lib/types";
 
 const STRATEGIES = [
@@ -115,9 +115,11 @@ export default function ModelsPage() {
     refresh();
   };
 
-  const del = async (id: string) => {
-    if (!confirm("Delete this virtual model?")) return;
-    await api.del(`/api/models/${id}`);
+  const [pendingDel, setPendingDel] = useState<{ id: string; name: string } | null>(null);
+  const del = async () => {
+    if (!pendingDel) return;
+    await api.del(`/api/models/${pendingDel.id}`);
+    setPendingDel(null);
     refresh();
   };
 
@@ -166,7 +168,7 @@ export default function ModelsPage() {
                 ) : (
                   <button className="btn-outline flex-1 justify-center py-1 text-xs" onClick={() => openEdit(m.id)}>Edit</button>
                 )}
-                <button className="btn-danger py-1 text-xs" onClick={() => del(m.id)}>Delete</button>
+                <button className="btn-danger py-1 text-xs" onClick={() => setPendingDel({ id: m.id, name: m.api_name })}>Delete</button>
               </div>
             </Card>
           ))}
@@ -306,6 +308,15 @@ export default function ModelsPage() {
           <button className="btn-primary w-full justify-center">{editId ? "Save" : "Create"}</button>
         </form>
       </Modal>
+      <ConfirmModal
+        open={pendingDel !== null}
+        title="Delete virtual model"
+        danger
+        confirmLabel="Delete"
+        body={pendingDel ? `Delete virtual model "${pendingDel.name}"?` : ""}
+        onConfirm={del}
+        onClose={() => setPendingDel(null)}
+      />
     </div>
   );
 }

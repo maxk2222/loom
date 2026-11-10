@@ -1,20 +1,29 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { api } from "../lib/api";
-import { Badge, Card, Spinner } from "../components/ui";
+import { Badge, Card, ConfirmModal, Spinner } from "../components/ui";
 import type { DeploymentRow } from "../lib/types";
 
 export default function DeploymentsPage() {
   const qc = useQueryClient();
+  const [pending, setPending] = useState<DeploymentRow | null>(null);
+  const [busy, setBusy] = useState(false);
   const q = useQuery({
     queryKey: ["deployments"],
     queryFn: () => api.get<{ deployments: DeploymentRow[] }>("/api/deployments"),
     refetchInterval: 5000,
   });
 
-  const del = async (d: DeploymentRow) => {
-    if (!confirm(`Delete "${d.name}" (${d.model_name})? The deployment is removed on the client too and cannot be undone.`)) return;
-    await api.del(`/api/deployments/${d.id}?hard=true`);
-    qc.invalidateQueries({ queryKey: ["deployments"] });
+  const del = async () => {
+    if (!pending) return;
+    setBusy(true);
+    try {
+      await api.del(`/api/deployments/${pending.id}?hard=true`);
+      qc.invalidateQueries({ queryKey: ["deployments"] });
+      setPending(null);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -63,17 +72,27 @@ export default function DeploymentsPage() {
                   </td>
                   <td className="td">{d.enabled ? <Badge tone="ok">enabled</Badge> : <Badge tone="err">disabled</Badge>}</td>
                   <td className="td text-right">
-                    <button className="btn-danger px-2 py-0.5 text-xs" onClick={() => del(d)}>Delete</button>
+                    <button className="btn-danger px-2 py-0.5 text-xs" onClick={() => setPending(d)}>Delete</button>
                   </td>
                 </tr>
               );})}
               {(q.data?.deployments ?? []).length === 0 && (
-                <tr><td className="td text-center text-muted" colSpan={8}>No deployments reported yet.</td></tr>
+                <tr><td className="td text-center text-muted" colSpan={9}>No deployments reported yet.</td></tr>
               )}
             </tbody>
           </table>
         </Card>
       )}
+      <ConfirmModal
+        open={pending !== null}
+        title="Delete deployment"
+        danger
+        busy={busy}
+        confirmLabel="Delete"
+        body={pending ? `"${pending.name}" (${pending.model_name}) — the deployment is removed on the client too and cannot be undone.` : ""}
+        onConfirm={del}
+        onClose={() => setPending(null)}
+      />
     </div>
   );
 }

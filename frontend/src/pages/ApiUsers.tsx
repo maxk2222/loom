@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy, KeyRound, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../lib/api";
-import { Badge, Card, Field, Modal, Spinner, Toggle } from "../components/ui";
+import { Badge, Card, ConfirmModal, Field, Modal, Spinner, Toggle } from "../components/ui";
 import type { ApiUser, VirtualModel } from "../lib/types";
 import { fmtNum } from "../lib/format";
 
@@ -153,9 +153,11 @@ export default function ApiUsersPage() {
     refresh();
   };
 
-  const del = async (p: ApiUser) => {
-    if (!confirm(`Delete API user "${p.name}" and its keys?`)) return;
-    await api.del(`/api/projects/${p.id}`);
+  const [pendingDel, setPendingDel] = useState<ApiUser | null>(null);
+  const del = async () => {
+    if (!pendingDel) return;
+    await api.del(`/api/projects/${pendingDel.id}`);
+    setPendingDel(null);
     refresh();
   };
 
@@ -217,7 +219,7 @@ export default function ApiUsersPage() {
                         <button className="btn-ghost p-1" title={p.enabled ? "disable" : "enable"} onClick={() => toggle(p)}>
                           <KeyRound size={14} />
                         </button>
-                        <button className="btn-ghost p-1 text-red-400" title="delete" onClick={() => del(p)}>
+                        <button className="btn-ghost p-1 text-red-400" title="delete" onClick={() => setPendingDel(p)}>
                           <Trash2 size={14} />
                         </button>
                       </div>
@@ -301,6 +303,15 @@ export default function ApiUsersPage() {
           <button className="btn-primary w-full justify-center" onClick={() => setFreshKey(null)}>Done</button>
         </div>
       </Modal>
+      <ConfirmModal
+        open={pendingDel !== null}
+        title="Delete API user"
+        danger
+        confirmLabel="Delete"
+        body={pendingDel ? `Delete API user "${pendingDel.name}" and its keys?` : ""}
+        onConfirm={del}
+        onClose={() => setPendingDel(null)}
+      />
     </div>
   );
 }

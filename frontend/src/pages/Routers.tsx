@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Plus, Route, Trash2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
-import { Badge, Card, Field, Modal, Select, Spinner, Toggle } from "../components/ui";
+import { Badge, Card, ConfirmModal, Field, Modal, Select, Spinner, Toggle } from "../components/ui";
 import type { DeploymentRow, VirtualModel } from "../lib/types";
 
 interface WhenRule {
@@ -115,9 +115,11 @@ export default function RoutersPage() {
     }
   };
 
-  const del = async (id: string) => {
-    if (!confirm("Delete this router?")) return;
-    await api.del(`/api/routers/${id}`);
+  const [pendingDel, setPendingDel] = useState<{ id: string; name: string } | null>(null);
+  const del = async () => {
+    if (!pendingDel) return;
+    await api.del(`/api/routers/${pendingDel.id}`);
+    setPendingDel(null);
     refresh();
   };
 
@@ -223,7 +225,7 @@ export default function RoutersPage() {
               <div className="flex gap-2 border-t border-border/60 pt-2.5">
                 <button className="btn-outline py-1 text-xs" onClick={() => { setTestId(r.id); setTestRes(null); }}>Test</button>
                 <button className="btn-outline py-1 text-xs" onClick={() => openEdit(r)}>Edit</button>
-                <button className="btn-ghost ml-auto py-1 text-xs text-err" onClick={() => del(r.id)}><Trash2 size={14} /></button>
+                <button className="btn-ghost ml-auto py-1 text-xs text-err" onClick={() => setPendingDel({ id: r.id, name: r.api_name })}><Trash2 size={14} /></button>
               </div>
             </Card>
           ))}
@@ -445,6 +447,15 @@ export default function RoutersPage() {
           </form>
         </Modal>
       )}
+      <ConfirmModal
+        open={pendingDel !== null}
+        title="Delete router"
+        danger
+        confirmLabel="Delete"
+        body={pendingDel ? `Delete router "${pendingDel.name}"?` : ""}
+        onConfirm={del}
+        onClose={() => setPendingDel(null)}
+      />
     </div>
   );
 }
