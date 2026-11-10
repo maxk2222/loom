@@ -81,7 +81,6 @@ release_arch() {
     Linux-x86_64)            echo linux-x86_64 ;;
     Linux-aarch64|Linux-arm64) echo linux-aarch64 ;;
     Darwin-arm64)            echo macos-aarch64 ;;
-    Darwin-x86_64)           echo macos-x86_64 ;;
     *) return 1 ;;
   esac
 }
