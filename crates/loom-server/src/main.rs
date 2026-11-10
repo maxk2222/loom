@@ -287,9 +287,16 @@ async fn main() -> anyhow::Result<()> {
         env!("CARGO_MANIFEST_DIR"),
         "/../../deploy/install-client.sh"
     ));
+    // WebSocket agent transport on the HTTP listener — the only
+    // bidirectional path that survives proxies which buffer request
+    // bodies (cloudflared http2 without QUIC). Same auth model as the
+    // gRPC listeners: credential in Hello, fencing token in Head.
+    let mut ws_svc = (*svc).clone();
+    ws_svc.listener = "ws";
     let app = axum::Router::new()
         .merge(gw)
         .merge(adm)
+        .merge(ws_agent::router(ws_svc))
         .merge(dashboard_static::router())
         .route("/healthz", get(|| async { "ok" }))
         // Public CA trust anchor for client bootstrap (TOFU): lets setup

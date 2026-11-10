@@ -370,6 +370,17 @@ pub fn manifest_base(cfg: &UpdaterConfig, server_url: &str) -> String {
     if u.is_empty() {
         return String::new();
     }
+    // WebSocket agent endpoints ride on the HTTP gateway — the same host
+    // serves the release manifest. Without the scheme map a wss:// URL
+    // produces a ws:// manifest request that always fails to parse.
+    let u = if let Some(rest) = u.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = u.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        u.to_string()
+    };
+    let u = u.as_str();
     // gRPC agent ports → HTTP dashboard :8080 (LOOM defaults). Works
     // with or without an explicit scheme on server_url.
     for port in [":50051", ":50052", ":50053", ":50054"] {
@@ -573,6 +584,22 @@ imqqDIPsV8ArLIM/Z0azYXQxuB1Hsrejc2NLm9d6DF1Uinc7ZBO9YC0AtUZV1kov9p1u7QEJmtgqHGEW
             manifest_base(&cfg, "http://host:50051"),
             "https://l.example.com"
         );
+    }
+
+    #[test]
+    fn manifest_base_maps_ws_schemes_to_http() {
+        let cfg = UpdaterConfig::default();
+        // WS endpoints ride on the HTTP gateway — manifest lives there too.
+        assert_eq!(
+            manifest_base(&cfg, "wss://grpc.example.com"),
+            "https://grpc.example.com"
+        );
+        assert_eq!(
+            manifest_base(&cfg, "ws://10.0.0.5:8080"),
+            "http://10.0.0.5:8080"
+        );
+        // gRPC port mapping still applies after the scheme map.
+        assert_eq!(manifest_base(&cfg, "wss://host:50052"), "https://host:8080");
     }
 
     #[test]

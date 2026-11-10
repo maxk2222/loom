@@ -36,7 +36,7 @@ pin-project-lite = "0.2"
 async-stream = "0.3"
 
 # http
-axum = { version = "0.8", features = ["multipart", "macros"] }
+axum = { version = "0.8", features = ["multipart", "macros", "ws"] }
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "fs", "timeout"] }
 hyper = { version = "1", features = ["full"] }
@@ -90,6 +90,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
 rustls = "0.23"
+rustls-native-certs = "0.8"
+rustls-pemfile = "2"
 rcgen = { version = "0.13", features = ["x509-parser"] }
 time = "0.3"
 url = "2"

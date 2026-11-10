@@ -215,7 +215,12 @@ impl Scheduler {
     pub async fn deliver_data(
         &self,
         request_id: &str,
-        stream: tonic::Streaming<loom_protocol::pb::DataFrame>,
+        stream: std::pin::Pin<
+            Box<
+                dyn futures_util::Stream<Item = Result<loom_protocol::pb::DataFrame, tonic::Status>>
+                    + Send,
+            >,
+        >,
         outbound: mpsc::Sender<loom_protocol::pb::DataFrame>,
     ) -> bool {
         self.inner

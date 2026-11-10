@@ -83,7 +83,11 @@ services:
     profiles: ["tunnel"]
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    command: tunnel --no-autoupdate --protocol http2 run
+    # "auto" prefers QUIC (streams gRPC/WebSocket request bodies live);
+    # "http2" buffers request bodies until the stream ends — bidirectional
+    # gRPC through the tunnel can never complete a Hello that way. QUIC
+    # needs outbound UDP/7844; without it cloudflared falls back to http2.
+    command: tunnel --no-autoupdate --protocol auto run
     environment:
       TUNNEL_TOKEN: ${CF_TUNNEL_TOKEN}
     depends_on:

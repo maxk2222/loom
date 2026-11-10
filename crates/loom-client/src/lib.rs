@@ -15,3 +15,4 @@ pub mod tls_pki;
 #[cfg(feature = "tray")]
 pub mod tray;
 pub mod updater;
+pub mod ws_agent;

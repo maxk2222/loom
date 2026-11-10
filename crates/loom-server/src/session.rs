@@ -5,13 +5,17 @@
 //! - `await_data`: correlates an incoming RequestData stream (head frame) to a
 //!   pending assignment.
 
+use futures_util::Stream;
 use loom_protocol::pb::{DataFrame, ServerEnvelope};
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tonic::Streaming;
 
-type DataStreamPair = (Streaming<DataFrame>, mpsc::Sender<DataFrame>);
+/// Inbound client data stream: `tonic::Streaming` on gRPC transports,
+/// a decoded WebSocket adapter stream on the WS bridge.
+type InboundData = Pin<Box<dyn Stream<Item = Result<DataFrame, tonic::Status>> + Send>>;
+type DataStreamPair = (InboundData, mpsc::Sender<DataFrame>);
 
 #[derive(Default)]
 pub struct SessionManager {
@@ -137,7 +141,7 @@ impl SessionManager {
     pub async fn deliver_data(
         &self,
         request_id: &str,
-        inbound: Streaming<DataFrame>,
+        inbound: InboundData,
         outbound: mpsc::Sender<DataFrame>,
     ) -> bool {
         let mut inner = self.inner.lock().await;

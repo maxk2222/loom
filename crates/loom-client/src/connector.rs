@@ -12,6 +12,7 @@ use crate::backend_manager::BackendManager;
 use crate::config::ConfigStore;
 use crate::scheduler::{LocalScheduler, RequestClass};
 use crate::telemetry;
+use crate::ws_agent;
 use anyhow::Context;
 use futures_util::StreamExt;
 use loom_core::capability::ApiType;
@@ -37,6 +38,43 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 enum SessionEnd {
     Clean,
     Prefer(usize),
+}
+
+/// Transport behind one endpoint: tonic gRPC or the WebSocket bridge.
+/// `request_data`/`get_config` funnel through it so the request runner
+/// and config sync stay transport-agnostic.
+#[derive(Clone)]
+enum AgentTransport {
+    Grpc(AgentClient<Channel>),
+    Ws(Arc<ws_agent::WsAgent>),
+}
+
+impl AgentTransport {
+    /// Open a per-request data stream; the caller's `out` queue carries
+    /// Head/response frames, the returned stream yields server frames.
+    async fn request_data(
+        &self,
+        out: mpsc::Receiver<DataFrame>,
+    ) -> anyhow::Result<ws_agent::Inbound<DataFrame>> {
+        match self {
+            Self::Grpc(agent) => {
+                let mut a = agent.clone();
+                let resp = a.request_data(ReceiverStream::new(out)).await?;
+                Ok(Box::pin(resp.into_inner()))
+            }
+            Self::Ws(agent) => agent.request_data(out).await,
+        }
+    }
+
+    async fn get_config(&self, req: ConfigRequest) -> anyhow::Result<ConfigSnapshot> {
+        match self {
+            Self::Grpc(agent) => {
+                let mut a = agent.clone();
+                Ok(a.get_config(req).await?.into_inner())
+            }
+            Self::Ws(agent) => agent.get_config(req).await,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -243,7 +281,7 @@ impl Connector {
                             continue;
                         }
                         Err(e) => {
-                            warn!(url = %ep.url, error = %e, "control session failed");
+                            warn!(url = %ep.url, error = %format!("{e:#}"), "control session failed");
                             backoff = (backoff * 2).min(MAX_BACKOFF);
                             // Rotate to the next endpoint on failure.
                             ep_idx = (ep_idx + 1) % eps.len();
@@ -479,8 +517,14 @@ impl Connector {
 
     /// Ordered effective endpoints: explicit `connector.endpoints`, else a
     /// single pki endpoint from `server_url` (classic behaviour).
+    /// Every port-less `https://` endpoint additionally gets a `wss://`
+    /// shadow at lowest priority: a 443 host without an explicit port is
+    /// almost always edge-proxied, where buffered tunnels (cloudflared
+    /// http2 without QUIC) can never finish a streaming gRPC Hello. The
+    /// WS bridge on the same host is the fallback; on plain gRPC servers
+    /// the extra dial just fails fast and rotation continues.
     fn endpoints(cfg: &ClientConfig) -> Vec<ConnectorEndpoint> {
-        if !cfg.connector.endpoints.is_empty() {
+        let mut eps = if !cfg.connector.endpoints.is_empty() {
             cfg.connector.endpoints.clone()
         } else if cfg.server_url.is_empty() {
             Vec::new()
@@ -489,7 +533,23 @@ impl Connector {
                 url: cfg.server_url.clone(),
                 pki: true,
             }]
-        }
+        };
+        let shadows: Vec<ConnectorEndpoint> = eps
+            .iter()
+            .filter(|e| e.url.starts_with("https://"))
+            .filter(|e| {
+                url::Url::parse(&e.url)
+                    .map(|u| u.port().is_none())
+                    .unwrap_or(false)
+            })
+            .filter_map(|e| {
+                let w = ws_agent::ws_url(&e.url);
+                (!eps.iter().any(|x| norm_ep_url(&x.url) == norm_ep_url(&w)))
+                    .then_some(ConnectorEndpoint { url: w, pki: e.pki })
+            })
+            .collect();
+        eps.extend(shadows);
+        eps
     }
 
     /// One control session against a specific endpoint. `earlier` lists the
@@ -512,17 +572,24 @@ impl Connector {
         // Auto-PKI: TLS + no manual cert paths → ensure a valid cert exists.
         // Skipped on pki=false endpoints (e.g. Cloudflare tunnel → plaintext
         // listener) — no cert bootstrap or CSR renewal against a path whose
-        // port+1 bootstrap listener is not reachable.
+        // port+1 bootstrap listener is not reachable. WebSocket endpoints
+        // have no separate bootstrap listener at all: the CSR rides inside
+        // Hello on the same channel, which is exactly what the listener's
+        // cert-issuance path expects.
+        let ws_ep = ws_agent::is_ws_url(&ep.url);
         let auto_pki = ep.pki
             && cfg.connector.tls != TlsMode::Off
             && cfg.connector.client_cert_path.is_empty()
             && match cfg.connector.tls {
                 TlsMode::Require => true,
-                _ => cfg.server_url.starts_with("https") || !cfg.server_url.contains("://"),
+                _ => {
+                    ws_ep || cfg.server_url.starts_with("https") || !cfg.server_url.contains("://")
+                }
             };
         if auto_pki && self.state.cert_store.needs_renewal() {
-            if self.state.cert_store.handshake_material().is_some() {
-                // Expiring-but-valid: renew inline — the CSR rides in Hello.
+            if ws_ep || self.state.cert_store.handshake_material().is_some() {
+                // WS transport or expiring-but-valid cert: renew inline —
+                // the CSR rides in Hello.
                 let cid = if cfg.client_id.is_empty() {
                     "new".into()
                 } else {
@@ -530,7 +597,7 @@ impl Connector {
                 };
                 *self.state.pending_csr.lock().await = Some(self.state.cert_store.csr_pem(&cid)?);
             } else if let Err(e) = self.bootstrap_cert(&cfg).await {
-                warn!(error = %e, "cert bootstrap failed — connecting without cert");
+                warn!(error = %format!("{e:#}"), "cert bootstrap failed — connecting without cert");
             } else {
                 // Fresh enrollment may have assigned client_id/credential —
                 // re-read before dialing the strict endpoint. The re-read
@@ -539,23 +606,7 @@ impl Connector {
                 cfg.server_url = ep.url.clone();
             }
         }
-        let endpoint = self.endpoint(&cfg).await?;
-        if endpoint.uri().scheme_str() == Some("http") {
-            let host = endpoint.uri().host().unwrap_or_default();
-            if !matches!(host, "localhost" | "127.0.0.1" | "::1") {
-                warn!(
-                    url = %ep.url,
-                    "plaintext gRPC endpoint on a non-loopback host — device credential travels unencrypted (set connector.tls=\"require\" or https://)"
-                );
-            }
-        }
-        let channel = endpoint.connect().await?;
-        let mut agent = AgentClient::new(channel);
-        *self.state.agent.lock().await = Some(agent.clone());
-
-        let (ctrl_tx, ctrl_rx) = mpsc::channel::<ClientEnvelope>(64);
-        let response = agent.control(ReceiverStream::new(ctrl_rx)).await?;
-        let mut inbound = response.into_inner();
+        let (mut inbound, transport, ctrl_tx) = self.open_control(&cfg, ep).await?;
 
         // Hello
         let hello = self.build_hello(&cfg).await;
@@ -603,7 +654,7 @@ impl Connector {
             );
             let cred = self.state.cfg_store.get().await.device_credential;
             let cid = self.state.cfg_store.get().await.client_id;
-            match agent
+            match transport
                 .get_config(ConfigRequest {
                     client_id: cid,
                     credential: cred,
@@ -611,8 +662,7 @@ impl Connector {
                 })
                 .await
             {
-                Ok(resp) => {
-                    let snap = resp.into_inner();
+                Ok(snap) => {
                     if let Err(e) = self
                         .apply_desired(&snap.desired_config_json, snap.config_version)
                         .await
@@ -669,18 +719,32 @@ impl Connector {
         // probe re-dials the preferred endpoints every 45 s. The first that
         // completes the real (m)TLS handshake ends this session early; the
         // run loop then migrates there and the server kicks this session.
-        let res = if earlier.is_empty() {
-            self.control_loop(&mut inbound, &ctrl_tx, &agent)
+        // Skip probing an earlier gRPC endpoint that maps onto THIS ws
+        // endpoint — it is the auto-shadow's own source. A plain connect()
+        // succeeds on buffered tunnels (that's what makes them dangerous),
+        // so without the filter the loop would endlessly migrate back to
+        // the same broken gRPC path.
+        let earlier_probe: Vec<(usize, ConnectorEndpoint)> = earlier
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                !(ws_agent::is_ws_url(&ep.url)
+                    && ws_agent::ws_url(&e.url) == ep.url.trim_end_matches('/'))
+            })
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        let res = if earlier_probe.is_empty() {
+            self.control_loop(&mut inbound, &ctrl_tx, &transport)
                 .await
                 .map(|_| SessionEnd::Clean)
         } else {
             let pcfg = cfg.clone();
             let pstate = self.state.clone();
-            let preferred = earlier.to_vec();
+            let preferred = earlier_probe.to_vec();
             let probe = async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(45)).await;
-                    for (i, e) in preferred.iter().enumerate() {
+                    for (orig_i, e) in preferred.iter() {
                         let identity = if e.pki {
                             pstate.cert_store.handshake_material()
                         } else {
@@ -694,7 +758,7 @@ impl Connector {
                         match Self::endpoint_tls(&pcfg, &e.url, identity, ca).await {
                             Ok(ep) => {
                                 if ep.connect().await.is_ok() {
-                                    return i;
+                                    return *orig_i;
                                 }
                             }
                             Err(e2) => {
@@ -705,7 +769,7 @@ impl Connector {
                 }
             };
             tokio::select! {
-                r = self.control_loop(&mut inbound, &ctrl_tx, &agent) => {
+                r = self.control_loop(&mut inbound, &ctrl_tx, &transport) => {
                     r.map(|_| SessionEnd::Clean)
                 }
                 i = probe => Ok(SessionEnd::Prefer(i)),
@@ -869,11 +933,52 @@ impl Connector {
         }
     }
 
+    /// Open the control channel on the endpoint's transport: `ws(s)://`
+    /// goes over the WebSocket bridge, everything else is tonic gRPC.
+    /// Both yield the same normalized halves — a Status-errored inbound
+    /// stream, a transport handle for data/config RPCs, and the outbound
+    /// sender every control message flows through.
+    async fn open_control(
+        &self,
+        cfg: &ClientConfig,
+        ep: &ConnectorEndpoint,
+    ) -> anyhow::Result<(
+        ws_agent::Inbound<ServerEnvelope>,
+        AgentTransport,
+        mpsc::Sender<ClientEnvelope>,
+    )> {
+        if ws_agent::is_ws_url(&ep.url) {
+            let agent = Arc::new(ws_agent::WsAgent::new(cfg, &ep.url)?);
+            let (tx, inbound) = agent.control().await?;
+            return Ok((inbound, AgentTransport::Ws(agent), tx));
+        }
+        let endpoint = self.endpoint(cfg).await?;
+        if endpoint.uri().scheme_str() == Some("http") {
+            let host = endpoint.uri().host().unwrap_or_default();
+            if !matches!(host, "localhost" | "127.0.0.1" | "::1") {
+                warn!(
+                    url = %ep.url,
+                    "plaintext gRPC endpoint on a non-loopback host — device credential travels unencrypted (set connector.tls=\"require\" or https://)"
+                );
+            }
+        }
+        let channel = endpoint.connect().await?;
+        let mut agent = AgentClient::new(channel);
+        *self.state.agent.lock().await = Some(agent.clone());
+        let (ctrl_tx, ctrl_rx) = mpsc::channel::<ClientEnvelope>(64);
+        let response = agent.control(ReceiverStream::new(ctrl_rx)).await?;
+        Ok((
+            Box::pin(response.into_inner()),
+            AgentTransport::Grpc(agent),
+            ctrl_tx,
+        ))
+    }
+
     async fn control_loop(
         &self,
-        inbound: &mut tonic::Streaming<ServerEnvelope>,
+        inbound: &mut ws_agent::Inbound<ServerEnvelope>,
         ctrl_tx: &mpsc::Sender<ClientEnvelope>,
-        agent: &AgentClient<Channel>,
+        agent: &AgentTransport,
     ) -> anyhow::Result<()> {
         while let Some(item) = inbound.next().await {
             let env = item?;
@@ -1045,7 +1150,7 @@ impl Connector {
         &self,
         a: AssignRequest,
         ctrl_tx: mpsc::Sender<ClientEnvelope>,
-        agent: AgentClient<Channel>,
+        agent: AgentTransport,
     ) {
         let state = self.state.clone();
         tokio::spawn(async move {
@@ -1208,7 +1313,7 @@ fn capacity_to_pb(c: &crate::scheduler::DeploymentCapacityInfo) -> DeploymentCap
 /// Execute one assigned inference request over a dedicated data stream.
 async fn run_request(
     state: Arc<ConnectorState>,
-    mut agent: AgentClient<Channel>,
+    agent: AgentTransport,
     a: AssignRequest,
     token: crate::scheduler::AdmitToken,
     ctrl_tx: mpsc::Sender<ClientEnvelope>,
@@ -1229,8 +1334,8 @@ async fn run_request(
         .await;
     let mut inbound = match head_res {
         Err(_) => None,
-        Ok(()) => match agent.request_data(ReceiverStream::new(data_rx)).await {
-            Ok(r) => Some(r.into_inner()),
+        Ok(()) => match agent.request_data(data_rx).await {
+            Ok(r) => Some(r),
             Err(e) => {
                 warn!(req = %request_id, error = %e, "open data stream failed");
                 None
@@ -1577,15 +1682,25 @@ pub(crate) fn empty_generation_failure(
     }
 }
 
-/// Default bootstrap endpoint: same host as server_url, port+1.
+/// Bootstrap (cert-issuance) URL derivation. Only meaningful on the
+/// standard gRPC listener set — agent :50051/:50052/:50054 pairs with the
+/// bootstrap listener on :50053. Port-less URLs and any other explicit
+/// port (custom gateway port, plain HTTPS on :443) keep the same URL:
+/// there is no bootstrap convention there, and guessing a neighbour port
+/// dials an edge port that either does not exist or serves a different
+/// protocol. The returned-same URL is still a valid fallback since the
+/// bootstrap service is the same AgentSvc on server-auth TLS — a single
+/// listener or an edge-proxied hostname can serve cert issuance directly.
 fn derive_bootstrap_url(server_url: &str) -> String {
     let u = server_url.trim_end_matches('/');
     if let Some(idx) = u.rfind(':') {
         if let Ok(port) = u[idx + 1..].parse::<u16>() {
-            return format!("{}:{}", &u[..idx], port + 1);
+            if (50051..=50054).contains(&port) {
+                return format!("{}:50053", &u[..idx]);
+            }
         }
     }
-    format!("{u}:50053")
+    u.to_string()
 }
 
 /// Endpoint URLs dedup on the normalized form (trailing slash ignored).
@@ -1694,9 +1809,12 @@ mod tls_policy_tests {
             },
         ];
         let eps = Connector::endpoints(&c);
-        assert_eq!(eps.len(), 2);
+        assert_eq!(eps.len(), 3);
         assert_eq!(eps[1].url, "https://grpc.example.com:443");
         assert!(!eps[1].pki);
+        // :443 normalizes away — still an edge-like port-less host, so the
+        // automatic wss:// shadow trails at lowest priority.
+        assert_eq!(eps[2].url, "wss://grpc.example.com:443");
         // server_url ignored when endpoints are configured.
         assert_eq!(eps[0].url, "https://lan:50052");
     }
@@ -1784,6 +1902,90 @@ mod tls_policy_tests {
         assert!(!super::json_has_output(&json!({"data":[]})));
         assert!(super::json_has_output(&json!({"text":"transcribed"})));
         assert!(super::json_has_output(&json!({"response":"ollama native"})));
+    }
+
+    #[test]
+    fn bootstrap_url_maps_agent_ports_to_50053() {
+        assert_eq!(
+            derive_bootstrap_url("https://lan:50052"),
+            "https://lan:50053"
+        );
+        assert_eq!(
+            derive_bootstrap_url("https://lan:50051"),
+            "https://lan:50053"
+        );
+        assert_eq!(
+            derive_bootstrap_url("http://10.0.0.5:50054"),
+            "http://10.0.0.5:50053"
+        );
+        assert_eq!(
+            derive_bootstrap_url("https://lan:50053"),
+            "https://lan:50053"
+        );
+    }
+
+    #[test]
+    fn bootstrap_url_leaves_public_and_custom_ports_alone() {
+        // Port-less edge hostnames must not grow a phantom :50053 — the
+        // edge only serves 443.
+        assert_eq!(
+            derive_bootstrap_url("https://grpc.ccl-lab.de"),
+            "https://grpc.ccl-lab.de"
+        );
+        assert_eq!(
+            derive_bootstrap_url("https://grpc.example.com:443"),
+            "https://grpc.example.com:443"
+        );
+        // Custom gateway/agent ports have no bootstrap convention.
+        assert_eq!(
+            derive_bootstrap_url("https://host:8443"),
+            "https://host:8443"
+        );
+        assert_eq!(
+            derive_bootstrap_url("wss://grpc.ccl-lab.de"),
+            "wss://grpc.ccl-lab.de"
+        );
+    }
+
+    #[test]
+    fn portless_https_endpoint_gains_wss_shadow() {
+        let c = cfg("https://grpc.example.com", TlsMode::Require);
+        let eps = Connector::endpoints(&c);
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps[0].url, "https://grpc.example.com");
+        assert_eq!(eps[1].url, "wss://grpc.example.com");
+        assert!(eps[1].pki);
+    }
+
+    #[test]
+    fn no_wss_shadow_for_explicit_ports_or_plain_http() {
+        let c = cfg("https://lan:50052", TlsMode::Require);
+        assert_eq!(Connector::endpoints(&c).len(), 1);
+        // :443 normalizes away — treated as edge-like, gains a shadow.
+        let c = cfg("https://host:443", TlsMode::Require);
+        let eps = Connector::endpoints(&c);
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps[1].url, "wss://host:443");
+        let c = cfg("http://lan:50054", TlsMode::Require);
+        assert_eq!(Connector::endpoints(&c).len(), 1);
+    }
+
+    #[test]
+    fn wss_shadow_not_duplicated_when_explicitly_configured() {
+        let mut c = cfg("", TlsMode::Auto);
+        c.connector.endpoints = vec![
+            ConnectorEndpoint {
+                url: "https://grpc.example.com".into(),
+                pki: true,
+            },
+            ConnectorEndpoint {
+                url: "wss://grpc.example.com".into(),
+                pki: false,
+            },
+        ];
+        let eps = Connector::endpoints(&c);
+        assert_eq!(eps.len(), 2);
+        assert!(!eps[1].pki);
     }
 
     #[test]

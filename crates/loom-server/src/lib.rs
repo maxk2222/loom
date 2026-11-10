@@ -22,3 +22,4 @@ pub mod session;
 pub mod settings;
 pub mod tls_ca;
 pub mod usage;
+pub mod ws_agent;

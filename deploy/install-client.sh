@@ -184,6 +184,54 @@ else
   fi
 fi
 
+# --- internal CA pin --------------------------------------------------------
+# The gateway serves the internal CA at /api/tls/ca.crt (a public trust
+# anchor — possession grants no access; device credentials and issued certs
+# still gate every session). Pinning it up-front lets the client verify
+# LAN/Tailscale mTLS endpoints immediately: the cert bootstrap listener and
+# later endpoint-hints failovers learned after enrollment.
+#
+# Gateway candidates derived from --server:
+#   https://host:5005{1..4} → same host on the gateway port convention :8080
+#   wss://pub.example.com  → https://pub.example.com (the public tunnel route
+#                           terminates on the gateway)
+gw_candidates() {
+  local url="$1" scheme rest host port
+  scheme="${url%%://*}"
+  rest="${url#*://}"
+  host="${rest%%[:/]*}"
+  port=""
+  case "$rest" in
+    *:*) port="${rest#*:}"; port="${port%%/*}" ;;
+  esac
+  case "$scheme" in
+    wss|grpcs) scheme="https" ;;
+    ws|grpc)   scheme="http" ;;
+  esac
+  case "$port" in
+    50051|50052|50053|50054) echo "${scheme}://${host}:8080" ;;
+    *) echo "${scheme}://${host}${port:+:$port}" ;;
+  esac
+}
+
+CA_FILE="${CONFIG_DIR}/ca.crt"
+if [[ ! -f "$CA_FILE" ]]; then
+  for base in $(gw_candidates "$SERVER_URL"); do
+    # Internal gateway ports answer with the internal CA's own chain — not yet
+    # trusted, so that fetch is TOFU like the bootstrap listener. Public hosts
+    # verify normally.
+    kflag=""
+    case "$base" in *:8080*) kflag="-k" ;; esac
+    if curl -fsSL $kflag -o "$CA_FILE.tmp" "$base/api/tls/ca.crt" 2>/dev/null \
+       && grep -q "BEGIN CERTIFICATE" "$CA_FILE.tmp" 2>/dev/null; then
+      mv "$CA_FILE.tmp" "$CA_FILE"
+      echo ">> Pinned internal CA from $base -> $CA_FILE"
+      break
+    fi
+    rm -f "$CA_FILE.tmp"
+  done
+fi
+
 CFG="${CONFIG_DIR}/config.toml"
 if [[ ! -f "$CFG" ]]; then
   echo ">> Writing $CFG"
@@ -198,6 +246,13 @@ bind = "127.0.0.1:8391"
 [updater]
 enabled = true
 EOF
+  if [[ -f "$CA_FILE" ]]; then
+    cat >> "$CFG" <<EOF
+
+[connector]
+ca_cert_path = "${CA_FILE}"
+EOF
+  fi
   [[ "$OS" == "Linux" ]] && chmod 640 "$CFG" && chown root:loom-client "$CFG"
 else
   echo ">> Keeping existing config at $CFG"
