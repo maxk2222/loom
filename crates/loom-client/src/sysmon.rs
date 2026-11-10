@@ -158,7 +158,15 @@ pub fn spawn(
                                 .find(|c| c.deployment_id == dep_id)
                                 .map(|c| c.health_ok)
                                 .unwrap_or(true);
-                            let _ = sched.set_dep_ready(&dep_id, healthy, false);
+                            let _ = sched.set_dep_ready(
+                                &dep_id,
+                                if healthy {
+                                    crate::adapters::Health::Healthy
+                                } else {
+                                    crate::adapters::Health::Down
+                                },
+                                false,
+                            );
                             capacity_notify.notify_one();
                             info!(deployment = %dep_id, "model unloaded (pressure offload)");
                         }

@@ -124,6 +124,12 @@ message DeploymentCapacity {
   string sharing_mode = 6;           // "private" | "opportunistic" | "shared"
   bool accepting = 7;                // admission gate currently open for tier2
   bool pressure_gated = 8;           // closed by local resource pressure (cpu/ram)
+  // Effective deployment health ("healthy"|"degraded"|"down"|"unknown") —
+  // adapter probe + circuit breaker. Lets the server distinguish "draining
+  // because busy/rewarming" (transient, queue) from "backend dead" (structural,
+  // fail fast) — stale inventory otherwise leaves health="unknown" while
+  // state="draining" keeps requests queued forever.
+  string health = 9;
 }
 
 message InventoryReport {

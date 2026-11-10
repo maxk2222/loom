@@ -71,6 +71,10 @@ struct DeploymentLimits {
     tier2_gate_closed: AtomicU32,
     /// Backend reachable (set by the health loop). Tier-2 only.
     health_ok: AtomicU32,
+    /// Last reported effective health (adapter probe + breaker):
+    /// 0=unknown, 1=healthy, 2=degraded, 3=down. Reported to the server so
+    /// it can tell a dead backend apart from a merely-busy draining member.
+    health: AtomicU32,
     /// Model actually servable: installed and — for auto_load deployments —
     /// resident in the backend (not evicted). Tier-2 only.
     model_ready: AtomicU32,
@@ -89,6 +93,7 @@ impl DeploymentLimits {
             // startup) proves otherwise — keeps tier-2 usable in contexts
             // without a health loop and during the probe race window.
             health_ok: AtomicU32::new(1),
+            health: AtomicU32::new(1),
             model_ready: AtomicU32::new(1),
         }
     }
@@ -435,6 +440,7 @@ impl LocalScheduler {
                     inflight_tier2: t2,
                     sharing_mode: *d.limits.sharing_mode.read().unwrap(),
                     health_ok: d.limits.health_ok.load(Ordering::SeqCst) == 1,
+                    health: health_from_u32(d.limits.health.load(Ordering::SeqCst)),
                     model_ready: d.limits.model_ready.load(Ordering::SeqCst) == 1,
                     accepting: t2_free > 0
                         && d.limits.tier2_gate_closed.load(Ordering::SeqCst) == 0
@@ -477,17 +483,29 @@ impl LocalScheduler {
             .collect()
     }
 
-    /// Set backend-health / model-readiness flags reported by the health
-    /// loop. Returns true when the effective pair changed (→ push capacity).
-    pub fn set_dep_ready(&self, dep_id: &str, health_ok: bool, model_ready: bool) -> bool {
+    /// Set backend-health / model-readiness reported by the health loop.
+    /// `health` is the effective Health (adapter probe + breaker, see
+    /// backend_manager::inventory) — health_ok derives from it. Returns true
+    /// when the effective flags changed (→ push capacity).
+    pub fn set_dep_ready(
+        &self,
+        dep_id: &str,
+        health: crate::adapters::Health,
+        model_ready: bool,
+    ) -> bool {
         let map = self.inner.deployments.read().unwrap();
         let Some(d) = map.get(dep_id) else {
             return false;
         };
-        let (h, m) = (health_ok as u32, model_ready as u32);
+        let (h, hs, m) = (
+            (health == crate::adapters::Health::Healthy) as u32,
+            health_to_u32(health),
+            model_ready as u32,
+        );
         let prev_h = d.limits.health_ok.swap(h, Ordering::SeqCst);
+        let prev_hs = d.limits.health.swap(hs, Ordering::SeqCst);
         let prev_m = d.limits.model_ready.swap(m, Ordering::SeqCst);
-        prev_h != h || prev_m != m
+        prev_h != h || prev_hs != hs || prev_m != m
     }
 
     /// Whether the tier-2 gate is currently closed for a deployment.
@@ -523,6 +541,24 @@ impl LocalScheduler {
     }
 }
 
+fn health_to_u32(h: crate::adapters::Health) -> u32 {
+    match h {
+        crate::adapters::Health::Unknown => 0,
+        crate::adapters::Health::Healthy => 1,
+        crate::adapters::Health::Degraded => 2,
+        crate::adapters::Health::Down => 3,
+    }
+}
+
+fn health_from_u32(v: u32) -> &'static str {
+    match v {
+        1 => "healthy",
+        2 => "degraded",
+        3 => "down",
+        _ => "unknown",
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DeploymentCapacityInfo {
     pub deployment_id: String,
@@ -532,6 +568,9 @@ pub struct DeploymentCapacityInfo {
     pub inflight_tier2: u32,
     pub sharing_mode: SharingMode,
     pub health_ok: bool,
+    /// Effective deployment health sent to the server ("healthy"|"degraded"|
+    /// "down"|"unknown") — same source the inventory report uses.
+    pub health: &'static str,
     pub model_ready: bool,
     pub accepting: bool,
     /// Closed by the system-pressure monitor (cpu/ram over configured limits).
@@ -570,17 +609,18 @@ mod tests {
             let _tok = s.try_admit("d1", RequestClass::Tier2, "r0").unwrap();
         } // token drop releases the slot
 
-        // backend down → admit rejected + not accepting
-        assert!(s.set_dep_ready("d1", false, true));
+        // backend down → admit rejected + not accepting + health reports down
+        assert!(s.set_dep_ready("d1", crate::adapters::Health::Down, true));
         let snap = &s.capacity_snapshot()[0];
-        assert!(!snap.accepting && !snap.health_ok);
+        assert!(!snap.accepting && !snap.health_ok && snap.health == "down");
         assert!(matches!(
             s.try_admit("d1", RequestClass::Tier2, "r1"),
             Err(RejectReason::BackendDown)
         ));
 
         // healthy but model evicted → same gate
-        assert!(s.set_dep_ready("d1", true, false));
+        assert!(s.set_dep_ready("d1", crate::adapters::Health::Healthy, false));
+        assert_eq!(s.capacity_snapshot()[0].health, "healthy");
         assert!(matches!(
             s.try_admit("d1", RequestClass::Tier2, "r2"),
             Err(RejectReason::BackendDown)
@@ -588,12 +628,12 @@ mod tests {
         assert!(!s.capacity_snapshot()[0].accepting);
 
         // back to ready → accepting again, no more change notifications
-        assert!(s.set_dep_ready("d1", true, true));
+        assert!(s.set_dep_ready("d1", crate::adapters::Health::Healthy, true));
         assert!(s.capacity_snapshot()[0].accepting);
-        assert!(!s.set_dep_ready("d1", true, true));
+        assert!(!s.set_dep_ready("d1", crate::adapters::Health::Healthy, true));
 
         // local requests are never gated by backend health
-        assert!(s.set_dep_ready("d1", false, false));
+        assert!(s.set_dep_ready("d1", crate::adapters::Health::Down, false));
         assert!(s.try_admit("d1", RequestClass::Local, "r3").is_ok());
     }
 

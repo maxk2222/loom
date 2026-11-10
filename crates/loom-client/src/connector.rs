@@ -976,6 +976,7 @@ fn capacity_to_pb(c: &crate::scheduler::DeploymentCapacityInfo) -> DeploymentCap
         sharing_mode: c.sharing_mode.as_str().into(),
         accepting: c.accepting,
         pressure_gated: c.pressure_gated,
+        health: c.health.into(),
     }
 }
 

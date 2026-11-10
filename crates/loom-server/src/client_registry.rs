@@ -318,8 +318,8 @@ impl ClientRegistry {
             } else {
                 "draining"
             };
-            let _: () = redis::cmd("HSET")
-                .arg(&key)
+            let mut h = redis::cmd("HSET");
+            h.arg(&key)
                 .arg("tier2_total")
                 .arg(cap.tier2_total)
                 .arg("tier2_free")
@@ -335,9 +335,15 @@ impl ClientRegistry {
                 .arg("pressure_gated")
                 .arg(cap.pressure_gated as u32)
                 .arg("last_report")
-                .arg(now_ms())
-                .query_async(&mut c)
-                .await?;
+                .arg(now_ms());
+            // Newer clients report effective health per capacity tick — the
+            // scheduler needs "down" here, not just the (staler) inventory
+            // value, or a dead-but-draining member looks "busy" forever.
+            // Older clients send "" → keep the inventory-written value.
+            if !cap.health.is_empty() {
+                h.arg("health").arg(&cap.health);
+            }
+            let _: () = h.query_async(&mut c).await?;
         }
         // wake the scheduler
         self.rt.publish("ev:capacity", "1").await.ok();

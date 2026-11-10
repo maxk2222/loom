@@ -323,8 +323,13 @@ impl BackendManager {
                 //  - auto_load=false: JIT loads on first request → stay ready
                 //  - model_name="auto" (local only): follows the backend's
                 //    current model — ready while one resolves
-                let health_ok =
-                    adapter_health == Health::Healthy && !self.inner.tracker.reports_down(&did);
+                // Effective health mirrors inventory(): an open breaker
+                // reports Down even when the adapter probe is still fine.
+                let effective_health = if self.inner.tracker.reports_down(&did) {
+                    Health::Down
+                } else {
+                    adapter_health
+                };
                 let dynamic = de.cfg.model_name == loom_core::config::DYNAMIC_MODEL && !remote;
                 let effective_model = if dynamic {
                     let current = de.resolved_model.read().await.clone();
@@ -373,7 +378,7 @@ impl BackendManager {
                             .unwrap_or(true);
                     (installed_ok && loaded_ok, model.to_string(), loaded_ok)
                 };
-                changed |= sched.set_dep_ready(&did, health_ok, ready);
+                changed |= sched.set_dep_ready(&did, effective_health, ready);
                 // Auto-load: warm the model once when the backend is healthy
                 // and the deployment is enabled+idle (re-warms after recovery).
                 // Keep-alive warm: JIT backends (LM Studio) evict idle models,
@@ -821,7 +826,10 @@ impl BackendManager {
         let cfg = self.inner.tracker.config();
         // Immediate isolation: stop tier-2 admission locally and make the
         // next capacity/inventory push carry `down` before waiting.
-        if ctx.sched.set_dep_ready(dep_id, false, true) {
+        if ctx
+            .sched
+            .set_dep_ready(dep_id, crate::adapters::Health::Down, true)
+        {
             ctx.capacity_notify.notify_one();
         }
         ctx.inventory_notify.notify_one();
@@ -884,7 +892,8 @@ impl BackendManager {
             };
             if warmed {
                 self.inner.tracker.healed(dep_id);
-                ctx.sched.set_dep_ready(dep_id, true, true);
+                ctx.sched
+                    .set_dep_ready(dep_id, crate::adapters::Health::Healthy, true);
                 ctx.capacity_notify.notify_one();
                 ctx.inventory_notify.notify_one();
                 crate::telemetry::recovery_event("healed");
