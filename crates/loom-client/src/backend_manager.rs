@@ -463,17 +463,13 @@ impl BackendManager {
                     });
                 }
                 drop(w);
-                // capability_overrides: skip probing entirely — the config's
-                // own capability table IS the authoritative report.
-                if de.cfg.capability_overrides && de.caps.read().await.is_none() {
-                    *de.caps.write().await = Some(de.cfg.capabilities.clone());
-                    inv_changed = true;
-                }
-                // Probe capabilities once (or when empty) unless overridden.
-                // Dynamic deps probe the resolved model — nothing to probe
-                // while no model is bound.
-                let needs_probe = !de.cfg.capability_overrides
-                    && de.caps.read().await.is_none()
+                // Probe capabilities once (or when invalidated). Dynamic deps
+                // probe the resolved model — nothing to probe while no model
+                // is bound. Manual overrides merge *over* the probe result:
+                // a partial override table (e.g. only `vision`) must never
+                // erase the probed base — that previously reported
+                // `chat:false` and removed the deployment from routing.
+                let needs_probe = de.caps.read().await.is_none()
                     && adapter_health != Health::Down
                     && !model.is_empty();
                 if needs_probe {
@@ -487,6 +483,13 @@ impl BackendManager {
                                 inv_changed = true;
                             }
                             Err(e) => {
+                                // Probe failed: with overrides set, the manual
+                                // table is the best report we have — without
+                                // it the deployment reports zero caps.
+                                if de.cfg.capability_overrides && de.caps.read().await.is_none() {
+                                    *de.caps.write().await = Some(de.cfg.capabilities.clone());
+                                    inv_changed = true;
+                                }
                                 warn!(deployment = %did, error = %e, "capability probe failed");
                             }
                         }
