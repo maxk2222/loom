@@ -36,13 +36,25 @@ cert, the origin never does. Two consequences:
 ```
 
 - `loom.example.com` → `http://127.0.0.1:8080` (dashboard + `/v1` + `/api`)
-- `agent.loom.example.com` → `http://127.0.0.1:50054` (agent gRPC, edge-mTLS)
-- `boot.loom.example.com` → `http://127.0.0.1:50054` (same listener —
+- `agent.loom.example.com` → `https://127.0.0.1:50053` (agent gRPC, edge-mTLS)
+- `boot.loom.example.com` → `https://127.0.0.1:50053` (same listener —
   initial cert issuance must work *without* a client cert, so this
   hostname carries no mTLS requirement)
 
-The loopback gRPC listener is `LOOM_GRPC_PLAIN_BIND` bound to
-`127.0.0.1` — reachable only via the tunnel, never off-host.
+The gRPC origin is the **bootstrap listener** (`LOOM_GRPC_BOOTSTRAP_BIND`)
+on `127.0.0.1`: TLS server-auth without a client-cert requirement, and it
+serves the *full* agent service — enrollment, CSR signing, sessions —
+reachable only via the tunnel, never off-host.
+
+> [!IMPORTANT]
+> **`cloudflared` releases cannot speak h2c to the origin.** Prior-knowledge
+> h2c for cleartext `http://` origins was merged upstream (commit `d4fbb16`,
+> 2026-07) but is not yet in a released binary — an `http://` service with
+> *Use HTTP/2 to origin* still dials **HTTP/1.1** and gRPC origins answer
+> `502`. Until a release ships it, the working origin is **TLS**: point
+> hostnames at `https://…:50053` with *No TLS Verify* + *Use HTTP/2 to
+> origin* (h2 via ALPN). Once h2c lands, `http://…:50054`
+> (`LOOM_GRPC_PLAIN_BIND`, loopback only) is the cleartext equivalent.
 
 ## Option A — hybrid (recommended when ports can be opened)
 
@@ -98,9 +110,11 @@ tunnel: <tunnel-id>
 credentials-file: /etc/cloudflared/<tunnel-id>.json
 ingress:
   - hostname: agent.loom.example.com
-    service: http://127.0.0.1:50054
+    service: https://127.0.0.1:50053
+    originRequest: { noTLSVerify: true, http2Origin: true }
   - hostname: boot.loom.example.com
-    service: http://127.0.0.1:50054
+    service: https://127.0.0.1:50053
+    originRequest: { noTLSVerify: true, http2Origin: true }
   - hostname: loom.example.com
     service: http://127.0.0.1:8080
   - service: http_status:404
@@ -109,11 +123,12 @@ ingress:
 ### Server env
 
 ```bash
-LOOM_GRPC_PLAIN_BIND=127.0.0.1:50054   # tunnel-facing agent+bootstrap listener
-LOOM_TRUST_PROXY=1                    # honour CF-Connecting-IP / X-Forwarded-*
-# Strict listeners may stay up for direct LAN reachability — or be omitted.
+LOOM_GRPC_BOOTSTRAP_BIND=127.0.0.1:50053   # tunnel-facing agent listener (TLS, no client cert)
+LOOM_TRUST_PROXY=1                        # honour CF-Connecting-IP / X-Forwarded-*
+# Strict mTLS listener may stay up for direct LAN reachability — or be omitted.
 LOOM_GRPC_BIND=127.0.0.1:50052
-LOOM_GRPC_BOOTSTRAP_BIND=127.0.0.1:50053
+# Once released cloudflared supports h2c, a loopback LOOM_GRPC_PLAIN_BIND
+# can serve as the origin instead of 50053.
 ```
 
 > `LOOM_TRUST_PROXY=1` tells the rate limiter, login throttle, audit log
@@ -163,18 +178,20 @@ endpoints = [
 - Endpoints are tried **in order** — earlier entries always win.
 - On a fallback the client probes the preferred endpoints every 45 s
   and migrates back as soon as one answers.
-- `pki = false` skips cert bootstrap/CSR (the `port+1` bootstrap
-  listener is not reachable through the tunnel anyway).
+- `pki = false` skips cert bootstrap/CSR on that endpoint (the client
+  can still send a CSR in Hello when a hinted `pki` endpoint later
+  becomes reachable — e.g. the LAN listener).
 - `server_url` still works as the implicit single pki endpoint —
   existing configs are unchanged.
 
-Server side, point a *second* tunnel public hostname at the plaintext
-agent listener — `grpc.loom.example.com` → `http://server:50054`
-(service type HTTP, HTTP/2 origin). Enable *Network → gRPC* in
+Server side, point a *second* tunnel public hostname at the bootstrap
+listener — `grpc.loom.example.com` → `https://server:50053` with
+*No TLS Verify* + *Use HTTP/2 to origin* (the listener serves the full
+agent service, enrollment included). Enable *Network → gRPC* in
 Cloudflare. No `agent.*`/`boot.*` split, no API Shield needed.
 
 ```bash
-LOOM_GRPC_PLAIN_BIND=0.0.0.0:50054    # compose-network only — never map to host
+LOOM_GRPC_BOOTSTRAP_BIND=0.0.0.0:50053  # tunnel-facing — TLS, no client-cert requirement
 ```
 
 Trade-offs vs. Option B: no client-cert check at the edge — anyone who
@@ -195,12 +212,21 @@ fine as a fallback path; prefer LAN/Tailscale when available.
   only for large audio/video uploads.
 - **gRPC through the tunnel**: cloudflared forwards HTTP/2; the
   bidirectional stream + 20 s keepalive survive it. Reconnect/backoff is
-  unchanged.
+  unchanged. On released cloudflared the origin must be TLS (`https://`
+  service + http2Origin + noTLSVerify) — cleartext `http://` origins are
+  still dialed HTTP/1.1 until prior-knowledge h2c ships.
 - **Real client IP**: with `LOOM_TRUST_PROXY=1`, audit logs and
   rate-limit buckets see the visitor IP, not the tunnel.
+- **Bootstrap listener exposure**: `LOOM_GRPC_BOOTSTRAP_BIND` accepts
+  any TLS client — app-layer credentials still gate everything (one-time
+  `enroll_` token or `dev_` credential; CSRs are bound to the
+  authenticated client id). Keep it compose-network/loopback; publishing
+  it on a host interface or tunnel is exactly the intended public
+  enrollment path, but then rate-limiting sits at the edge.
 - **Plaintext agent listener**: bind `LOOM_GRPC_PLAIN_BIND` to loopback
   ONLY. On a public interface it accepts any client with a credential —
-  no cert check.
+  no cert check. It is for the future h2c-capable cloudflared path or
+  trusted local terminators, not for released cloudflared.
 
 ## Verifying the setup
 

@@ -132,7 +132,7 @@ sequenceDiagram
     Note over S: /v1/chat/completions → route → queue → lease
     S-->>C: AssignRequest (request_id + lease + fencing)
     C->>S: AssignAck.accepted (local admission OK)
-    C->>S: RequestData stream (head + frames ≤4 MiB)
+    C->>S: RequestData stream (head + frames ≤1 MiB)
     C->>B: POST /v1/chat/completions
     B-->>C: SSE chunks
     C->>S: response_chunk frames + RequestEnd (usage, ttft)
@@ -275,10 +275,12 @@ or reuse an existing CA dir via `LOOM_DATA_DIR`). Clients handle the rest:
   dropped after repeated TLS failures and re-issued automatically.
 - Manual `client_cert_path`/`client_key_path` remain supported;
   `connector.bootstrap_url` overrides the issuance endpoint (default:
-  server port + 1). `LOOM_GRPC_PLAIN_BIND` opens a plaintext h2c agent
-  listener — for migrations, or as the tunnel-facing origin for a
-  public Cloudflare fallback path (see `docs/runbooks/cloudflare.md`);
-  keep it on the compose/loopback network, never map it to a host port.
+  server port + 1). The **bootstrap listener itself** is the public
+  Cloudflare-tunnel origin (`https://…:50053`, TLS + h2 origin — see
+  `docs/runbooks/cloudflare.md`). `LOOM_GRPC_PLAIN_BIND` opens a
+  plaintext h2c listener for migrations or a future h2c-capable
+  cloudflared; keep it on the compose/loopback network, never map it
+  to a host port.
 
 **Multi-endpoint failover** — a client can carry an ordered endpoint
 list and roams between networks automatically:
