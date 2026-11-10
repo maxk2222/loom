@@ -279,10 +279,20 @@ pub(crate) mod common {
             r.map_err(|e| AdapterError::Io(e.to_string()))
         });
 
+        // Field normalization only applies to text payloads — binary streams
+        // (audio/mpeg, octet-stream) must not be line-buffered: arbitrary byte
+        // runs without \n would stall chunks behind the line accumulator.
+        let textual = is_sse || content_type.contains("json");
+        let stream: ByteStream = if textual {
+            Box::pin(normalize_stream_fields(Box::pin(stream)))
+        } else {
+            Box::pin(stream)
+        };
+
         Ok(BackendResponse {
             status,
             is_event_stream: is_sse,
-            stream: Box::pin(normalize_stream_fields(Box::pin(stream))),
+            stream,
             content_type,
         })
     }
@@ -333,8 +343,9 @@ pub(crate) mod common {
         Box::pin(s)
     }
 
-    /// Normalize one payload line (`data: {...}` or bare JSON): rename
-    /// `reasoning` → `reasoning_content` in every `delta`/`message` object.
+    /// Normalize one payload line (`data: {...}` or bare JSON): fills the
+    /// missing twin field (`reasoning`/`reasoning_content`) in every
+    /// `delta`/`message` object. Anything unrecognized is returned verbatim.
     fn normalize_payload_line(line: &[u8]) -> Vec<u8> {
         if !line.windows(12).any(|w| w == b"\"reasoning\":")
             && !line.windows(20).any(|w| w == b"\"reasoning_content\":")
@@ -346,7 +357,13 @@ pub(crate) mod common {
         } else {
             (&line[..0], 0)
         };
-        let Ok(mut v) = serde_json::from_slice::<Value>(line[json_start..].trim_ascii_end()) else {
+        // A trailing \r (CRLF framing) is structural, not payload — keep it.
+        let (json_end, cr) = if line.ends_with(b"\r") {
+            (line.len() - 1, true)
+        } else {
+            (line.len(), false)
+        };
+        let Ok(mut v) = serde_json::from_slice::<Value>(&line[json_start..json_end]) else {
             return line.to_vec();
         };
         let mut touched = false;
@@ -374,6 +391,9 @@ pub(crate) mod common {
         }
         let mut out = prefix.to_vec();
         out.extend_from_slice(&serde_json::to_vec(&v).unwrap_or_default());
+        if cr {
+            out.push(b'\r');
+        }
         out
     }
 
@@ -459,6 +479,18 @@ pub(crate) mod common {
             let line =
                 br#"data: {"choices":[{"delta":{"reasoning_content":"a","reasoning":"a"}}]}"#;
             assert_eq!(normalize_payload_line(line), line.as_slice());
+        }
+
+        #[test]
+        fn preserves_crlf_tail() {
+            let line = br#"data: {"choices":[{"delta":{"reasoning":"x"}}]}"#.to_vec();
+            let mut line = line;
+            line.push(b'\r');
+            let out = normalize_payload_line(&line);
+            assert!(out.ends_with(b"\r"));
+            assert!(String::from_utf8(out)
+                .unwrap()
+                .contains("reasoning_content"));
         }
 
         #[test]
