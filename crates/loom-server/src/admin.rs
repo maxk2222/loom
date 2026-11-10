@@ -139,6 +139,7 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/stats/usage", get(usage_stats))
         .route("/api/stats/series", get(stats_series))
         .route("/api/stats/breakdown", get(stats_breakdown))
+        .route("/api/stats/purge-orphans", post(purge_orphan_stats))
         // settings
         .route("/api/settings/{key}", get(get_setting).put(put_setting))
         .route("/api/branding", put(put_branding))
@@ -1622,6 +1623,98 @@ async fn stats_breakdown(State(s): State<AdminState>, Query(q): Query<StatsQ>) -
     Json(json!({
         "window": q.window.unwrap_or_else(|| "24h".into()),
         "models": models, "clients": clients, "keys": keys, "projects": projects,
+    }))
+}
+
+/// Delete requests_history rows whose model/client/deployment reference no
+/// longer exists (entities have no FKs, so hard-deletes leave orphan stats).
+/// Also sweeps Redis runtime keys for deleted deployments/clients.
+async fn purge_orphan_stats(State(s): State<AdminState>) -> Json<Value> {
+    let dep_rows: i64 = sqlx::query_scalar(
+        "WITH d AS (DELETE FROM requests_history WHERE deployment_id IS NOT NULL
+                     AND deployment_id NOT IN (SELECT id FROM deployments) RETURNING 1)
+         SELECT count(*) FROM d",
+    )
+    .fetch_one(&s.db)
+    .await
+    .unwrap_or(0);
+    let client_rows: i64 = sqlx::query_scalar(
+        "WITH d AS (DELETE FROM requests_history WHERE client_id IS NOT NULL
+                     AND client_id NOT IN (SELECT id FROM clients) RETURNING 1)
+         SELECT count(*) FROM d",
+    )
+    .fetch_one(&s.db)
+    .await
+    .unwrap_or(0);
+    let model_rows: i64 = sqlx::query_scalar(
+        "WITH d AS (DELETE FROM requests_history WHERE virtual_model_id IS NOT NULL
+                     AND virtual_model_id NOT IN (SELECT id FROM virtual_models) RETURNING 1)
+         SELECT count(*) FROM d",
+    )
+    .fetch_one(&s.db)
+    .await
+    .unwrap_or(0);
+    // Redis runtime keys for entities that no longer have a DB row.
+    let mut c = s.registry.rt.conn.clone();
+    let live_deps: Vec<String> = sqlx::query_scalar("SELECT id::text FROM deployments")
+        .fetch_all(&s.db)
+        .await
+        .unwrap_or_default();
+    let live_clients: Vec<String> = sqlx::query_scalar("SELECT id::text FROM clients")
+        .fetch_all(&s.db)
+        .await
+        .unwrap_or_default();
+    let prefix = s.registry.rt.k("");
+    let mut cursor: u64 = 0;
+    let mut redis_keys = 0u64;
+    loop {
+        let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(format!("{prefix}*"))
+            .arg("COUNT")
+            .arg(500)
+            .query_async(&mut c)
+            .await
+            .unwrap_or_default();
+        for k in keys {
+            let short = &k[prefix.len()..];
+            let id = short
+                .trim_start_matches("dep:")
+                .trim_start_matches("client:")
+                .trim_end_matches(":leases");
+            let orphan = if let Some(kind) = short.split(':').next() {
+                match kind {
+                    "dep" => !live_deps.iter().any(|d| d == id),
+                    "client" => !live_clients.iter().any(|d| d == id),
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if orphan {
+                let _: () = redis::cmd("DEL")
+                    .arg(&k)
+                    .query_async(&mut c)
+                    .await
+                    .unwrap_or(());
+                redis_keys += 1;
+            }
+        }
+        cursor = next;
+        if cursor == 0 {
+            break;
+        }
+    }
+    audit(&s.db, "stats", "purge_orphans", "requests_history").await;
+    Json(json!({
+        "ok": true,
+        "deleted_history_rows": {
+            "deployment": dep_rows,
+            "client": client_rows,
+            "model": model_rows,
+        },
+        "deleted_redis_keys": redis_keys,
     }))
 }
 

@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../lib/api";
 import { Card, Spinner } from "../components/ui";
@@ -32,6 +32,14 @@ const DIMS = [
 export default function MonitoringPage() {
   const [win, setWin] = useState("24h");
   const [dim, setDim] = useState<typeof DIMS[number]["v"]>("models");
+  const qc = useQueryClient();
+  const purge = async () => {
+    if (!confirm("Delete stats/history rows for models, clients and deployments that no longer exist? This cannot be undone.")) return;
+    const r = await api.post<{ deleted_history_rows: Record<string, number>; deleted_redis_keys: number }>("/api/stats/purge-orphans", {});
+    const n = Object.values(r.deleted_history_rows).reduce((a, b) => a + b, 0);
+    alert(`Purged ${n} history rows and ${r.deleted_redis_keys} runtime keys.`);
+    qc.invalidateQueries();
+  };
   const usage = useQuery({ queryKey: ["usage"], queryFn: () => api.get<{ usage_24h: UsageStat[] }>("/api/stats/usage"), refetchInterval: 10000 });
   const hist = useQuery({ queryKey: ["hist"], queryFn: () => api.get<{ requests: HistoryRow[] }>("/api/history?limit=200"), refetchInterval: 5000 });
   const versions = useQuery({ queryKey: ["cfgvers"], queryFn: () => api.get<{ versions: { id: number; entity: string; entity_id: string; change: unknown; actor: string; created_at: string }[] }>("/api/config-versions"), refetchInterval: 15000 });
@@ -60,7 +68,10 @@ export default function MonitoringPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold">Monitoring</h1>
-        <WindowPicker value={win} onChange={setWin} />
+        <div className="flex items-center gap-3">
+          <button className="btn-ghost px-2 py-1 text-xs text-muted" onClick={purge}>Purge orphaned stats</button>
+          <WindowPicker value={win} onChange={setWin} />
+        </div>
       </div>
       <div className="grid grid-cols-3 gap-4">
         <Card><div className="text-xs text-muted">TTFT p50</div><div className="mt-1 text-2xl font-semibold">{fmtMs(p50)}</div></Card>
