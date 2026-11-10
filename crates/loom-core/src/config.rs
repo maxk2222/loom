@@ -71,6 +71,22 @@ pub struct ClientConfig {
     pub config_version: u64,
 }
 
+impl ClientConfig {
+    /// Primary server URL for display/derivation (updater manifest base):
+    /// `server_url` when set, else the first connector endpoint.
+    pub fn primary_server_url(&self) -> &str {
+        if !self.server_url.is_empty() {
+            &self.server_url
+        } else {
+            self.connector
+                .endpoints
+                .first()
+                .map(|e| e.url.as_str())
+                .unwrap_or("")
+        }
+    }
+}
+
 fn default_client_name() -> String {
     hostname::get()
         .ok()
@@ -143,11 +159,26 @@ impl Default for LocalApiConfig {
     }
 }
 
+/// One gRPC server endpoint. `endpoints` is tried in order — earlier
+/// entries win (LAN/Tailscale first, public fallback last). `pki=false`
+/// marks a credential-only path (e.g. Cloudflare tunnel → plaintext
+/// listener): cert bootstrap/renewal and the CSR-in-Hello flow are skipped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorEndpoint {
+    pub url: String,
+    #[serde(default = "default_true")]
+    pub pki: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorConfig {
     /// Heartbeat interval in seconds.
     #[serde(default = "default_hb")]
     pub heartbeat_secs: u64,
+    /// Ordered server endpoints. Empty = single implicit endpoint built
+    /// from the top-level `server_url` (pki on — classic behaviour).
+    #[serde(default)]
+    pub endpoints: Vec<ConnectorEndpoint>,
     /// TLS mode for the gRPC channel.
     #[serde(default)]
     pub tls: TlsMode,
@@ -175,6 +206,7 @@ impl Default for ConnectorConfig {
     fn default() -> Self {
         Self {
             heartbeat_secs: default_hb(),
+            endpoints: Vec::new(),
             tls: TlsMode::Auto,
             ca_cert_path: String::new(),
             client_cert_path: String::new(),

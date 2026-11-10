@@ -60,10 +60,14 @@ pub fn load() -> Result<ServerConfig> {
         t.client_ca_path = Some(ca);
     }
     if let Ok(v) = std::env::var("LOOM_GRPC_PLAIN_BIND") {
-        cfg.grpc_plain_bind = Some(v);
+        if !v.is_empty() {
+            cfg.grpc_plain_bind = Some(v);
+        }
     }
     if let Ok(v) = std::env::var("LOOM_GRPC_BOOTSTRAP_BIND") {
-        cfg.grpc_bootstrap_bind = Some(v);
+        if !v.is_empty() {
+            cfg.grpc_bootstrap_bind = Some(v);
+        }
     }
     if let Ok(v) = std::env::var("LOOM_TRUST_PROXY") {
         cfg.trusted_proxy = matches!(v.as_str(), "1" | "true" | "yes");

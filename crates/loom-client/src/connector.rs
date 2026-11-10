@@ -15,7 +15,7 @@ use crate::telemetry;
 use anyhow::Context;
 use futures_util::StreamExt;
 use loom_core::capability::ApiType;
-use loom_core::config::{ClientConfig, DesiredClientConfig, TlsMode};
+use loom_core::config::{ClientConfig, ConnectorEndpoint, DesiredClientConfig, TlsMode};
 use loom_protocol::limits;
 use loom_protocol::pb::agent_client::AgentClient;
 use loom_protocol::pb::*;
@@ -31,6 +31,13 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
 
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// How a control session ended. `Prefer(i)` means a higher-priority
+/// endpoint came back while we were on a fallback — reconnect there.
+enum SessionEnd {
+    Clean,
+    Prefer(usize),
+}
 
 #[derive(Clone)]
 pub struct Connector {
@@ -192,12 +199,18 @@ impl Connector {
             }
         });
 
+        // Multi-endpoint: `connector.endpoints` is ordered by preference
+        // (LAN/Tailscale first, public fallback last); `server_url` is the
+        // implicit single entry. `ep_idx` walks the list on failures —
+        // a clean end or a successful preferred-probe always resets to 0.
+        let mut ep_idx = 0usize;
         loop {
             if self.state.shutdown.is_cancelled() {
                 return;
             }
             let cfg = self.state.cfg_store.get().await;
-            if cfg.server_url.is_empty() || !cfg.connect_enabled {
+            let eps = Self::endpoints(&cfg);
+            if eps.is_empty() || !cfg.connect_enabled {
                 self.set_disconnected().await;
                 tokio::select! {
                     _ = self.state.shutdown.cancelled() => return,
@@ -205,23 +218,38 @@ impl Connector {
                     _ = tokio::time::sleep(Duration::from_secs(2)) => continue,
                 }
             }
+            let ep = eps[ep_idx.min(eps.len() - 1)].clone();
+            let earlier = &eps[..ep_idx.min(eps.len() - 1)];
             let reconnect_now = tokio::select! {
-                res = self.session(&cfg) => {
+                res = self.session(&cfg, &ep, earlier) => {
                     match res {
-                        Ok(()) => {
-                            info!("control session ended cleanly");
+                        Ok(SessionEnd::Clean) => {
+                            info!(url = %ep.url, "control session ended cleanly");
                             backoff = Duration::from_secs(1);
                             tls_fail_streak = 0;
+                            ep_idx = 0;
+                        }
+                        Ok(SessionEnd::Prefer(i)) => {
+                            info!(url = %eps[i].url, "preferred endpoint reachable — migrating");
+                            ep_idx = i;
+                            self.set_disconnected().await;
+                            continue;
                         }
                         Err(e) => {
-                            warn!(error = %e, "control session failed");
+                            warn!(url = %ep.url, error = %e, "control session failed");
                             backoff = (backoff * 2).min(MAX_BACKOFF);
+                            // Rotate to the next endpoint on failure.
+                            ep_idx = (ep_idx + 1) % eps.len();
                             // Auto-PKI resilience: a stored cert that no
                             // longer chains to the live CA (rotation/re-issue)
                             // stays "valid" for ~180d and would fail forever.
                             // After repeated transport failures, drop it —
                             // the next attempt re-bootstraps from the live CA.
-                            tls_fail_streak += 1;
+                            // Only mTLS endpoints exercise the cert — don't
+                            // burn the streak on credential-only fallbacks.
+                            if ep.pki {
+                                tls_fail_streak += 1;
+                            }
                             if cfg.connector.client_cert_path.is_empty()
                                 && tls_fail_streak >= 5
                             {
@@ -235,7 +263,10 @@ impl Connector {
                 }
                 // Identity/connection settings changed → drop the session and
                 // reconnect immediately with the fresh config.
-                _ = self.state.reconnect_notify.notified() => true,
+                _ = self.state.reconnect_notify.notified() => {
+                    ep_idx = 0;
+                    true
+                }
             };
             self.set_disconnected().await;
             if reconnect_now {
@@ -439,15 +470,44 @@ impl Connector {
         }
     }
 
-    async fn session(&self, cfg: &ClientConfig) -> anyhow::Result<()> {
+    /// Ordered effective endpoints: explicit `connector.endpoints`, else a
+    /// single pki endpoint from `server_url` (classic behaviour).
+    fn endpoints(cfg: &ClientConfig) -> Vec<ConnectorEndpoint> {
+        if !cfg.connector.endpoints.is_empty() {
+            cfg.connector.endpoints.clone()
+        } else if cfg.server_url.is_empty() {
+            Vec::new()
+        } else {
+            vec![ConnectorEndpoint {
+                url: cfg.server_url.clone(),
+                pki: true,
+            }]
+        }
+    }
+
+    /// One control session against a specific endpoint. `earlier` lists the
+    /// higher-priority endpoints — while connected on a fallback, a probe
+    /// task watches them and ends the session early once one is reachable
+    /// again so the loop can migrate back to the preferred path.
+    async fn session(
+        &self,
+        cfg: &ClientConfig,
+        ep: &ConnectorEndpoint,
+        earlier: &[ConnectorEndpoint],
+    ) -> anyhow::Result<SessionEnd> {
         // Own a mutable copy — a successful bootstrap may deliver a fresh
         // client_id + device_credential that the strict-port Hello needs.
+        // server_url is pointed at the chosen endpoint so every downstream
+        // consumer (endpoint_tls, derive_bootstrap_url, auto_pki scheme
+        // check) follows the selected path transparently.
         let mut cfg = cfg.clone();
+        cfg.server_url = ep.url.clone();
         // Auto-PKI: TLS + no manual cert paths → ensure a valid cert exists.
-        // Effective scheme matters: bare host:port and Require both end up
-        // on TLS — a literal starts_with("https") check would skip PKI for
-        // them and wedge the client against a client-cert-strict port.
-        let auto_pki = cfg.connector.tls != TlsMode::Off
+        // Skipped on pki=false endpoints (e.g. Cloudflare tunnel → plaintext
+        // listener) — no cert bootstrap or CSR renewal against a path whose
+        // port+1 bootstrap listener is not reachable.
+        let auto_pki = ep.pki
+            && cfg.connector.tls != TlsMode::Off
             && cfg.connector.client_cert_path.is_empty()
             && match cfg.connector.tls {
                 TlsMode::Require => true,
@@ -466,12 +526,23 @@ impl Connector {
                 warn!(error = %e, "cert bootstrap failed — connecting without cert");
             } else {
                 // Fresh enrollment may have assigned client_id/credential —
-                // re-read before dialing the strict endpoint.
+                // re-read before dialing the strict endpoint. The re-read
+                // resets server_url — re-point it at the selected endpoint.
                 cfg = self.state.cfg_store.get().await;
+                cfg.server_url = ep.url.clone();
             }
         }
-        let ep = self.endpoint(&cfg).await?;
-        let channel = ep.connect().await?;
+        let endpoint = self.endpoint(&cfg).await?;
+        if endpoint.uri().scheme_str() == Some("http") {
+            let host = endpoint.uri().host().unwrap_or_default();
+            if !matches!(host, "localhost" | "127.0.0.1" | "::1") {
+                warn!(
+                    url = %ep.url,
+                    "plaintext gRPC endpoint on a non-loopback host — device credential travels unencrypted (set connector.tls=\"require\" or https://)"
+                );
+            }
+        }
+        let channel = endpoint.connect().await?;
         let mut agent = AgentClient::new(channel);
         *self.state.agent.lock().await = Some(agent.clone());
 
@@ -582,8 +653,52 @@ impl Connector {
             }
         });
 
-        // Control message loop.
-        let res = self.control_loop(&mut inbound, &ctrl_tx, &agent).await;
+        // Control message loop — while on a fallback endpoint a lightweight
+        // probe re-dials the preferred endpoints every 45 s. The first that
+        // completes the real (m)TLS handshake ends this session early; the
+        // run loop then migrates there and the server kicks this session.
+        let res = if earlier.is_empty() {
+            self.control_loop(&mut inbound, &ctrl_tx, &agent)
+                .await
+                .map(|_| SessionEnd::Clean)
+        } else {
+            let pcfg = cfg.clone();
+            let pstate = self.state.clone();
+            let preferred = earlier.to_vec();
+            let probe = async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(45)).await;
+                    for (i, e) in preferred.iter().enumerate() {
+                        let identity = if e.pki {
+                            pstate.cert_store.handshake_material()
+                        } else {
+                            None
+                        };
+                        let ca = if pcfg.connector.ca_cert_path.is_empty() {
+                            pstate.cert_store.saved_ca()
+                        } else {
+                            None
+                        };
+                        match Self::endpoint_tls(&pcfg, &e.url, identity, ca).await {
+                            Ok(ep) => {
+                                if ep.connect().await.is_ok() {
+                                    return i;
+                                }
+                            }
+                            Err(e2) => {
+                                debug!(url = %e.url, error = %e2, "preferred-endpoint probe failed")
+                            }
+                        }
+                    }
+                }
+            };
+            tokio::select! {
+                r = self.control_loop(&mut inbound, &ctrl_tx, &agent) => {
+                    r.map(|_| SessionEnd::Clean)
+                }
+                i = probe => Ok(SessionEnd::Prefer(i)),
+            }
+        };
         hb_task.abort();
         res
     }
@@ -1385,6 +1500,60 @@ mod tls_policy_tests {
             .await
             .unwrap();
         assert_eq!(ep.uri().scheme_str(), Some("https"));
+    }
+
+    #[test]
+    fn endpoints_implicit_from_server_url() {
+        let c = cfg("https://lan:50052", TlsMode::Require);
+        let eps = Connector::endpoints(&c);
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].url, "https://lan:50052");
+        assert!(eps[0].pki);
+    }
+
+    #[test]
+    fn endpoints_explicit_list_wins_and_keeps_order() {
+        let mut c = cfg("https://lan:50052", TlsMode::Require);
+        c.connector.endpoints = vec![
+            ConnectorEndpoint {
+                url: "https://lan:50052".into(),
+                pki: true,
+            },
+            ConnectorEndpoint {
+                url: "https://grpc.example.com:443".into(),
+                pki: false,
+            },
+        ];
+        let eps = Connector::endpoints(&c);
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps[1].url, "https://grpc.example.com:443");
+        assert!(!eps[1].pki);
+        // server_url ignored when endpoints are configured.
+        assert_eq!(eps[0].url, "https://lan:50052");
+    }
+
+    #[test]
+    fn endpoints_empty_when_nothing_configured() {
+        let c = cfg("", TlsMode::Auto);
+        assert!(Connector::endpoints(&c).is_empty());
+    }
+
+    #[test]
+    fn primary_server_url_prefers_explicit_then_first_endpoint() {
+        let mut c = cfg("", TlsMode::Auto);
+        c.connector.endpoints = vec![
+            ConnectorEndpoint {
+                url: "https://lan:50052".into(),
+                pki: true,
+            },
+            ConnectorEndpoint {
+                url: "https://grpc.example.com".into(),
+                pki: false,
+            },
+        ];
+        assert_eq!(c.primary_server_url(), "https://lan:50052");
+        c.server_url = "https://legacy:50052".into();
+        assert_eq!(c.primary_server_url(), "https://legacy:50052");
     }
 
     #[tokio::test]

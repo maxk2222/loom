@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
-import { Badge, Card, Field, Modal, Select, Spinner } from "../components/ui";
+import { Badge, Card, ConfirmModal, Field, Modal, Select, Spinner } from "../components/ui";
 import type { ApiKey, ApiUser } from "../lib/types";
 import { fmtNum } from "../lib/format";
 
@@ -17,6 +17,7 @@ export default function KeysPage() {
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: ApiUser[] }>("/api/projects") });
   const [open, setOpen] = useState(false);
   const [token, setToken] = useState("");
+  const [pendingDel, setPendingDel] = useState<{ id: string; name: string } | null>(null);
   const [f, setF] = useState({ project_id: "", name: "", rpm_limit: 60, tpm_limit: 100000, max_concurrent: 4, scopes: new Set(SCOPES) });
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["keys"] });
@@ -33,6 +34,13 @@ export default function KeysPage() {
 
   const revoke = async (id: string) => {
     await api.post(`/api/keys/${id}/revoke`);
+    refresh();
+  };
+
+  const del = async () => {
+    if (!pendingDel) return;
+    await api.del(`/api/keys/${pendingDel.id}`);
+    setPendingDel(null);
     refresh();
   };
 
@@ -54,7 +62,12 @@ export default function KeysPage() {
                   <td className="td text-muted">{projects.data?.projects.find((p) => p.id === k.project_id)?.name ?? k.project_id.slice(0, 8)}</td>
                   <td className="td text-muted">{k.rpm_limit}/{fmtNum(k.tpm_limit)}/{k.max_concurrent}</td>
                   <td className="td">{k.active ? <Badge tone="ok">active</Badge> : <Badge tone="err">revoked</Badge>}</td>
-                  <td className="td text-right">{k.active && <button className="btn-danger py-1 text-xs" onClick={() => revoke(k.id)}>Revoke</button>}</td>
+                  <td className="td text-right">
+                    <div className="flex justify-end gap-2">
+                      {k.active && <button className="btn-danger py-1 text-xs" onClick={() => revoke(k.id)}>Revoke</button>}
+                      <button className="btn-outline py-1 text-xs" onClick={() => setPendingDel({ id: k.id, name: k.name || k.prefix })}>Delete</button>
+                    </div>
+                  </td>
                 </tr>
               ))}
               {(q.data?.keys ?? []).length === 0 && <tr><td className="td text-center text-muted" colSpan={6}>No API keys.</td></tr>}
@@ -97,6 +110,15 @@ export default function KeysPage() {
           </form>
         )}
       </Modal>
+      <ConfirmModal
+        open={pendingDel !== null}
+        title="Delete API key"
+        danger
+        confirmLabel="Delete"
+        body={pendingDel ? `Permanently delete API key "${pendingDel.name}"? The row is removed entirely — unlike revoke, this cannot be undone.` : ""}
+        onConfirm={del}
+        onClose={() => setPendingDel(null)}
+      />
     </div>
   );
 }

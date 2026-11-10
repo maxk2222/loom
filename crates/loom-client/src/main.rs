@@ -162,7 +162,7 @@ async fn async_main() -> anyhow::Result<()> {
                 if cfg.updater.enabled {
                     match loom_client::updater::run_once(
                         &cfg.updater,
-                        &cfg.server_url,
+                        cfg.primary_server_url(),
                         env!("CARGO_PKG_VERSION"),
                         &stage_dir,
                         false,

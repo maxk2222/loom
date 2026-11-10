@@ -140,6 +140,48 @@ Flow: no cert → Hello+CSR via `boot.*` → cert issued → all traffic via
 `agent.*` (edge verifies the internal-CA cert). Renewal rides the same
 path automatically.
 
+## Option C — multi-endpoint, credential-only public fallback
+
+The simplest public path: no edge-mTLS, no bootstrap hostname. The
+client keeps LAN/Tailscale mTLS endpoints preferred and falls back to
+the tunnel when off-network. Identity is the device credential in
+`Hello` — TLS terminates at the Cloudflare edge.
+
+```toml
+# client config.toml
+server_url = ""                       # unused when endpoints are set
+
+[connector]
+tls = "require"
+endpoints = [
+  { url = "https://server.lan:50052", pki = true },                  # LAN (mTLS + cert bootstrap)
+  { url = "https://server.ts.net:50052", pki = true },               # Tailscale
+  { url = "https://grpc.loom.example.com", pki = false },            # public fallback — credential only
+]
+```
+
+- Endpoints are tried **in order** — earlier entries always win.
+- On a fallback the client probes the preferred endpoints every 45 s
+  and migrates back as soon as one answers.
+- `pki = false` skips cert bootstrap/CSR (the `port+1` bootstrap
+  listener is not reachable through the tunnel anyway).
+- `server_url` still works as the implicit single pki endpoint —
+  existing configs are unchanged.
+
+Server side, point a *second* tunnel public hostname at the plaintext
+agent listener — `grpc.loom.example.com` → `http://server:50054`
+(service type HTTP, HTTP/2 origin). Enable *Network → gRPC* in
+Cloudflare. No `agent.*`/`boot.*` split, no API Shield needed.
+
+```bash
+LOOM_GRPC_PLAIN_BIND=0.0.0.0:50054    # compose-network only — never map to host
+```
+
+Trade-offs vs. Option B: no client-cert check at the edge — anyone who
+reaches the hostname may attempt Hello auth (still credential-gated,
+rate-limitable). Prompt payloads also transit the CF edge in TLS —
+fine as a fallback path; prefer LAN/Tailscale when available.
+
 ## Caveats that matter in practice
 
 - **100 s request timeout** (Free/Pro/Biz): long *non-streaming*

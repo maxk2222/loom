@@ -101,7 +101,7 @@ pub fn router(s: AdminState) -> Router {
         )
         // api keys
         .route("/api/keys", get(list_keys).post(create_key))
-        .route("/api/keys/{id}", put(update_key))
+        .route("/api/keys/{id}", put(update_key).delete(delete_key))
         .route("/api/keys/{id}/revoke", post(revoke_key))
         // clients
         .route("/api/clients", get(list_clients))
@@ -647,6 +647,27 @@ async fn revoke_key(State(s): State<AdminState>, Path(id): Path<String>) -> Resp
         .await;
     audit(&s.db, "api_key", "revoke", &id).await;
     Json(json!({"ok":true})).into_response()
+}
+
+/// Hard-delete an API key. Unlike revoke, the row is removed entirely —
+/// requests_history/usage_counters keep their (dangling) UUID references;
+/// the LEFT JOINs there already tolerate missing keys.
+async fn delete_key(State(s): State<AdminState>, Path(id): Path<String>) -> Response {
+    let r = sqlx::query("DELETE FROM api_keys WHERE id=$1::uuid")
+        .bind(&id)
+        .execute(&s.db)
+        .await;
+    match r {
+        Ok(res) if res.rows_affected() > 0 => {
+            audit(&s.db, "api_key", "delete", &id).await;
+            Json(json!({"ok":true})).into_response()
+        }
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"key not found"})),
+        )
+            .into_response(),
+    }
 }
 
 /// Update a key's label, scopes, rate/token/concurrency limits and per-key

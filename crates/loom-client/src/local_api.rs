@@ -657,7 +657,7 @@ async fn admin_status(State(s): State<AppState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime,
         "server_connected": s.connector.is_connected(),
-        "server_url": cfg.server_url,
+        "server_url": cfg.primary_server_url(),
         "sharing_enabled": cfg.sharing_enabled,
         "capacities": caps,
         "system": sys,
@@ -1042,7 +1042,7 @@ async fn admin_connection(State(s): State<AppState>) -> Json<Value> {
         "connected": s.connector.is_connected(),
         "session_id": session,
         "name": cfg.name,
-        "server_url": cfg.server_url,
+        "server_url": cfg.primary_server_url(),
         "client_id": cfg.client_id,
         "enabled": cfg.connect_enabled,
     }))
@@ -1142,7 +1142,7 @@ async fn admin_update_apply(
 ) -> Json<Value> {
     let cfg = s.cfg.get().await;
     if q.get("apply").map(|v| v.as_str()) == Some("0") {
-        let base = crate::updater::manifest_base(&cfg.updater, &cfg.server_url);
+        let base = crate::updater::manifest_base(&cfg.updater, cfg.primary_server_url());
         if base.is_empty() {
             return Json(json!({ "ok": false, "error": "no server configured" }));
         }
@@ -1169,7 +1169,7 @@ async fn admin_update_apply(
     tokio::spawn(async move {
         if let Err(e) = crate::updater::run_once(
             &cfg2.updater,
-            &cfg2.server_url,
+            cfg2.primary_server_url(),
             env!("CARGO_PKG_VERSION"),
             &dir,
             true,
