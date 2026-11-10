@@ -119,7 +119,32 @@ impl BackendAdapter for OllamaAdapter {
                     }
                 }
             }
-            // Vision: details.families contains "clip"/"mllama" etc.
+            // Modern Ollama (>=0.9-ish) reports a top-level `capabilities`
+            // array — authoritative for vision/tools/thinking/embedding.
+            let declared: Vec<String> = info
+                .get("capabilities")
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_lowercase()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if declared.iter().any(|c| c == "vision") {
+                caps.vision = true;
+                caps.modalities.insert("image".into());
+            }
+            if declared.iter().any(|c| c == "embedding") {
+                caps.embeddings = true;
+            }
+            // Older multimodal models expose a `projector_info` block.
+            if info.get("projector_info").is_some() {
+                caps.vision = true;
+                caps.modalities.insert("image".into());
+            }
+            // Vision fallback: details.families contains "clip"/"mllama" etc.
+            // Vision arch names (qwen3vl, moondream, minicpm-v) don't carry
+            // those markers — the `vl`/`vision` name match covers them.
             let families = info
                 .get("details")
                 .and_then(|d| d.get("families"))
@@ -129,7 +154,11 @@ impl BackendAdapter for OllamaAdapter {
             for fam in families {
                 if let Some(s) = fam.as_str() {
                     let s = s.to_lowercase();
-                    if s.contains("clip") || s.contains("vision") || s.contains("mllama") {
+                    if s.contains("clip")
+                        || s.contains("vision")
+                        || s.contains("mllama")
+                        || s.ends_with("vl")
+                    {
                         caps.vision = true;
                         caps.modalities.insert("image".into());
                     }
