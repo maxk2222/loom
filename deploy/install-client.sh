@@ -25,9 +25,10 @@ usage() {
   exit 1
 }
 
+SERVER_EXPLICIT=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --server) SERVER_URL="$2"; shift 2 ;;
+    --server) SERVER_URL="$2"; SERVER_EXPLICIT=1; shift 2 ;;
     --token) ENROLL_TOKEN="$2"; shift 2 ;;
     --name) CLIENT_NAME="$2"; shift 2 ;;
     --prefix) PREFIX="$2"; shift 2 ;;
@@ -256,6 +257,13 @@ EOF
   [[ "$OS" == "Linux" ]] && chmod 640 "$CFG" && chown root:loom-client "$CFG"
 else
   echo ">> Keeping existing config at $CFG"
+  # An explicitly passed --server is migration intent — retarget the
+  # existing config's server_url (e.g. dead gRPC host → wss:// bridge).
+  # The gateway-baked default leaves the file alone.
+  if [[ "$SERVER_EXPLICIT" == "1" ]] && grep -q '^server_url' "$CFG"; then
+    sed -i "s|^server_url = .*|server_url = \"${SERVER_URL}\"|" "$CFG"
+    echo ">> Updated server_url in existing config -> ${SERVER_URL}"
+  fi
 fi
 
 # Enroll: pass token via env for first connect (device credential is stored after enrollment).
