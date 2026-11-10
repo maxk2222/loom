@@ -453,7 +453,8 @@ impl BackendManager {
                                 return;
                             }
                             match be.adapter.warm_up(&model).await {
-                                Ok(_) => info!(deployment = %model, "model warmed"),
+                                // Routine keep-warm refresh — not an event.
+                                Ok(_) => debug!(deployment = %model, "model warmed"),
                                 Err(e) => {
                                     warn!(deployment = %model, error = %e, "auto-load failed")
                                 }

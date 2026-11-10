@@ -107,6 +107,15 @@ impl Agent for AgentSvc {
                     _ => (String::new(), String::new(), 0),
                 };
             let session_id = uuid::Uuid::new_v4().to_string();
+            // Real desired-config version — the client only pulls GetConfig
+            // when this differs from its local copy. Hardcoding 0 forced a
+            // pointless snapshot pull on every reconnect.
+            let cfg_version: i64 =
+                sqlx::query_scalar("SELECT config_version FROM clients WHERE id = $1::uuid")
+                    .bind(&client_id)
+                    .fetch_one(&this.registry.db)
+                    .await
+                    .unwrap_or(0);
             if out_tx
                 .send(server_msgs::hello_ack_pki(
                     true,
@@ -114,7 +123,7 @@ impl Agent for AgentSvc {
                     &session_id,
                     &client_id,
                     &issued_cred,
-                    0,
+                    cfg_version.max(0) as u64,
                     10,
                     &cert_pem,
                     &ca_pem,

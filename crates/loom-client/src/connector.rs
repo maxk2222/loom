@@ -915,7 +915,7 @@ impl Connector {
                         .unwrap_or_else(|| std::path::PathBuf::from("."));
                     match crate::updater::run_once(
                         &cfg.updater,
-                        &cfg.server_url,
+                        cfg.primary_server_url(),
                         env!("CARGO_PKG_VERSION"),
                         &dir,
                         true,

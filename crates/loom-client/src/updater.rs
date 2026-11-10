@@ -370,10 +370,12 @@ pub fn manifest_base(cfg: &UpdaterConfig, server_url: &str) -> String {
     if u.is_empty() {
         return String::new();
     }
-    // gRPC agent :50051 → HTTP dashboard :8080 (LOOM default ports). Works
+    // gRPC agent ports → HTTP dashboard :8080 (LOOM defaults). Works
     // with or without an explicit scheme on server_url.
-    if let Some(host) = u.strip_suffix(":50051") {
-        return format!("{host}:8080");
+    for port in [":50051", ":50052", ":50053", ":50054"] {
+        if let Some(host) = u.strip_suffix(port) {
+            return format!("{host}:8080");
+        }
     }
     // Bare host:port without scheme still parses in reqwest as a valid
     // relative-looking URL failure — normalize to http:// so the error is
@@ -465,11 +467,44 @@ pub async fn run_once(
     stage_dir: &std::path::Path,
     force: bool,
 ) -> Result<UpdateStatus> {
-    let base = manifest_base(cfg, server_url);
-    if base.is_empty() {
+    // Manifest base candidates: the pushed/explicit server_base first, then
+    // the base derived from the working gRPC endpoint — a client with a live
+    // session provably reaches the server there even when the public
+    // hostname is unreachable (split DNS, tunnel down).
+    let mut bases = Vec::new();
+    let primary = manifest_base(cfg, server_url);
+    if !primary.is_empty() {
+        bases.push(primary);
+    }
+    if !cfg.server_base.is_empty() {
+        let mut derived = cfg.clone();
+        derived.server_base.clear();
+        let alt = manifest_base(&derived, server_url);
+        if !alt.is_empty() && !bases.contains(&alt) {
+            bases.push(alt);
+        }
+    }
+    if bases.is_empty() {
         bail!("no manifest server base configured");
     }
-    let (st, mf) = check_for_update(&base, &cfg.channel, arch(), current).await?;
+    let mut last_err = None;
+    let mut checked = None;
+    for base in &bases {
+        match check_for_update(base, &cfg.channel, arch(), current).await {
+            Ok(r) => {
+                checked = Some(r);
+                break;
+            }
+            Err(e) => {
+                warn!(base = %base, error = %e, "manifest fetch failed — trying next base");
+                last_err = Some(e);
+            }
+        }
+    }
+    let (st, mf) = match checked {
+        Some(r) => r,
+        None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("manifest request failed"))),
+    };
     let Some(mf) = mf else { return Ok(st) };
     if !st.update_available || !(force || cfg.auto_apply) {
         return Ok(st);
