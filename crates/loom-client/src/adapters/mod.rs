@@ -282,9 +282,89 @@ pub(crate) mod common {
         Ok(BackendResponse {
             status,
             is_event_stream: is_sse,
-            stream: Box::pin(stream),
+            stream: Box::pin(normalize_stream_fields(Box::pin(stream))),
             content_type,
         })
+    }
+
+    /// Rewrites `reasoning` → `reasoning_content` in streamed JSON payloads
+    /// (SSE `data:` lines and whole-body JSON alike). vLLM-family builds emit
+    /// the nonstandard `delta.reasoning`/`message.reasoning` while OpenAI-
+    /// compatible consumers (Open WebUI, DeepSeek convention) read
+    /// `reasoning_content`. Complete lines are buffered across chunk
+    /// boundaries; payloads without a reasoning field pass through untouched,
+    /// and lines that fail to parse are forwarded verbatim — a transform must
+    /// never corrupt the upstream byte stream.
+    fn normalize_stream_fields(stream: ByteStream) -> ByteStream {
+        use futures_util::StreamExt;
+        let s = async_stream::stream! {
+            let mut buf: Vec<u8> = Vec::new();
+            tokio::pin!(stream);
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(bytes) => {
+                        buf.extend_from_slice(&bytes);
+                        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+                        let mut start = 0usize;
+                        for (i, b) in buf.iter().enumerate() {
+                            if *b == b'\n' {
+                                out.extend_from_slice(&normalize_payload_line(&buf[start..i]));
+                                out.push(b'\n');
+                                start = i + 1;
+                            }
+                        }
+                        buf.drain(..start);
+                        if !out.is_empty() {
+                            yield Ok(Bytes::from(out));
+                        }
+                    }
+                    Err(e) => yield Err(e),
+                }
+            }
+            // Non-SSE bodies may end without a trailing newline — flush +
+            // normalize the tail instead of silently dropping it.
+            if !buf.is_empty() {
+                yield Ok(Bytes::from(normalize_payload_line(&buf)));
+            }
+        };
+        Box::pin(s)
+    }
+
+    /// Normalize one payload line (`data: {...}` or bare JSON): rename
+    /// `reasoning` → `reasoning_content` in every `delta`/`message` object.
+    fn normalize_payload_line(line: &[u8]) -> Vec<u8> {
+        if !line.windows(12).any(|w| w == b"\"reasoning\":") {
+            return line.to_vec();
+        }
+        let (prefix, json_start) = if line.starts_with(b"data: ") {
+            (&line[..6], 6)
+        } else {
+            (&line[..0], 0)
+        };
+        let Ok(mut v) = serde_json::from_slice::<Value>(line[json_start..].trim_ascii_end()) else {
+            return line.to_vec();
+        };
+        let mut touched = false;
+        if let Some(choices) = v.get_mut("choices").and_then(|c| c.as_array_mut()) {
+            for ch in choices {
+                for key in ["delta", "message"] {
+                    if let Some(obj) = ch.get_mut(key).and_then(|d| d.as_object_mut()) {
+                        if !obj.contains_key("reasoning_content") {
+                            if let Some(r) = obj.remove("reasoning") {
+                                obj.insert("reasoning_content".into(), r);
+                                touched = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !touched {
+            return line.to_vec();
+        }
+        let mut out = prefix.to_vec();
+        out.extend_from_slice(&serde_json::to_vec(&v).unwrap_or_default());
+        out
     }
 
     /// GET JSON helper with timeout.
@@ -326,5 +406,87 @@ pub(crate) mod common {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::super::{AdapterError, ByteStream};
+        use super::{normalize_payload_line, normalize_stream_fields};
+        use bytes::Bytes;
+        use futures_util::{stream, StreamExt};
+
+        #[test]
+        fn renames_delta_reasoning() {
+            let line = br#"data: {"choices":[{"delta":{"reasoning":"We"}}]}"#;
+            let out = normalize_payload_line(line);
+            let s = String::from_utf8(out).unwrap();
+            assert!(s.contains("\"reasoning_content\":\"We\""), "{s}");
+            assert!(!s.contains("\"reasoning\":"), "{s}");
+            assert!(s.starts_with("data: "));
+        }
+
+        #[test]
+        fn renames_message_reasoning() {
+            let line = br#"{"choices":[{"message":{"role":"assistant","reasoning":"think","content":"hi"}}]}"#;
+            let out = normalize_payload_line(line);
+            let s = String::from_utf8(out).unwrap();
+            assert!(s.contains("\"reasoning_content\":\"think\""));
+        }
+
+        #[test]
+        fn keeps_existing_reasoning_content() {
+            let line =
+                br#"data: {"choices":[{"delta":{"reasoning_content":"a","reasoning":"b"}}]}"#;
+            let out = normalize_payload_line(line);
+            let s = String::from_utf8(out).unwrap();
+            // reasoning_content wins; the stale reasoning key stays verbatim
+            // (line untouched) since no rename happened.
+            assert!(s.contains("\"reasoning_content\":\"a\""));
+        }
+
+        #[test]
+        fn passes_through_done_and_non_data() {
+            assert_eq!(normalize_payload_line(b"data: [DONE]"), b"data: [DONE]");
+            assert_eq!(normalize_payload_line(b""), b"");
+            // "reasoning": inside a string value — parsed, no key found, verbatim.
+            let line = br#"data: {"choices":[{"delta":{"content":"he said \"reasoning\": x"}}]}"#;
+            assert_eq!(normalize_payload_line(line), line.as_slice());
+        }
+
+        #[tokio::test]
+        async fn stream_reassembles_split_lines() {
+            let chunks: Vec<Result<Bytes, AdapterError>> = vec![
+                Ok(Bytes::from_static(
+                    b"data: {\"choices\":[{\"delta\":{\"reas",
+                )),
+                Ok(Bytes::from_static(b"oning\":\"x\"}}]}\n\ndata: [D")),
+                Ok(Bytes::from_static(b"ONE]\n\n")),
+            ];
+            let bs: ByteStream = Box::pin(stream::iter(chunks));
+            let mut out = Vec::new();
+            let mut s = normalize_stream_fields(bs);
+            while let Some(item) = s.next().await {
+                out.extend_from_slice(&item.unwrap());
+            }
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("reasoning_content"), "{text}");
+            assert!(text.contains("[DONE]"), "{text}");
+        }
+
+        #[tokio::test]
+        async fn stream_flushes_unterminated_tail() {
+            let chunks: Vec<Result<Bytes, AdapterError>> = vec![Ok(Bytes::from_static(
+                br#"{"choices":[{"message":{"reasoning":"r"}}]}"#,
+            ))];
+            let bs: ByteStream = Box::pin(stream::iter(chunks));
+            let mut out = Vec::new();
+            let mut s = normalize_stream_fields(bs);
+            while let Some(item) = s.next().await {
+                out.extend_from_slice(&item.unwrap());
+            }
+            assert!(String::from_utf8(out)
+                .unwrap()
+                .contains("reasoning_content"));
+        }
     }
 }
