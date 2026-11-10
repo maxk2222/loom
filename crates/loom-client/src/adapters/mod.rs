@@ -287,11 +287,14 @@ pub(crate) mod common {
         })
     }
 
-    /// Rewrites `reasoning` → `reasoning_content` in streamed JSON payloads
-    /// (SSE `data:` lines and whole-body JSON alike). vLLM-family builds emit
-    /// the nonstandard `delta.reasoning`/`message.reasoning` while OpenAI-
-    /// compatible consumers (Open WebUI, DeepSeek convention) read
-    /// `reasoning_content`. Complete lines are buffered across chunk
+    /// Dual-emits the reasoning field in streamed JSON payloads (SSE `data:`
+    /// lines and whole-body JSON alike): when a `delta`/`message` carries only
+    /// `reasoning` or only `reasoning_content`, the missing twin is added with
+    /// the same text. The naming is split across the ecosystem — upstream vLLM
+    /// emits `reasoning` (OpenAI's GPT-OSS guidance), while DeepSeek-descended
+    /// consumers (Open WebUI, most SDKs) read `reasoning_content`. Emitting
+    /// both makes every consumer see the chain-of-thought regardless of which
+    /// convention it follows. Complete lines are buffered across chunk
     /// boundaries; payloads without a reasoning field pass through untouched,
     /// and lines that fail to parse are forwarded verbatim — a transform must
     /// never corrupt the upstream byte stream.
@@ -333,7 +336,9 @@ pub(crate) mod common {
     /// Normalize one payload line (`data: {...}` or bare JSON): rename
     /// `reasoning` → `reasoning_content` in every `delta`/`message` object.
     fn normalize_payload_line(line: &[u8]) -> Vec<u8> {
-        if !line.windows(12).any(|w| w == b"\"reasoning\":") {
+        if !line.windows(12).any(|w| w == b"\"reasoning\":")
+            && !line.windows(20).any(|w| w == b"\"reasoning_content\":")
+        {
             return line.to_vec();
         }
         let (prefix, json_start) = if line.starts_with(b"data: ") {
@@ -349,10 +354,15 @@ pub(crate) mod common {
             for ch in choices {
                 for key in ["delta", "message"] {
                     if let Some(obj) = ch.get_mut(key).and_then(|d| d.as_object_mut()) {
-                        if !obj.contains_key("reasoning_content") {
-                            if let Some(r) = obj.remove("reasoning") {
-                                obj.insert("reasoning_content".into(), r);
-                                touched = true;
+                        for (a, b) in [
+                            ("reasoning", "reasoning_content"),
+                            ("reasoning_content", "reasoning"),
+                        ] {
+                            if !obj.contains_key(b) {
+                                if let Some(r) = obj.get(a).cloned() {
+                                    obj.insert(b.into(), r);
+                                    touched = true;
+                                }
                             }
                         }
                     }
@@ -416,32 +426,39 @@ pub(crate) mod common {
         use futures_util::{stream, StreamExt};
 
         #[test]
-        fn renames_delta_reasoning() {
+        fn dual_emits_delta_reasoning() {
             let line = br#"data: {"choices":[{"delta":{"reasoning":"We"}}]}"#;
             let out = normalize_payload_line(line);
             let s = String::from_utf8(out).unwrap();
             assert!(s.contains("\"reasoning_content\":\"We\""), "{s}");
-            assert!(!s.contains("\"reasoning\":"), "{s}");
+            assert!(s.contains("\"reasoning\":\"We\""), "{s}");
             assert!(s.starts_with("data: "));
         }
 
         #[test]
-        fn renames_message_reasoning() {
+        fn dual_emits_message_reasoning() {
             let line = br#"{"choices":[{"message":{"role":"assistant","reasoning":"think","content":"hi"}}]}"#;
             let out = normalize_payload_line(line);
             let s = String::from_utf8(out).unwrap();
             assert!(s.contains("\"reasoning_content\":\"think\""));
+            assert!(s.contains("\"reasoning\":\"think\""));
         }
 
         #[test]
-        fn keeps_existing_reasoning_content() {
-            let line =
-                br#"data: {"choices":[{"delta":{"reasoning_content":"a","reasoning":"b"}}]}"#;
+        fn dual_emits_reasoning_content_too() {
+            // DeepSeek-convention backends get the upstream-vLLM name added.
+            let line = br#"data: {"choices":[{"delta":{"reasoning_content":"a"}}]}"#;
             let out = normalize_payload_line(line);
             let s = String::from_utf8(out).unwrap();
-            // reasoning_content wins; the stale reasoning key stays verbatim
-            // (line untouched) since no rename happened.
-            assert!(s.contains("\"reasoning_content\":\"a\""));
+            assert!(s.contains("\"reasoning\":\"a\""), "{s}");
+            assert!(s.contains("\"reasoning_content\":\"a\""), "{s}");
+        }
+
+        #[test]
+        fn keeps_existing_both_fields() {
+            let line =
+                br#"data: {"choices":[{"delta":{"reasoning_content":"a","reasoning":"a"}}]}"#;
+            assert_eq!(normalize_payload_line(line), line.as_slice());
         }
 
         #[test]
