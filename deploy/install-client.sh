@@ -50,10 +50,12 @@ trap '[[ -n "$STAGE_DIR" ]] && rm -rf "$STAGE_DIR"' EXIT
 
 lookup_bin() {
   local bin="$1"
-  if command -v "$bin" >/dev/null 2>&1; then
-    command -v "$bin"
-  elif [[ -x "./bin/$bin" ]]; then
+  # ./bin first: a binary the user placed there is explicit intent (e.g. a
+  # newer release on re-run) and must beat the already-installed PATH copy.
+  if [[ -x "./bin/$bin" ]]; then
     echo "./bin/$bin"
+  elif command -v "$bin" >/dev/null 2>&1; then
+    command -v "$bin"
   elif [[ -n "$STAGE_DIR" && -x "${STAGE_DIR}/${bin}" ]]; then
     echo "${STAGE_DIR}/${bin}"
   else
@@ -152,10 +154,16 @@ if [[ "$OS" == "Linux" ]]; then
   # ReadWritePaths is the only location the self-updater may swap in place.
   # /usr/local/bin/loom-client stays a convenience symlink for manual runs.
   client_bin="$(find_bin loom-client)"
-  install -m 0755 "$client_bin" "${DATA_DIR}/bin/loom-client"
+  # -ef guard: re-runs resolve the /usr/local/bin symlink back to the data-dir
+  # binary — installing a file onto itself errors out.
+  if [[ "$client_bin" -ef "${DATA_DIR}/bin/loom-client" ]]; then
+    echo ">> loom-client already installed (same binary)"
+  else
+    install -m 0755 "$client_bin" "${DATA_DIR}/bin/loom-client"
+  fi
   chown -R loom-client:loom-client "$DATA_DIR"
   if loom_bin="$(find_bin_opt loom)" && [[ -n "$loom_bin" ]]; then
-    install -m 0755 "$loom_bin" "${BIN_DIR}/loom"
+    [[ "$loom_bin" -ef "${BIN_DIR}/loom" ]] || install -m 0755 "$loom_bin" "${BIN_DIR}/loom"
   else
     echo ">> loom CLI not found — skipping (optional)"
   fi
@@ -164,9 +172,13 @@ else
   CONFIG_DIR="${HOME}/Library/Application Support/loom-client"
   mkdir -p "$CONFIG_DIR"
   client_bin="$(find_bin loom-client)"
-  install -m 0755 "$client_bin" "${BIN_DIR}/loom-client"
+  if [[ "$client_bin" -ef "${BIN_DIR}/loom-client" ]]; then
+    echo ">> loom-client already installed (same binary)"
+  else
+    install -m 0755 "$client_bin" "${BIN_DIR}/loom-client"
+  fi
   if loom_bin="$(find_bin_opt loom)" && [[ -n "$loom_bin" ]]; then
-    install -m 0755 "$loom_bin" "${BIN_DIR}/loom"
+    [[ "$loom_bin" -ef "${BIN_DIR}/loom" ]] || install -m 0755 "$loom_bin" "${BIN_DIR}/loom"
   else
     echo ">> loom CLI not found — skipping (optional)"
   fi
