@@ -27,6 +27,16 @@ enum Cmd {
     Status {
         #[arg(long, default_value = "http://127.0.0.1:8391")]
         local: String,
+        /// Bearer key when the client has local_api.api_key configured.
+        #[arg(long, default_value = "", env = "LOOM_LOCAL_API_KEY")]
+        api_key: String,
+    },
+    /// Show or edit the client config file (client-side).
+    Config {
+        #[command(subcommand)]
+        action: ConfigCmd,
+        #[arg(long, env = "LOOM_CONFIG", default_value = "", global = true)]
+        config: String,
     },
     /// Run database migrations (server-side).
     DbMigrate {
@@ -57,6 +67,17 @@ enum Cmd {
     },
     /// Print a diagnostics bundle (config paths, versions).
     Diagnostics,
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Print the effective config (secrets masked).
+    Show,
+    /// Read a single key — e.g. `loom config get local-api.bind`.
+    Get { key: String },
+    /// Set a key — e.g. `loom config set local-api.bind 0.0.0.0:8391`.
+    /// Bind/credential changes apply on client restart.
+    Set { key: String, value: String },
 }
 
 #[tokio::main]
@@ -96,13 +117,29 @@ async fn main() -> Result<()> {
             println!("start the client with LOOM_ENROLL_TOKEN={token} (first connect registers the device credential)");
             Ok(())
         }
-        Cmd::Status { local } => {
-            let v: serde_json::Value = reqwest::get(format!("{local}/local/api/status"))
-                .await?
-                .json()
-                .await?;
+        Cmd::Status { local, api_key } => {
+            let http = reqwest::Client::new();
+            let mut req = http.get(format!("{local}/local/api/status"));
+            if !api_key.is_empty() {
+                req = req.bearer_auth(api_key);
+            }
+            let resp = req.send().await?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                anyhow::bail!(
+                    "local API requires auth — pass --api-key (or set LOOM_LOCAL_API_KEY)"
+                );
+            }
+            let v: serde_json::Value = resp.error_for_status()?.json().await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
             Ok(())
+        }
+        Cmd::Config { action, config } => {
+            let path = if config.is_empty() {
+                default_config_path()
+            } else {
+                config.into()
+            };
+            run_config_cmd(action, &path)
         }
         Cmd::DbMigrate { database_url } => {
             let pool = sqlx::PgPool::connect(&database_url).await?;
@@ -172,4 +209,102 @@ fn default_config_path() -> std::path::PathBuf {
         }
     }
     "/etc/loom-client/config.toml".into()
+}
+
+// --- loom config ------------------------------------------------------------
+
+fn load_client_cfg(path: &std::path::Path) -> Result<loom_core::config::ClientConfig> {
+    if path.exists() {
+        Ok(toml::from_str::<loom_core::config::ClientConfig>(
+            &std::fs::read_to_string(path)?,
+        )?)
+    } else {
+        Ok(loom_core::config::ClientConfig::default())
+    }
+}
+
+/// Editable keys: `kebab-case` and `snake_case` spellings both accepted.
+/// Returns the current value; `set` writes `value` (bool keys parse
+/// "true"/"false", everything else is a string).
+fn cfg_access(
+    cfg: &mut loom_core::config::ClientConfig,
+    key: &str,
+    set: Option<&str>,
+) -> Result<String> {
+    let k = key.replace('-', "_");
+    let cur: String = match k.as_str() {
+        "name" => string_or_set(&mut cfg.name, set),
+        "server_url" => string_or_set(&mut cfg.server_url, set),
+        "connect_enabled" => bool_or_set(&mut cfg.connect_enabled, set)?,
+        "sharing_enabled" => bool_or_set(&mut cfg.sharing_enabled, set)?,
+        "local_api.bind" => string_or_set(&mut cfg.local_api.bind, set),
+        "local_api.api_key" => string_or_set(&mut cfg.local_api.api_key, set),
+        "local_api.serve_ui" => bool_or_set(&mut cfg.local_api.serve_ui, set)?,
+        "updater.enabled" => bool_or_set(&mut cfg.updater.enabled, set)?,
+        "updater.channel" => string_or_set(&mut cfg.updater.channel, set),
+        "updater.auto_apply" => bool_or_set(&mut cfg.updater.auto_apply, set)?,
+        "tray.enabled" => bool_or_set(&mut cfg.tray.enabled, set)?,
+        _ => anyhow::bail!(
+            "unknown key {key:?} — editable keys: name, server-url, connect-enabled, \
+             sharing-enabled, local-api.bind, local-api.api-key, local-api.serve-ui, \
+             updater.enabled, updater.channel, updater.auto-apply, tray.enabled"
+        ),
+    };
+    Ok(cur)
+}
+
+fn string_or_set(field: &mut String, set: Option<&str>) -> String {
+    if let Some(v) = set {
+        *field = v.to_string();
+    }
+    field.clone()
+}
+
+fn bool_or_set(field: &mut bool, set: Option<&str>) -> Result<String> {
+    if let Some(v) = set {
+        *field = match v {
+            "true" => true,
+            "false" => false,
+            other => anyhow::bail!("expected true/false, got {other:?}"),
+        };
+    }
+    Ok(field.to_string())
+}
+
+fn run_config_cmd(action: ConfigCmd, path: &std::path::Path) -> Result<()> {
+    match action {
+        ConfigCmd::Show => {
+            let mut cfg = load_client_cfg(path)?;
+            // Mask secrets — show is for humans.
+            if !cfg.device_credential.is_empty() {
+                cfg.device_credential = "***".into();
+            }
+            if !cfg.local_api.api_key.is_empty() {
+                cfg.local_api.api_key = "***".into();
+            }
+            if !cfg.local_api.user_hash.is_empty() {
+                cfg.local_api.user_hash = "***".into();
+            }
+            print!("{}", toml::to_string_pretty(&cfg)?);
+        }
+        ConfigCmd::Get { key } => {
+            let mut cfg = load_client_cfg(path)?;
+            println!("{}", cfg_access(&mut cfg, &key, None)?);
+        }
+        ConfigCmd::Set { key, value } => {
+            let mut cfg = load_client_cfg(path)?;
+            cfg_access(&mut cfg, &key, Some(&value))?;
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).ok();
+            }
+            std::fs::write(path, toml::to_string_pretty(&cfg)?)?;
+            println!("{key} = {value}");
+            if key.replace('-', "_").starts_with("local_api.")
+                || key.replace('-', "_") == "server_url"
+            {
+                eprintln!("note: restart the client to apply (systemctl restart loom-client)");
+            }
+        }
+    }
+    Ok(())
 }
