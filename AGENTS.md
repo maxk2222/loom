@@ -86,7 +86,13 @@ platform (otherwise aarch64 → `203/EXEC` on the nodes):
 
 ## Conventions
 - No prompt/response bodies in Redis, logs, metrics, or requests_history — metadata only.
-- Server NEVER connects to backend endpoints; inference data flows only over the client-initiated gRPC channel.
+- Server NEVER connects to backend endpoints; inference data flows only over the client-initiated gRPC/WS channel.
+- Agent channel has two transports: tonic gRPC for `http(s)://` endpoints,
+  protobuf-over-WebSocket for `ws(s)://` endpoints (HTTP gateway routes
+  `/api/agent/ws/control`, `/api/agent/ws/data`, `/api/agent/config` —
+  needed through buffered HTTP/2 proxies like cloudflared without QUIC).
+  Both share `control_stream`/`request_data_stream`/`config_snapshot` in
+  `loom-server/src/grpc_service.rs`; never duplicate session semantics.
 - All scheduling mutations via Redis Lua scripts (atomic).
 - Request bodies live only in server memory; queued entries carry metadata only.
 - Certs are transport-level fleet proof; the device credential still gates session identity. Cert CN/SAN is always bound to the *authenticated* client_id, never the CSR's claimed DN.

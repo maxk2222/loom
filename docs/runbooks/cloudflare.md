@@ -155,12 +155,63 @@ Flow: no cert → Hello+CSR via `boot.*` → cert issued → all traffic via
 `agent.*` (edge verifies the internal-CA cert). Renewal rides the same
 path automatically.
 
+## Option D — WebSocket agent transport (recommended through tunnels)
+
+> [!IMPORTANT]
+> **Bidirectional gRPC does not survive a cloudflared `--protocol http2`
+> tunnel.** The http2 tunnel protocol buffers the entire request body
+> until the client ends its stream — a control stream that never ends
+> (by design) therefore never delivers its `Hello` to the origin. Measured
+> behaviour: the server's `HelloAck` arrived exactly when the client's
+> request stream closed. Unary calls and closed streams work fine, which
+> is why this is easy to misdiagnose. QUIC (`--protocol quic`/`auto`)
+> streams bodies properly, but tunnel QUIC needs outbound UDP 7844 —
+> blocked on many networks.
+>
+> The durable answer is LOOM's **WebSocket transport**: the HTTP gateway
+> (`:8080`) bridges the exact same control/data protocol over binary WS
+> frames — `/api/agent/ws/control`, `/api/agent/ws/data` and the unary
+> `/api/agent/config`. WS upgrades proxy live through any tunnel.
+
+Client side this is just another endpoint URL scheme:
+
+```toml
+[connector]
+endpoints = [
+  { url = "https://server.lan:50052", pki = true },     # LAN mTLS — preferred
+  { url = "https://server.ts.net:50052", pki = true },  # Tailscale
+  { url = "wss://loom.example.com", pki = true },       # public fallback — WS
+]
+```
+
+- `ws://`/`wss://` selects the WebSocket transport; `http(s)://` stays
+  tonic gRPC. Endpoint order, failover probes and endpoint-hints merging
+  are unchanged.
+- A port-less `https://` endpoint automatically gains a `wss://` shadow
+  at lowest priority (an edge-proxied host can never finish a buffered
+  gRPC Hello), so `https://loom.example.com` alone still converges.
+- `wss` uses the normal trust model: system roots + optional pinned
+  `ca_cert_path`. `pki = true` on a WS endpoint means the CSR rides
+  inside `Hello` — the server issues a cert that the client later
+  presents when it migrates to a LAN/Tailscale mTLS endpoint.
+- Ingress: the public hostname points at the **HTTP gateway**
+  (`http://server:8080`), not a gRPC listener. WebSocket support must be
+  enabled in the zone (it is by default).
+- Set `cloudflared --protocol auto` (compose default): prefers QUIC
+  where UDP egress exists, falls back to http2 elsewhere — the WS path
+  works under both.
+
 ## Option C — multi-endpoint, credential-only public fallback
 
 The simplest public path: no edge-mTLS, no bootstrap hostname. The
 client keeps LAN/Tailscale mTLS endpoints preferred and falls back to
 the tunnel when off-network. Identity is the device credential in
 `Hello` — TLS terminates at the Cloudflare edge.
+
+> [!WARNING]
+> Under `--protocol http2` tunnels this option degrades to "connects,
+> never finishes Hello" for the same buffering reason documented above —
+> prefer `wss://` URLs (Option D) unless the tunnel can run QUIC.
 
 ```toml
 # client config.toml
@@ -210,11 +261,14 @@ fine as a fallback path; prefer LAN/Tailscale when available.
   agent hostnames) or tune specific managed rulesets.
 - **Body limits**: 100 MB (Free) / 200 MB (Pro) per request — relevant
   only for large audio/video uploads.
-- **gRPC through the tunnel**: cloudflared forwards HTTP/2; the
-  bidirectional stream + 20 s keepalive survive it. Reconnect/backoff is
-  unchanged. On released cloudflared the origin must be TLS (`https://`
-  service + http2Origin + noTLSVerify) — cleartext `http://` origins are
-  still dialed HTTP/1.1 until prior-knowledge h2c ships.
+- **gRPC through the tunnel**: only works when cloudflared runs QUIC
+  (`--protocol auto`/`quic` + outbound UDP 7844). Under the http2
+  fallback the request body is buffered until stream end, so a
+  bidirectional control stream never reaches the origin — use `wss://`
+  endpoints (Option D) instead. Reconnect/backoff is unchanged on both
+  transports. On released cloudflared the gRPC origin must be TLS
+  (`https://` service + http2Origin + noTLSVerify) — cleartext `http://`
+  origins are still dialed HTTP/1.1 until prior-knowledge h2c ships.
 - **Real client IP**: with `LOOM_TRUST_PROXY=1`, audit logs and
   rate-limit buckets see the visitor IP, not the tunnel.
 - **Bootstrap listener exposure**: `LOOM_GRPC_BOOTSTRAP_BIND` accepts

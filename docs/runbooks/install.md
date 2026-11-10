@@ -76,8 +76,16 @@ tls = "require"                                   # require | auto | off
 ca_cert_path = "/etc/loom-client/ca.crt"
 # client_cert_path / client_key_path — leave unset for automatic PKI;
 # set both to use externally-issued certs instead.
-# bootstrap_url = "https://loom.example.com:50053" # default: server port+1
+# bootstrap_url = "https://loom.example.com:50053" # default: :50053 on
+#   standard agent ports (50051–50054); the server_url unchanged
+#   otherwise (no port convention on :443 or custom ports).
 ```
+
+The agent channel also speaks WebSocket: `wss://`/`ws://` endpoint URLs
+open the control channel over the HTTP gateway's WS bridge instead of
+gRPC — the transport to reach the server through buffered HTTP/2
+proxies (Cloudflare tunnels without QUIC). See
+[cloudflare.md](cloudflare.md#option-d--websocket-agent-transport-recommended-through-tunnels).
 
 Verify issuance:
 
@@ -111,6 +119,11 @@ curl -fsSL https://loom.example.com/install-client.sh | \
 What it does:
 
 - installs `loom-client` + `loom` to `/usr/local/bin`
+- pins the internal CA into `/etc/loom-client/ca.crt` — fetched from the
+  gateway's `/api/tls/ca.crt` (same host on :8080 for agent ports,
+  same-origin for public/`wss://` URLs) — and writes
+  `connector.ca_cert_path`. Skipped silently when the server has no
+  internal CA (mTLS disabled).
 - writes `/etc/loom-client/config.toml` and `enroll.env` (mode 600)
 - creates the `loom-client` user, installs + starts the systemd unit
   (on macOS: `~/Library/LaunchAgents/com.loom.client.plist`)

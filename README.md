@@ -290,7 +290,7 @@ list and roams between networks automatically:
 endpoints = [
   { url = "https://loom.lan:50052", pki = true },          # LAN
   { url = "https://loom.ts.net:50052", pki = true },       # Tailscale
-  { url = "https://grpc.loom.example.com", pki = false },  # public fallback
+  { url = "wss://loom.example.com", pki = true },          # public fallback — WS
 ]
 ```
 
@@ -300,6 +300,15 @@ migrates back when LAN/Tailscale returns. `pki = false` disables cert
 bootstrap/CSR on that endpoint (Cloudflare terminates TLS — the device
 credential still gates session identity). `server_url` keeps working as
 the implicit single pki endpoint.
+
+**Two transports, one protocol** — `http(s)://` endpoints open the
+tonic gRPC control/data streams; `ws(s)://` endpoints carry the same
+protobuf envelopes over a WebSocket bridge on the HTTP gateway
+(`/api/agent/ws/*`). The WS path exists because buffered HTTP/2 proxies
+(cloudflared without QUIC) can never deliver a streaming gRPC `Hello` —
+a port-less `https://` endpoint even gains an automatic `wss://` shadow
+at lowest priority for exactly that case. Details:
+[cloudflare.md — Option D](docs/runbooks/cloudflare.md).
 
 **Endpoint hints** — the admin can push the same list to every client
 instead of editing config files (Settings → Endpoint hints, or
