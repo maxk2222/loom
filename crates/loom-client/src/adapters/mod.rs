@@ -347,13 +347,21 @@ pub(crate) mod common {
     /// missing twin field (`reasoning`/`reasoning_content`) in every
     /// `delta`/`message` object. Anything unrecognized is returned verbatim.
     fn normalize_payload_line(line: &[u8]) -> Vec<u8> {
-        if !line.windows(12).any(|w| w == b"\"reasoning\":")
-            && !line.windows(20).any(|w| w == b"\"reasoning_content\":")
-        {
+        // Gate on the leading-quoted key name only — this covers both field
+        // names ("reasoning" is a prefix of "reasoning_content") and key
+        // spellings like `"reasoning" :` with whitespace before the colon.
+        if !line.windows(10).any(|w| w == b"\"reasoning") {
             return line.to_vec();
         }
-        let (prefix, json_start) = if line.starts_with(b"data: ") {
-            (&line[..6], 6)
+        // SSE spec: the colon may be followed by at most one space, stripped
+        // from the payload — both `data: {` and `data:{` are legal.
+        let (prefix, json_start) = if line.starts_with(b"data:") {
+            let s = if line.len() > 5 && line[5] == b' ' {
+                6
+            } else {
+                5
+            };
+            (&line[..s], s)
         } else {
             (&line[..0], 0)
         };
@@ -389,8 +397,13 @@ pub(crate) mod common {
         if !touched {
             return line.to_vec();
         }
+        // Serialize can never fail for a Value, but a transform must never
+        // emit a truncated line — fall back to the verbatim input.
+        let Ok(body) = serde_json::to_vec(&v) else {
+            return line.to_vec();
+        };
         let mut out = prefix.to_vec();
-        out.extend_from_slice(&serde_json::to_vec(&v).unwrap_or_default());
+        out.extend_from_slice(&body);
         if cr {
             out.push(b'\r');
         }
@@ -479,6 +492,22 @@ pub(crate) mod common {
             let line =
                 br#"data: {"choices":[{"delta":{"reasoning_content":"a","reasoning":"a"}}]}"#;
             assert_eq!(normalize_payload_line(line), line.as_slice());
+        }
+
+        #[test]
+        fn handles_data_without_space() {
+            // `data:{` is legal SSE framing too.
+            let line = br#"data:{"choices":[{"delta":{"reasoning":"x"}}]}"#;
+            let s = String::from_utf8(normalize_payload_line(line)).unwrap();
+            assert!(s.starts_with("data:"), "{s}");
+            assert!(s.contains("reasoning_content"), "{s}");
+        }
+
+        #[test]
+        fn handles_whitespace_before_colon() {
+            let line = br#"data: {"choices":[{"delta":{"reasoning" : "x"}}]}"#;
+            let s = String::from_utf8(normalize_payload_line(line)).unwrap();
+            assert!(s.contains("reasoning_content"), "{s}");
         }
 
         #[test]
