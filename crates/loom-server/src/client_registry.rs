@@ -27,6 +27,8 @@ pub struct ClientRow {
     pub labels: serde_json::Value,
     pub desired_config: serde_json::Value,
     pub config_version: i64,
+    pub ui_url: String,
+    pub advertise_addrs: serde_json::Value,
 }
 
 impl ClientRegistry {
@@ -112,8 +114,23 @@ impl ClientRegistry {
         Ok(Some((row_id.0.to_string(), device_cred)))
     }
 
-    /// Mark a client + its deployments online; store session id.
-    pub async fn set_online(&self, client_id: &str, session_id: &str, version: &str) -> Result<()> {
+    /// Mark a client + its deployments online; store session id. `via` is
+    /// the listener kind the control stream arrived on ("mtls" | "plain" |
+    /// "bootstrap"); `ui_url`/`addrs` are the client's self-advertised admin
+    /// UI endpoint + interface addresses from Hello.
+    pub async fn set_online(
+        &self,
+        client_id: &str,
+        session_id: &str,
+        version: &str,
+        via: &str,
+        ui_url: &str,
+        addrs: &[String],
+    ) -> Result<()> {
+        // The field is client-controlled — before it becomes a clickable
+        // dashboard link, enforce http(s) scheme + a parseable host so no
+        // javascript:/data: payload can ever reach an admin's browser.
+        let ui_url = sanitize_ui_url(ui_url);
         let mut c = self.rt.conn.clone();
         let _: () = redis::pipe()
             .cmd("HSET")
@@ -126,6 +143,10 @@ impl ClientRegistry {
             .arg(now_ms())
             .arg("version")
             .arg(version)
+            .arg("via")
+            .arg(via)
+            .arg("ui_url")
+            .arg(&ui_url)
             .ignore()
             .cmd("SET")
             .arg(self.rt.k(&format!("client:{client_id}:sess")))
@@ -133,10 +154,14 @@ impl ClientRegistry {
             .ignore()
             .query_async(&mut c)
             .await?;
-        sqlx::query("UPDATE clients SET last_seen_at = now() WHERE id = $1::uuid")
-            .bind(client_id)
-            .execute(&self.db)
-            .await?;
+        sqlx::query(
+            "UPDATE clients SET last_seen_at = now(), ui_url = $2, advertise_addrs = $3 WHERE id = $1::uuid",
+        )
+        .bind(client_id)
+        .bind(&ui_url)
+        .bind(serde_json::json!(sanitize_addrs(addrs)))
+        .execute(&self.db)
+        .await?;
         Ok(())
     }
 
@@ -451,7 +476,7 @@ impl ClientRegistry {
     /// Live client view for the dashboard (Postgres + Redis merge).
     pub async fn live_clients(&self) -> Result<Vec<serde_json::Value>> {
         let rows: Vec<ClientRow> = sqlx::query_as(
-            "SELECT id, name, status, last_seen_at, version, platform, labels, desired_config, config_version FROM clients ORDER BY name",
+            "SELECT id, name, status, last_seen_at, version, platform, labels, desired_config, config_version, ui_url, advertise_addrs FROM clients ORDER BY name",
         )
         .fetch_all(&self.db)
         .await?;
@@ -473,6 +498,8 @@ impl ClientRegistry {
                 .arg("gpu_mem_total_bytes")
                 .arg("stats_at")
                 .arg("last_hb")
+                .arg("via")
+                .arg("ui_url")
                 .query_async(&mut c)
                 .await
                 .unwrap_or_default();
@@ -496,6 +523,9 @@ impl ClientRegistry {
                 "platform": r.platform,
                 "labels": r.labels,
                 "config_version": r.config_version,
+                "ui_url": r.ui_url,
+                "addrs": r.advertise_addrs,
+                "via": f(12),
                 "stats": if f(10).is_some() { json!({
                     "cpu_pct": num(1),
                     "ram_pct": num(2),
@@ -605,6 +635,37 @@ pub fn now_ms() -> i64 {
         .unwrap_or_default()
 }
 
+/// Client-supplied admin UI URL → only keep well-formed http(s) URLs with a
+/// parseable host:port. Anything else (empty, javascript:, relative) stores
+/// as "" so the dashboard never renders a client-controlled link payload.
+pub fn sanitize_ui_url(raw: &str) -> String {
+    let rest = raw
+        .strip_prefix("http://")
+        .or_else(|| raw.strip_prefix("https://"));
+    let Some(rest) = rest else {
+        return String::new();
+    };
+    let hostport = rest.split('/').next().unwrap_or("");
+    let host = hostport
+        .strip_prefix('[')
+        .and_then(|h| h.split(']').next())
+        .unwrap_or_else(|| hostport.split(':').next().unwrap_or(""));
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace()) {
+        return String::new();
+    }
+    raw.to_string()
+}
+
+/// Client-supplied interface addresses → keep only strings that actually
+/// parse as IP literals (drops injected text/HTML before JSONB storage).
+pub fn sanitize_addrs(addrs: &[String]) -> Vec<String> {
+    addrs
+        .iter()
+        .filter(|a| a.parse::<std::net::IpAddr>().is_ok())
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,5 +691,43 @@ mod tests {
         assert!(caps.images && caps.audio_speech && caps.video);
         assert_eq!(caps.context_length, 262144);
         assert!(caps.modalities.contains("image"));
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    #[test]
+    fn ui_url_accepts_http_and_https() {
+        assert_eq!(
+            sanitize_ui_url("http://192.168.3.10:8392"),
+            "http://192.168.3.10:8392"
+        );
+        assert_eq!(
+            sanitize_ui_url("https://node.ts.net:8392/ui"),
+            "https://node.ts.net:8392/ui"
+        );
+        assert_eq!(sanitize_ui_url("http://[::1]:8392"), "http://[::1]:8392");
+    }
+
+    #[test]
+    fn ui_url_rejects_non_http_schemes() {
+        assert_eq!(sanitize_ui_url("javascript:alert(1)"), "");
+        assert_eq!(sanitize_ui_url("data:text/html,x"), "");
+        assert_eq!(sanitize_ui_url(""), "");
+        assert_eq!(sanitize_ui_url("ftp://x"), "");
+        assert_eq!(sanitize_ui_url("http://"), "");
+    }
+
+    #[test]
+    fn addrs_keeps_ip_literals_only() {
+        let out = sanitize_addrs(&[
+            "192.168.3.10".to_string(),
+            "100.64.1.2".to_string(),
+            "not-an-ip".to_string(),
+            "<script>".to_string(),
+        ]);
+        assert_eq!(out, vec!["192.168.3.10", "100.64.1.2"]);
     }
 }

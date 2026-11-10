@@ -573,6 +573,11 @@ impl Connector {
         // Persist assigned client id / device credential / issued cert.
         self.persist_issued(&ack, &cfg).await;
 
+        // Server-pushed failover endpoints: enrolled-via-public clients
+        // learn LAN/Tailscale endpoints automatically (merged, never
+        // replacing configured entries — takes effect on next reconnect).
+        self.apply_endpoint_hints(&ack.endpoint_hints).await;
+
         *self.state.session_id.write().unwrap() = ack.session_id.clone();
         *self.state.ctrl_tx.write().unwrap() = Some(ctrl_tx.clone());
         self.state.connected.store(true, Ordering::SeqCst);
@@ -705,6 +710,12 @@ impl Connector {
 
     async fn build_hello(&self, cfg: &ClientConfig) -> Hello {
         let inv = self.build_inventory().await;
+        // Interface detection does a synchronous resolver per endpoint host —
+        // keep it off the async task (a dead DNS would stall Hello).
+        let cfg2 = cfg.clone();
+        let addrs = tokio::task::spawn_blocking(move || Self::detect_interface_addrs(&cfg2))
+            .await
+            .unwrap_or_default();
         Hello {
             protocol_version: limits::PROTOCOL_VERSION,
             protocol_version_min: limits::PROTOCOL_VERSION_MIN,
@@ -742,6 +753,98 @@ impl Connector {
                 .await
                 .take()
                 .unwrap_or_default(),
+            ui_url: Self::advertise_ui_url(cfg, &addrs),
+            addrs,
+        }
+    }
+
+    /// Local admin UI URL advertised in Hello — the dashboard links it
+    /// directly. Wildcard binds resolve to the first detected interface IP.
+    /// Empty when the UI is disabled or loopback-only: a `127.0.0.1` link in
+    /// an admin's browser would open *their* localhost, not the client's.
+    fn advertise_ui_url(cfg: &ClientConfig, addrs: &[String]) -> String {
+        if !cfg.local_api.serve_ui {
+            return String::new();
+        }
+        let bind = cfg.local_api.bind.as_str();
+        let (host, port) = bind.rsplit_once(':').unwrap_or((bind, "8391"));
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        let ip = if bare.is_empty() || bare == "0.0.0.0" || bare == "::" {
+            match addrs.first() {
+                Some(a) => a.as_str(),
+                None => return String::new(), // wildcard but no usable IP
+            }
+        } else if bare == "127.0.0.1" || bare == "::1" || bare == "localhost" {
+            return String::new();
+        } else {
+            bare
+        };
+        if ip.contains(':') {
+            format!("http://[{ip}]:{port}")
+        } else {
+            format!("http://{ip}:{port}")
+        }
+    }
+
+    /// Interface IPv4s the OS would pick to reach each configured endpoint
+    /// (plus the default route): a UDP connect sends nothing — it only makes
+    /// the kernel choose a source address. Dedup preserves probe order so a
+    /// LAN/Tailscale path's IP lands ahead of the generic one.
+    fn detect_interface_addrs(cfg: &ClientConfig) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut probe = |target: &str| {
+            if let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                if s.connect(target).is_ok() {
+                    if let Ok(a) = s.local_addr() {
+                        let ip = a.ip().to_string();
+                        if !a.ip().is_loopback() && !out.contains(&ip) {
+                            out.push(ip);
+                        }
+                    }
+                }
+            }
+        };
+        for ep in Self::endpoints(cfg) {
+            let h = url_host(&ep.url);
+            if h.is_empty() {
+                continue;
+            }
+            let target = if h.contains(':') {
+                format!("[{h}]:443")
+            } else {
+                format!("{h}:443")
+            };
+            probe(&target);
+        }
+        // Default-route source IP catches machines where no endpoint resolves.
+        probe("192.0.2.1:80");
+        out
+    }
+
+    /// Merge admin-pushed endpoint hints into `connector.endpoints`:
+    /// lan/wan-scoped hints lead (auto local-upgrade), configured entries
+    /// keep their order and pki flags, public hints trail. Dedup by URL —
+    /// a configured URL keeps its own pki flag even when promoted by a hint.
+    async fn apply_endpoint_hints(&self, hints: &[EndpointHint]) {
+        if hints.is_empty() {
+            return;
+        }
+        let res = self
+            .state
+            .cfg_store
+            .update(|cfg| {
+                let merged = merge_endpoints(&Self::endpoints(cfg), hints);
+                if merged == cfg.connector.endpoints {
+                    return false;
+                }
+                cfg.connector.endpoints = merged;
+                true
+            })
+            .await;
+        match res {
+            Ok(true) => info!("server endpoint hints merged into connector.endpoints"),
+            Ok(false) => {}
+            Err(e) => warn!(error = %e, "endpoint hint merge failed"),
         }
     }
 
@@ -1478,6 +1581,65 @@ fn derive_bootstrap_url(server_url: &str) -> String {
     format!("{u}:50053")
 }
 
+/// Endpoint URLs dedup on the normalized form (trailing slash ignored).
+fn norm_ep_url(u: &str) -> &str {
+    u.trim_end_matches('/')
+}
+
+/// Merge admin-pushed EndpointHints into an ordered endpoint list:
+/// lan/wan-scoped hints lead (auto local-upgrade), configured entries keep
+/// their relative order, public hints trail. Dedup by normalized URL — a
+/// URL present in `configured` keeps its own entry (and pki flag) even when
+/// a hint promotes its position.
+fn merge_endpoints(
+    configured: &[ConnectorEndpoint],
+    hints: &[EndpointHint],
+) -> Vec<ConnectorEndpoint> {
+    let mut out: Vec<ConnectorEndpoint> = Vec::new();
+    let mut push = |ep: ConnectorEndpoint| {
+        if !out
+            .iter()
+            .any(|e| norm_ep_url(&e.url) == norm_ep_url(&ep.url))
+        {
+            out.push(ep);
+        }
+    };
+    for h in hints.iter().filter(|h| h.scope != "public") {
+        let ep = configured
+            .iter()
+            .find(|e| norm_ep_url(&e.url) == norm_ep_url(&h.url))
+            .cloned()
+            .unwrap_or(ConnectorEndpoint {
+                url: h.url.clone(),
+                pki: h.pki,
+            });
+        push(ep);
+    }
+    for e in configured {
+        push(e.clone());
+    }
+    for h in hints.iter().filter(|h| h.scope == "public") {
+        push(ConnectorEndpoint {
+            url: h.url.clone(),
+            pki: h.pki,
+        });
+    }
+    out
+}
+
+/// Host portion of an endpoint URL without pulling in a URL crate:
+/// `https://host:50052/path` → `host`, `[::1]:50052` → `::1`,
+/// `https://u:p@host` → `host`.
+fn url_host(url: &str) -> &str {
+    let s = url.split("://").nth(1).unwrap_or(url);
+    let s = s.split('/').next().unwrap_or(s);
+    let s = s.rsplit('@').next().unwrap_or(s);
+    if let Some(rest) = s.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(s);
+    }
+    s.split(':').next().unwrap_or(s)
+}
+
 #[cfg(test)]
 mod tls_policy_tests {
     use super::*;
@@ -1636,5 +1798,73 @@ mod tls_policy_tests {
         assert!(super::empty_generation_failure(true, 200, false, &used).is_none());
         // Non-text apis (binary audio) are exempt.
         assert!(super::empty_generation_failure(false, 200, false, &zero).is_none());
+    }
+}
+
+#[cfg(test)]
+mod endpoint_hint_tests {
+    use super::*;
+
+    fn ep(url: &str, pki: bool) -> ConnectorEndpoint {
+        ConnectorEndpoint {
+            url: url.into(),
+            pki,
+        }
+    }
+    fn hint(url: &str, pki: bool, scope: &str) -> EndpointHint {
+        EndpointHint {
+            url: url.into(),
+            pki,
+            scope: scope.into(),
+        }
+    }
+
+    #[test]
+    fn lan_hint_leads_public_config() {
+        let out = merge_endpoints(
+            &[ep("https://grpc.example.com", false)],
+            &[hint("https://ts.internal:50052", true, "lan")],
+        );
+        assert_eq!(out[0].url, "https://ts.internal:50052");
+        assert_eq!(out[1].url, "https://grpc.example.com");
+    }
+
+    #[test]
+    fn public_hint_trails() {
+        let out = merge_endpoints(
+            &[ep("https://lan:50052", true)],
+            &[hint("https://grpc.example.com", false, "public")],
+        );
+        assert_eq!(out[0].url, "https://lan:50052");
+        assert_eq!(out[1].url, "https://grpc.example.com");
+    }
+
+    #[test]
+    fn configured_url_keeps_own_pki_flag() {
+        // Same URL hinted with a different pki flag: the configured entry
+        // wins, only its position is promoted by the lan hint.
+        let out = merge_endpoints(
+            &[
+                ep("https://grpc.example.com", false),
+                ep("https://lan:50052", true),
+            ],
+            &[hint("https://lan:50052/", false, "lan")],
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].url, "https://lan:50052");
+        assert!(out[0].pki);
+    }
+
+    #[test]
+    fn no_hints_no_change() {
+        let cfgd = vec![ep("https://a", true)];
+        assert_eq!(merge_endpoints(&cfgd, &[]), cfgd);
+    }
+
+    #[test]
+    fn url_host_parses() {
+        assert_eq!(url_host("https://x.ccl-lab.de:50052/p"), "x.ccl-lab.de");
+        assert_eq!(url_host("https://[::1]:50052"), "::1");
+        assert_eq!(url_host("host:50052"), "host");
     }
 }

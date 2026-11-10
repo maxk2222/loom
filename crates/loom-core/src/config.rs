@@ -163,7 +163,7 @@ impl Default for LocalApiConfig {
 /// entries win (LAN/Tailscale first, public fallback last). `pki=false`
 /// marks a credential-only path (e.g. Cloudflare tunnel → plaintext
 /// listener): cert bootstrap/renewal and the CSR-in-Hello flow are skipped.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorEndpoint {
     pub url: String,
     #[serde(default = "default_true")]

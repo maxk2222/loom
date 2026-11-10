@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
+import { ExternalLink, Plus } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { Badge, Card, ConfirmModal, Field, Modal, Spinner } from "../components/ui";
@@ -80,8 +80,30 @@ export default function ClientsPage() {
             <tbody>
               {(q.data?.clients ?? []).map((c) => (
                 <tr key={c.id}>
-                  <td className="td font-medium">{c.name}</td>
-                  <td className="td">{c.online ? <Badge tone="ok">online</Badge> : <Badge tone="muted">offline</Badge>}</td>
+                  <td className="td font-medium">
+                    <span className="inline-flex items-center gap-1.5">
+                      {c.name}
+                      {c.ui_url && /^https?:\/\//.test(c.ui_url) && (
+                        <a
+                          href={c.ui_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-accent hover:underline inline-flex items-center gap-0.5 text-xs font-normal"
+                          title={`Local UI: ${c.ui_url}`}
+                        >
+                          UI <ExternalLink size={11} />
+                        </a>
+                      )}
+                    </span>
+                  </td>
+                  <td className="td">
+                    <span className="inline-flex items-center gap-1.5">
+                      {c.online ? <Badge tone="ok">online</Badge> : <Badge tone="muted">offline</Badge>}
+                      {c.online && c.via && (
+                        <Badge tone={c.via === "plain" ? "warn" : "muted"}>{`via ${c.via}`}</Badge>
+                      )}
+                    </span>
+                  </td>
                   <td className="td"><Badge tone={c.status === "active" ? "accent" : "warn"}>{c.status}</Badge></td>
                   <td className="td text-muted">{c.version || "—"}</td>
                   <td className="td text-muted">{c.platform || "—"}</td>

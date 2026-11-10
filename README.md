@@ -295,6 +295,24 @@ bootstrap/CSR on that endpoint (Cloudflare terminates TLS — the device
 credential still gates session identity). `server_url` keeps working as
 the implicit single pki endpoint.
 
+**Endpoint hints** — the admin can push the same list to every client
+instead of editing config files (Settings → Endpoint hints, or
+`PUT /api/settings/endpoint_hints` with
+`[{ "url": "…", "pki": true, "scope": "lan" | "wan" | "public" }]`).
+Hints ride in HelloAck: a client enrolled via only the public endpoint
+automatically learns the LAN/Tailscale ones and upgrades on the next
+reconnect — non-public hints lead the merged list, configured endpoints
+keep their order and `pki` flags, public hints trail. TLS/CA pinning
+still applies, so a hinted endpoint cannot redirect a client to a rogue
+server.
+
+**Client self-advertisement** — each Hello carries the client's local
+admin UI URL (wildcard binds resolve to the detected interface IP) plus
+the interface IPv4s used toward the configured endpoints. The Clients
+table shows a direct "UI ↗" link and a `via mtls|plain|bootstrap` badge
+revealing which listener the session uses (e.g. `plain` for the
+Cloudflare tunnel path).
+
 TLS policy on the client: `[connector] tls = "require"` upgrades any
 `http://` URL, `"off"` forces plaintext, `"auto"` follows the scheme;
 `ca_cert_path` pins the CA (or system roots when empty — the client also

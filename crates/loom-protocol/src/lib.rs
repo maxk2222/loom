@@ -53,6 +53,7 @@ pub mod server_msgs {
             "",
             "",
             0,
+            Vec::new(),
         )
     }
 
@@ -68,6 +69,7 @@ pub mod server_msgs {
         client_cert_pem: &str,
         ca_cert_pem: &str,
         client_cert_expires_unix: i64,
+        endpoint_hints: Vec<EndpointHint>,
     ) -> ServerEnvelope {
         ServerEnvelope {
             msg: Some(server_envelope::Msg::HelloAck(HelloAck {
@@ -81,6 +83,7 @@ pub mod server_msgs {
                 client_cert_pem: client_cert_pem.into(),
                 ca_cert_pem: ca_cert_pem.into(),
                 client_cert_expires_unix,
+                endpoint_hints,
             })),
         }
     }

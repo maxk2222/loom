@@ -144,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
         registry: registry.clone(),
         scheduler: sched.clone(),
         client_ca: client_ca.clone(),
+        listener: "mtls",
     };
     let grpc_addr: SocketAddr = cfg.grpc_bind.parse()?;
     let mut grpc_tls = cfg.grpc_tls.clone();
@@ -216,13 +217,14 @@ async fn main() -> anyhow::Result<()> {
         if cfg.grpc_tls.is_none() && !plain.starts_with("127.") && !plain.starts_with("[::1]") {
             tracing::warn!(%plain, "plaintext gRPC listener on a non-loopback address without any TLS listener — reachable by any client holding a credential");
         }
-        let svc = svc.clone();
+        let mut svc = (*svc).clone();
+        svc.listener = "plain";
         let addr: SocketAddr = plain.parse().context("parse grpc_plain_bind")?;
         info!(%addr, "gRPC plaintext listener");
         listener_tasks.spawn(async move {
             tonic::transport::Server::builder()
                 .concurrency_limit_per_connection(512)
-                .add_service(grpc_service::server((*svc).clone()))
+                .add_service(grpc_service::server(svc))
                 .serve(addr)
                 .await
                 .context("grpc plaintext listener exited")
@@ -233,7 +235,8 @@ async fn main() -> anyhow::Result<()> {
     if let (Some(boot), Some(tls_cfg)) =
         (cfg.grpc_bootstrap_bind.clone(), bootstrap_tls_cfg.clone())
     {
-        let svc = svc.clone();
+        let mut svc = (*svc).clone();
+        svc.listener = "bootstrap";
         let addr: SocketAddr = boot.parse().context("parse grpc_bootstrap_bind")?;
         info!(%addr, "gRPC bootstrap listener (cert issuance)");
         listener_tasks.spawn(async move {
@@ -241,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
                 .concurrency_limit_per_connection(512)
                 .tls_config(tls_cfg)
                 .context("grpc bootstrap tls config")?
-                .add_service(grpc_service::server((*svc).clone()))
+                .add_service(grpc_service::server(svc))
                 .serve(addr)
                 .await
                 .context("grpc bootstrap listener exited")

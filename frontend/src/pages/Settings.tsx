@@ -4,6 +4,12 @@ import { api } from "../lib/api";
 import { Badge, Card, Field, Toggle } from "../components/ui";
 import type { SystemInfo } from "../lib/types";
 
+interface EndpointHintRow {
+  url: string;
+  pki: boolean;
+  scope: string;
+}
+
 export default function SettingsPage() {
   const qc = useQueryClient();
   const branding = useQuery({
@@ -14,10 +20,15 @@ export default function SettingsPage() {
     queryKey: ["set-sched"],
     queryFn: () => api.get<{ value: Record<string, unknown> | null }>("/api/settings/scheduler"),
   });
+  const hints = useQuery({
+    queryKey: ["set-hints"],
+    queryFn: () => api.get<{ value: EndpointHintRow[] | null }>("/api/settings/endpoint_hints"),
+  });
   const sys = useQuery({ queryKey: ["sys"], queryFn: () => api.get<SystemInfo>("/api/system"), refetchInterval: 10000 });
 
   const [b, setB] = useState({ app_name: "", tagline: "", accent_color: "#5b8def" });
   const [s, setS] = useState({ max_queue: 1000, assign_ack_timeout_ms: 5000, lease_ttl_secs: 120, max_attempts: 3, queue_timeout_secs: 120 });
+  const [eps, setEps] = useState<EndpointHintRow[]>([]);
   const [saved, setSaved] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -28,6 +39,9 @@ export default function SettingsPage() {
     if (sched.data?.value) setS({ ...s, ...(sched.data.value as typeof s) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sched.data]);
+  useEffect(() => {
+    if (hints.data?.value) setEps(hints.data.value);
+  }, [hints.data]);
 
   const saveBranding = async (e: FormEvent) => {
     e.preventDefault();
@@ -42,6 +56,16 @@ export default function SettingsPage() {
     await api.put("/api/settings/scheduler", { value: s });
     setSaved("scheduler");
     setTimeout(() => setSaved(""), 2000);
+  };
+
+  const saveHints = async (e: FormEvent) => {
+    e.preventDefault();
+    const clean = eps.filter((x) => x.url.trim() !== "");
+    await api.put("/api/settings/endpoint_hints", { value: clean });
+    setEps(clean);
+    setSaved("hints");
+    setTimeout(() => setSaved(""), 2000);
+    qc.invalidateQueries({ queryKey: ["set-hints"] });
   };
 
   const uploadLogo = async (file: File) => {
@@ -99,6 +123,67 @@ export default function SettingsPage() {
           <Field label="Lease TTL (s)"><input className="input" type="number" value={s.lease_ttl_secs} onChange={(e) => setS({ ...s, lease_ttl_secs: +e.target.value })} /></Field>
           <Field label="Max attempts"><input className="input" type="number" min={1} value={s.max_attempts} onChange={(e) => setS({ ...s, max_attempts: +e.target.value })} /></Field>
           <div className="col-span-2"><button className="btn-primary">Save scheduler</button></div>
+        </form>
+      </Card>
+
+      <Card className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-medium">Endpoint hints</h2>
+          {saved === "hints" && <Badge tone="ok">saved</Badge>}
+        </div>
+        <p className="text-xs text-muted">
+          Pushed to every client in HelloAck — a client enrolled via the public
+          endpoint learns LAN/Tailscale endpoints automatically. Order:
+          non-public first, configured entries keep precedence, public last.
+        </p>
+        <form onSubmit={saveHints} className="space-y-3">
+          {eps.map((ep, i) => (
+            <div key={i} className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_120px_90px_36px] sm:items-end">
+              <Field label={i === 0 ? "URL" : ""}>
+                <input
+                  className="input font-mono text-xs"
+                  placeholder="https://host:50052"
+                  value={ep.url}
+                  onChange={(e) => setEps(eps.map((x, j) => (j === i ? { ...x, url: e.target.value } : x)))}
+                />
+              </Field>
+              <Field label={i === 0 ? "Scope" : ""}>
+                <select
+                  className="input"
+                  value={ep.scope}
+                  onChange={(e) => setEps(eps.map((x, j) => (j === i ? { ...x, scope: e.target.value } : x)))}
+                >
+                  <option value="lan">lan</option>
+                  <option value="wan">wan</option>
+                  <option value="public">public</option>
+                </select>
+              </Field>
+              <Field label={i === 0 ? "PKI" : ""}>
+                <Toggle
+                  checked={ep.pki}
+                  onChange={(v) => setEps(eps.map((x, j) => (j === i ? { ...x, pki: v } : x)))}
+                  label=""
+                />
+              </Field>
+              <button
+                type="button"
+                className="btn-outline h-9 px-2 text-xs text-red-400"
+                onClick={() => setEps(eps.filter((_, j) => j !== i))}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="btn-outline"
+              onClick={() => setEps([...eps, { url: "", pki: true, scope: "lan" }])}
+            >
+              Add endpoint
+            </button>
+            <button className="btn-primary">Save hints</button>
+          </div>
         </form>
       </Card>
 

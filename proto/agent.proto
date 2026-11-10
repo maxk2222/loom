@@ -57,6 +57,20 @@ message Hello {
   InventoryReport inventory = 9;     // full inventory snapshot at connect time
   string platform = 10;              // e.g. "linux-x86_64"
   string client_csr_pem = 11;        // CSR for mTLS cert issuance/renewal
+  string ui_url = 12;                // local admin UI URL the client binds
+                                     // (wildcard binds resolve to the primary
+                                     // interface IP); empty when UI disabled
+  repeated string addrs = 13;        // non-loopback IPv4s (LAN, Tailscale, ...)
+                                     // used to reach the configured endpoints
+}
+
+// A server endpoint the client should add to its failover list. Hints ride
+// in HelloAck so an admin can teach enrolled clients local/LAN endpoints
+// without touching their config files.
+message EndpointHint {
+  string url = 1;
+  bool pki = 2;                    // internal-CA cert bootstrap needed
+  string scope = 3;                // "lan" | "wan" | "public"
 }
 
 message HelloAck {
@@ -70,6 +84,7 @@ message HelloAck {
   string client_cert_pem = 8;        // signed client cert when CSR was sent
   string ca_cert_pem = 9;            // CA chain for server verification
   int64 client_cert_expires_unix = 10; // client cert expiry for renewal planning
+  repeated EndpointHint endpoint_hints = 11; // ordered failover endpoints
 }
 
 message Heartbeat {

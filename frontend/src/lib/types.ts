@@ -30,6 +30,9 @@ export interface ClientRow {
   platform: string;
   labels: Record<string, unknown>;
   config_version: number;
+  ui_url?: string;
+  addrs?: string[];
+  via?: string | null;
   stats?: ClientStats | null;
 }
 

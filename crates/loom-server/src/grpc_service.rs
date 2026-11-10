@@ -23,6 +23,10 @@ pub struct AgentSvc {
     pub scheduler: Scheduler,
     /// Internal CA for mTLS client-cert issuance (None when PKI disabled).
     pub client_ca: Option<crate::tls_ca::ClientCa>,
+    /// Which listener this service instance serves — "mtls" | "plain" |
+    /// "bootstrap". Recorded as the session's transport so the dashboard can
+    /// show how each client is connected.
+    pub listener: &'static str,
 }
 
 pub fn server(svc: AgentSvc) -> AgentServer<AgentSvc> {
@@ -116,6 +120,10 @@ impl Agent for AgentSvc {
                     .fetch_one(&this.registry.db)
                     .await
                     .unwrap_or(0);
+            // Admin-configured failover endpoints pushed with every HelloAck —
+            // a client enrolled via the public endpoint learns the local ones
+            // without any config edit.
+            let hints = endpoint_hints(&this.registry.db).await;
             if out_tx
                 .send(server_msgs::hello_ack_pki(
                     true,
@@ -128,6 +136,7 @@ impl Agent for AgentSvc {
                     &cert_pem,
                     &ca_pem,
                     cert_exp,
+                    hints,
                 ))
                 .await
                 .is_err()
@@ -136,7 +145,14 @@ impl Agent for AgentSvc {
             }
             let _ = this
                 .registry
-                .set_online(&client_id, &session_id, &hello.client_version)
+                .set_online(
+                    &client_id,
+                    &session_id,
+                    &hello.client_version,
+                    this.listener,
+                    &hello.ui_url,
+                    &hello.addrs,
+                )
                 .await;
             this.sessions
                 .register(&client_id, &session_id, out_tx.clone())
@@ -376,4 +392,36 @@ impl Agent for AgentSvc {
             _ => Err(Status::unauthenticated("bad credential")),
         }
     }
+}
+
+/// Load admin-configured failover endpoints pushed to clients in HelloAck.
+/// Setting `endpoint_hints` is a JSON array `[{url, pki, scope}]` — a client
+/// enrolled via the public endpoint learns LAN/Tailscale endpoints this way
+/// without a config edit.
+async fn endpoint_hints(db: &sqlx::PgPool) -> Vec<EndpointHint> {
+    let v: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'endpoint_hints'")
+            .fetch_optional(db)
+            .await
+            .unwrap_or(None);
+    let Some(arr) = v.and_then(|v| v.as_array().cloned()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|e| {
+            let url = e.get("url")?.as_str()?.trim().to_string();
+            if url.is_empty() {
+                return None;
+            }
+            Some(EndpointHint {
+                url,
+                pki: e.get("pki").and_then(|p| p.as_bool()).unwrap_or(true),
+                scope: e
+                    .get("scope")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("lan")
+                    .to_lowercase(),
+            })
+        })
+        .collect()
 }
