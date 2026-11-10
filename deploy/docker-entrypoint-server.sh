@@ -29,16 +29,20 @@ BIN=/data/bin/loom-server
 SEED_BIN=/usr/local/bin/loom-server
 ver() { "$1" --version 2>/dev/null | awk '{print $NF}'; }
 IMG_ID="$(cat /etc/loom-build-id 2>/dev/null || echo 0)"
-seed() { cp "$SEED_BIN" "$BIN" && echo "$IMG_ID" > "$BIN.build-id"; }
+# Swap via rename, not in-place cp: overwriting the file a still-running
+# process executes fails with ETXTBSY and would silently keep the stale bin.
+seed() { cp "$SEED_BIN" "$BIN.new" && mv -f "$BIN.new" "$BIN" && echo "$IMG_ID" > "$BIN.build-id"; }
 if [ -x "$BIN" ]; then
     IMG_V="$(ver "$SEED_BIN")"; VOL_V="$(ver "$BIN")"
     NEWER="$(printf '%s\n%s\n' "$IMG_V" "$VOL_V" | sort -V | tail -1)"
     VOL_ID="$(cat "$BIN.build-id" 2>/dev/null || echo 0)"
     case "$VOL_ID" in ''|*[!0-9]*) VOL_ID=0 ;; esac
     if [ -n "$IMG_V" ] && [ "$IMG_V" != "$VOL_V" ] && [ "$NEWER" = "$IMG_V" ]; then
-        seed && echo "loom-server: re-seeded binary v$IMG_V (volume had v$VOL_V)" >&2
+        seed && echo "loom-server: re-seeded binary v$IMG_V (volume had v$VOL_V)" >&2 \
+            || echo "loom-server: re-seed FAILED — running volume binary" >&2
     elif [ "$IMG_V" = "$VOL_V" ] && [ "$IMG_ID" -gt "$VOL_ID" ]; then
-        seed && echo "loom-server: re-seeded same-version rebuild $IMG_ID (was $VOL_ID)" >&2
+        seed && echo "loom-server: re-seeded same-version rebuild $IMG_ID (was $VOL_ID)" >&2 \
+            || echo "loom-server: re-seed FAILED — running volume binary" >&2
     fi
 else
     mkdir -p /data/bin
