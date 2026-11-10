@@ -96,13 +96,17 @@ loom create-admin --database-url postgres://… --email admin@lab.org --password
 ## Client (workstation)
 
 1. In the dashboard → Clients → "Issue enroll token".
-2. Copy the release bundle (binaries + `deploy/install-client.sh`) to the
-   workstation.
-3. Run:
+2. On the workstation, run the gateway-hosted installer — it downloads the
+   newest matching release itself:
 
 ```bash
-sudo ./install-client.sh --server https://loom.example.com:9443 --token enroll_…
+curl -fsSL https://loom.example.com/install-client.sh | \
+  sudo bash -s -- --server https://loom.example.com:9443 --token enroll_…
 ```
+
+   (The gateway prefills `--server` from the public `endpoint_hints` entry;
+   fetched raw, `--server` is required. `LOOM_VERSION=vX.Y.Z` pins a
+   version instead of latest.)
 
 What it does:
 

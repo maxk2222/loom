@@ -283,6 +283,10 @@ async fn main() -> anyhow::Result<()> {
     let pool2 = pool.clone();
     let rt2 = rt.clone();
     let ca_for_route = client_ca.clone();
+    const INSTALL_CLIENT_SH: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/install-client.sh"
+    ));
     let app = axum::Router::new()
         .merge(gw)
         .merge(adm)
@@ -308,6 +312,32 @@ async fn main() -> anyhow::Result<()> {
                             "no internal CA (mTLS disabled)",
                         )
                             .into_response(),
+                    }
+                }
+            }),
+        )
+        // One-command client install: serves deploy/install-client.sh with
+        // the public gRPC endpoint (endpoint_hints → public_base) baked in.
+        .route(
+            "/install-client.sh",
+            get({
+                let p = pool.clone();
+                move || {
+                    let p = p.clone();
+                    async move {
+                        let url = public_server_url(&p).await;
+                        let body = if url.is_empty() {
+                            INSTALL_CLIENT_SH.to_string()
+                        } else {
+                            INSTALL_CLIENT_SH.replacen("__LOOM_SERVER_URL__", &url, 1)
+                        };
+                        (
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                "text/x-shellscript; charset=utf-8",
+                            )],
+                            body,
+                        )
                     }
                 }
             }),
@@ -405,6 +435,43 @@ async fn sec_headers_mw(
         HeaderValue::from_static("max-age=31536000; includeSubDomains"),
     );
     res
+}
+
+/// Resolve the `--server` default baked into the served install script:
+/// first endpoint_hints entry with scope "public", else `public_base`.
+/// Empty when nothing public is configured (script then requires --server).
+async fn public_server_url(pool: &sqlx::PgPool) -> String {
+    let hints: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'endpoint_hints'")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    if let Some(arr) = hints.and_then(|v| v.as_array().cloned()) {
+        for e in &arr {
+            let is_public = e
+                .get("scope")
+                .and_then(|s| s.as_str())
+                .map(|s| s.eq_ignore_ascii_case("public"))
+                .unwrap_or(false);
+            if is_public {
+                if let Some(url) = e.get("url").and_then(|u| u.as_str()) {
+                    let url = url.trim();
+                    if !url.is_empty() {
+                        return url.to_string();
+                    }
+                }
+            }
+        }
+    }
+    let base: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'public_base'")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    base.and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+        .unwrap_or_default()
 }
 
 fn init_tracing() {

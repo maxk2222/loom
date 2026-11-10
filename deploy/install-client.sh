@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
-# LOOM client installer — installs loom-client + loom CLI, config and systemd unit.
-# Usage:
-#   curl -fsSL https://<server>/install-client.sh | sudo bash -s -- --server https://loom.example.com:9443 --token enroll_...
+# LOOM client installer — downloads the newest release, installs loom-client
+# + loom CLI, config and systemd/launchd unit.
+# Usage (served by the LOOM gateway, server URL prefilled):
+#   curl -fsSL https://<loom-gateway>/install-client.sh | sudo bash -s -- --token enroll_...
+# Or with explicit values:
+#   curl -fsSL https://<loom-gateway>/install-client.sh | sudo bash -s -- --server https://grpc.example.com --token enroll_...
 set -euo pipefail
 
-SERVER_URL=""
+# Substituted by the LOOM gateway when served from /install-client.sh; the
+# placeholder makes --server mandatory when the script is fetched raw.
+SERVER_URL="__LOOM_SERVER_URL__"
 ENROLL_TOKEN=""
 CLIENT_NAME="$(hostname -s 2>/dev/null || hostname)"
 PREFIX="/usr/local"
 CONFIG_DIR="/etc/loom-client"
 DATA_DIR="/var/lib/loom-client"
 OS="$(uname -s)"
+# Release source — override for forks/mirrors.
+LOOM_REPO="${LOOM_REPO:-maxk2222/loom}"
+LOOM_VERSION="${LOOM_VERSION:-latest}"
 
 usage() {
   echo "Usage: install-client.sh --server URL --token TOKEN [--name NAME] [--prefix DIR]"
@@ -26,7 +34,9 @@ while [[ $# -gt 0 ]]; do
     *) usage ;;
   esac
 done
-[[ -n "$SERVER_URL" ]] || usage
+case "$SERVER_URL" in
+  __LOOM_SERVER_URL__|"") usage ;;
+esac
 
 if [[ "$EUID" -ne 0 ]] && [[ "$OS" == "Linux" ]]; then
   echo "Please run as root (systemd + ${CONFIG_DIR})." >&2
@@ -55,6 +65,75 @@ find_bin_opt() {
     echo "./bin/$bin"
   fi
 }
+
+# --- newest-release download -------------------------------------------------
+
+release_arch() {
+  case "${OS}-$(uname -m)" in
+    Linux-x86_64)            echo linux-x86_64 ;;
+    Linux-aarch64|Linux-arm64) echo linux-aarch64 ;;
+    Darwin-arm64)            echo macos-aarch64 ;;
+    Darwin-x86_64)           echo macos-x86_64 ;;
+    *) return 1 ;;
+  esac
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+latest_tag() {
+  # API first; fall back to the /releases/latest redirect target.
+  local tag
+  tag="$(curl -fsSL "https://api.github.com/repos/${LOOM_REPO}/releases/latest" 2>/dev/null \
+        | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  if [[ -z "$tag" ]]; then
+    tag="$(curl -fsIL -o /dev/null -w '%{url_effective}' "https://github.com/${LOOM_REPO}/releases/latest" 2>/dev/null | sed 's#.*/##')"
+  fi
+  printf '%s' "$tag"
+}
+
+# Download loom-client (+ loom when the release ships it) into ./bin so the
+# regular find_bin path picks them up. sha256 is verified when published.
+download_release() {
+  local arch ver base tmp f want got
+  arch="$(release_arch)" || { echo "!! no release for platform ${OS}-$(uname -m)" >&2; return 1; }
+  ver="$LOOM_VERSION"
+  [[ "$ver" == latest ]] && ver="$(latest_tag)"
+  [[ -n "$ver" ]] || { echo "!! could not resolve latest release tag" >&2; return 1; }
+  ver="${ver#v}"
+  base="https://github.com/${LOOM_REPO}/releases/download/v${ver}"
+  tmp="$(mktemp -d)"
+  mkdir -p ./bin
+  for b in loom-client loom; do
+    f="${b}-${ver}-${arch}"
+    if curl -fsSL -o "${tmp}/${f}" "${base}/${f}" 2>/dev/null; then
+      if curl -fsSL -o "${tmp}/${f}.sha256" "${base}/${f}.sha256" 2>/dev/null; then
+        want="$(tr -d '[:space:]' < "${tmp}/${f}.sha256")"
+        got="$(sha256_of "${tmp}/${f}")"
+        [[ "$want" == "$got" ]] || { echo "!! sha256 mismatch for ${f}" >&2; return 1; }
+      fi
+      install -m 0755 "${tmp}/${f}" "./bin/${b}"
+      echo ">> downloaded ${f}"
+    elif [[ "$b" == loom ]]; then
+      echo ">> loom CLI not in release — skipping (optional)"
+    else
+      echo "!! download failed: ${base}/${f}" >&2
+      return 1
+    fi
+  done
+  rm -rf "$tmp"
+}
+
+# Fetch the newest release when the client binary isn't already available.
+if ! find_bin_opt loom-client >/dev/null 2>&1; then
+  echo ">> loom-client not found locally — downloading latest release"
+  download_release
+fi
 
 BIN_DIR="${PREFIX}/bin"
 if [[ "$OS" == "Linux" ]]; then

@@ -163,8 +163,12 @@ Dashboard → **Clients → Issue enroll token**, then:
 
 ```bash
 curl -fsSL https://loom.example.com/install-client.sh | \
-  sudo bash -s -- --server https://loom.example.com --token enroll_…
+  sudo bash -s -- --token enroll_…
 ```
+
+The script downloads the newest release binary for the platform itself
+(`LOOM_VERSION=vX.Y.Z` pins a version, `LOOM_REPO` selects the release
+source). When fetched outside the gateway, pass `--server <grpc-url>` too.
 
 The client registers, reports its backends and appears online within
 seconds — with an auto-issued mTLS certificate (see *Security*).
