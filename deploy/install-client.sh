@@ -45,6 +45,17 @@ find_bin() {
   fi
 }
 
+# Optional binaries (e.g. the loom CLI before it shipped in releases): install
+# when present, skip with a notice otherwise.
+find_bin_opt() {
+  local bin="$1"
+  if command -v "$bin" >/dev/null 2>&1; then
+    command -v "$bin"
+  elif [[ -x "./bin/$bin" ]]; then
+    echo "./bin/$bin"
+  fi
+}
+
 BIN_DIR="${PREFIX}/bin"
 if [[ "$OS" == "Linux" ]]; then
   echo ">> Creating ${CONFIG_DIR}, ${DATA_DIR}"
@@ -58,14 +69,21 @@ if [[ "$OS" == "Linux" ]]; then
   # /usr/local/bin/loom-client stays a convenience symlink for manual runs.
   install -m 0755 "$(find_bin loom-client)" "${DATA_DIR}/bin/loom-client"
   chown -R loom-client:loom-client "$DATA_DIR"
-  install -m 0755 "$(find_bin loom)" "${BIN_DIR}/loom"
+  if loom_bin="$(find_bin_opt loom)" && [[ -n "$loom_bin" ]]; then
+    install -m 0755 "$loom_bin" "${BIN_DIR}/loom"
+  else
+    echo ">> loom CLI not found — skipping (optional)"
+  fi
   ln -sf "${DATA_DIR}/bin/loom-client" "${BIN_DIR}/loom-client"
 else
   CONFIG_DIR="${HOME}/Library/Application Support/loom-client"
   mkdir -p "$CONFIG_DIR"
-  for bin in loom-client loom; do
-    install -m 0755 "$(find_bin "$bin")" "${BIN_DIR}/${bin}"
-  done
+  install -m 0755 "$(find_bin loom-client)" "${BIN_DIR}/loom-client"
+  if loom_bin="$(find_bin_opt loom)" && [[ -n "$loom_bin" ]]; then
+    install -m 0755 "$loom_bin" "${BIN_DIR}/loom"
+  else
+    echo ">> loom CLI not found — skipping (optional)"
+  fi
 fi
 
 CFG="${CONFIG_DIR}/config.toml"

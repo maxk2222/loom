@@ -55,9 +55,9 @@ jobs:
           if [ "${{ matrix.zig }}" = "true" ]; then
             # zigbuild with pinned glibc floor — ubuntu-latest links 2.39
             # symbols that warn/fail on older distros (bookworm=2.36).
-            cargo zigbuild --release -p loom-server -p loom-client --target ${{ matrix.zigtarget }} $FEAT
+            cargo zigbuild --release -p loom-server -p loom-client -p loom-cli --target ${{ matrix.zigtarget }} $FEAT
           else
-            cargo build --release -p loom-server -p loom-client --target ${{ matrix.target }} $FEAT
+            cargo build --release -p loom-server -p loom-client -p loom-cli --target ${{ matrix.target }} $FEAT
           fi
         shell: bash
 
@@ -76,6 +76,12 @@ jobs:
             chmod +x "${out}/${name}" 2>/dev/null || true
             (cd "$out" && sha256sum "${name}" | awk '{print $1}' > "${name}.sha256")
           done
+          # The loom CLI ships too — install-client.sh expects it next to the
+          # client binary (and admins want it on workstations).
+          cli="loom-${ver}-${{ matrix.arch }}"
+          cp "${bin}/loom${ext}" "${out}/${cli}"
+          chmod +x "${out}/${cli}" 2>/dev/null || true
+          (cd "$out" && sha256sum "${cli}" | awk '{print $1}' > "${cli}.sha256")
           ls -la "$out"
 
       - uses: actions/upload-artifact@v4
