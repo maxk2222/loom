@@ -75,6 +75,9 @@ pub struct RequestOutcome {
     pub client_id: String,
     pub lease_id: String,
     pub cancel: CancellationToken,
+    /// Milliseconds between gateway enqueue and successful member dispatch —
+    /// includes queue wait, near-zero when dispatched immediately.
+    pub queue_wait_ms: i64,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -719,6 +722,7 @@ impl Scheduler {
                     trace["client_id"] = json!(member.client_id);
                     return Ok(RequestOutcome {
                         routing_trace: trace,
+                        queue_wait_ms: (crate::client_registry::now_ms() - req.enqueue_ts).max(0),
                         ..outcome
                     });
                 }
@@ -994,6 +998,7 @@ impl Scheduler {
             client_id,
             lease_id,
             cancel,
+            queue_wait_ms: 0,
         })
     }
 

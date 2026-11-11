@@ -312,6 +312,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         client,
         lease: _lease,
         cancel,
+        queue_wait_ms,
     } = split(outcome);
     let rid = request_id.clone();
     let key_id = c.api_key_id.clone();
@@ -366,7 +367,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                     } else {
                         meta.status
                     },
-                    queue_wait_ms: 0,
+                    queue_wait_ms,
                     ttft_ms: meta.ttft_ms,
                     duration_ms: started2.elapsed().as_millis() as i64,
                     prompt_tokens,
@@ -538,6 +539,7 @@ struct RequestOutcomeParts {
     client: String,
     lease: String,
     cancel: tokio_util::sync::CancellationToken,
+    queue_wait_ms: i64,
 }
 
 fn split(o: crate::scheduler::RequestOutcome) -> RequestOutcomeParts {
@@ -550,6 +552,7 @@ fn split(o: crate::scheduler::RequestOutcome) -> RequestOutcomeParts {
         client: o.client_id,
         lease: o.lease_id,
         cancel: o.cancel,
+        queue_wait_ms: o.queue_wait_ms,
     }
 }
 
