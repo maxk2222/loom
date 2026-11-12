@@ -29,6 +29,17 @@ redis.call('ZADD', KEYS[4], tonumber(ARGV[7]), rqid)
 return 'OK'
 "#;
 
+/// queue_any_nonempty: KEYS=[queue:{p0}, queue:{p1}, ...]
+/// -> 1 if any listed class queue holds entries, else 0.
+/// Used by the submit fast path: a request may skip the queue only when no
+/// higher-or-equal class has waiting work (strict class ordering).
+pub const QUEUE_ANY_NONEMPTY: &str = r#"
+for i=1,#KEYS do
+  if redis.call('ZCARD', KEYS[i]) > 0 then return 1 end
+end
+return 0
+"#;
+
 /// queue_pop: KEYS=[queue:{p0}, queue:{p1}, ...] (highest prio first)
 /// ARGV=[now_ms]
 /// -> request_id | nil ; sets req state queued->leased via separate call

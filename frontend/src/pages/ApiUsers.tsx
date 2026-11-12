@@ -2,9 +2,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy, KeyRound, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../lib/api";
-import { Badge, Card, ConfirmModal, Field, Modal, Spinner, Toggle } from "../components/ui";
+import { Badge, Card, ConfirmModal, Field, Modal, Select, Spinner, Toggle } from "../components/ui";
 import type { ApiUser, VirtualModel } from "../lib/types";
-import { fmtNum } from "../lib/format";
+import { fmtNum, prioLabel, prioOptions, prioTone } from "../lib/format";
 
 interface ApiKey {
   id: string;
@@ -17,6 +17,8 @@ interface ApiKey {
   active: boolean;
   scopes?: string[];
   allowed_models?: string[];
+  priority_class?: number | null;
+  effective_priority?: number;
 }
 
 const slugify = (s: string) =>
@@ -42,7 +44,8 @@ function ModelChips({ projectId, vms }: { projectId: string; vms: VirtualModel[]
 
 export default function ApiUsersPage() {
   const qc = useQueryClient();
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: ApiUser[] }>("/api/projects") });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: ApiUser[]; priority_classes?: number }>("/api/projects") });
+  const prioClassCount = projects.data?.priority_classes;
   const keys = useQuery({ queryKey: ["keys"], queryFn: () => api.get<{ keys: ApiKey[] }>("/api/keys") });
   const vms = useQuery({ queryKey: ["vms"], queryFn: () => api.get<{ models: VirtualModel[] }>("/api/models") });
 
@@ -51,12 +54,14 @@ export default function ApiUsersPage() {
   const [freshKey, setFreshKey] = useState<{ name: string; token: string } | null>(null);
   const [err, setErr] = useState("");
 
-  const [f, setF] = useState({ name: "", rpm_limit: 60, tpm_limit: 100000, max_concurrent: 4 });
+  const [f, setF] = useState({ name: "", rpm_limit: 60, tpm_limit: 100000, max_concurrent: 4, priority_class: 1 });
   const [selModels, setSelModels] = useState<Set<string>>(new Set());
   const [editModels, setEditModels] = useState<Set<string>>(new Set());
   const [editLimits, setEditLimits] = useState({ rpm_limit: 60, tpm_limit: 100000, max_concurrent: 4 });
   const [editScopes, setEditScopes] = useState<Set<string>>(new Set());
   const [editName, setEditName] = useState("");
+  const [editPrio, setEditPrio] = useState(1);
+  const [editKeyPrio, setEditKeyPrio] = useState("");
 
   const SCOPES = [
     "chat", "completions", "embeddings", "models",
@@ -77,7 +82,7 @@ export default function ApiUsersPage() {
     e.preventDefault();
     setErr("");
     try {
-      await api.post("/api/projects", { slug: slugify(f.name), name: f.name, priority_class: 1, weight: 1 });
+      await api.post("/api/projects", { slug: slugify(f.name), name: f.name, priority_class: f.priority_class, weight: 1 });
       const plist = await api.get<{ projects: ApiUser[] }>("/api/projects");
       const p = plist.projects.find((x) => x.slug === slugify(f.name));
       if (!p) throw new Error("project not created");
@@ -93,7 +98,7 @@ export default function ApiUsersPage() {
       });
       setFreshKey({ name: f.name, token: k.token });
       setCreateOpen(false);
-      setF({ name: "", rpm_limit: 60, tpm_limit: 100000, max_concurrent: 4 });
+      setF({ name: "", rpm_limit: 60, tpm_limit: 100000, max_concurrent: 4, priority_class: 1 });
       setSelModels(new Set());
       refresh();
     } catch (ex) {
@@ -105,7 +110,9 @@ export default function ApiUsersPage() {
   const openEdit = async (p: ApiUser) => {
     setEdit(p);
     setEditName(p.name);
+    setEditPrio(p.priority_class);
     const pk = primaryKey(p.id);
+    setEditKeyPrio(pk?.priority_class == null ? "" : String(pk.priority_class));
     setEditLimits({
       rpm_limit: pk?.rpm_limit ?? 60,
       tpm_limit: pk?.tpm_limit ?? 100000,
@@ -125,11 +132,14 @@ export default function ApiUsersPage() {
     if (!edit) return;
     setErr("");
     try {
-      await api.put(`/api/projects/${edit.id}`, { name: editName });
+      await api.put(`/api/projects/${edit.id}`, { name: editName, priority_class: editPrio });
       await api.put(`/api/projects/${edit.id}/models`, { virtual_model_ids: [...editModels] });
       const pk = primaryKey(edit.id);
       if (pk) {
-        await api.put(`/api/keys/${pk.id}`, { name: pk.name, ...editLimits, scopes: [...editScopes] });
+        await api.put(`/api/keys/${pk.id}`, {
+          name: pk.name, ...editLimits, scopes: [...editScopes],
+          priority_class: editKeyPrio === "" ? null : +editKeyPrio,
+        });
       }
       setEdit(null);
       refresh();
@@ -147,6 +157,7 @@ export default function ApiUsersPage() {
       rpm_limit: pk.rpm_limit,
       tpm_limit: pk.tpm_limit,
       max_concurrent: pk.max_concurrent,
+      priority_class: pk.priority_class ?? null,
     });
     await api.post(`/api/keys/${pk.id}/revoke`);
     setFreshKey({ name: p.name, token: k.token });
@@ -186,6 +197,7 @@ export default function ApiUsersPage() {
                 <th className="th">User</th>
                 <th className="th">API key</th>
                 <th className="th">Model grants</th>
+                <th className="th">Priority</th>
                 <th className="th">Limits (rpm / tpm / conc.)</th>
                 <th className="th">Status</th>
                 <th className="th" />
@@ -204,6 +216,7 @@ export default function ApiUsersPage() {
                       {pk ? <span>{pk.prefix}…</span> : <span className="text-muted">revoked</span>}
                     </td>
                     <td className="td"><ModelChips projectId={p.id} vms={vmList} /></td>
+                    <td className="td"><Badge tone={prioTone(p.priority_class)}>{prioLabel(p.priority_class)}</Badge></td>
                     <td className="td text-xs text-muted">
                       {pk ? `${pk.rpm_limit} / ${fmtNum(pk.tpm_limit)} / ${pk.max_concurrent}` : "—"}
                     </td>
@@ -251,6 +264,10 @@ export default function ApiUsersPage() {
             <Field label="tpm"><input className="input w-full" type="number" min={1} value={f.tpm_limit} onChange={(e) => setF({ ...f, tpm_limit: +e.target.value })} /></Field>
             <Field label="concurrent"><input className="input w-full" type="number" min={1} value={f.max_concurrent} onChange={(e) => setF({ ...f, max_concurrent: +e.target.value })} /></Field>
           </div>
+          <Field label="Queue priority">
+            <Select value={String(f.priority_class)} onChange={(v) => setF({ ...f, priority_class: +v })}
+              options={prioOptions(prioClassCount)} />
+          </Field>
           {err && <p className="text-xs text-red-400">{err}</p>}
           <button className="btn-primary w-full justify-center">Create user + key</button>
         </form>
@@ -283,6 +300,19 @@ export default function ApiUsersPage() {
               ))}
             </div>
           </Field>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Field label="User queue priority">
+              <Select value={String(editPrio)} onChange={(v) => setEditPrio(+v)}
+                options={prioOptions(prioClassCount)} />
+            </Field>
+            <Field label="Key priority">
+              <Select value={editKeyPrio} onChange={setEditKeyPrio}
+                options={[
+                  { value: "", label: `Inherit (user: ${prioLabel(editPrio)})` },
+                  ...prioOptions(prioClassCount),
+                ]} />
+            </Field>
+          </div>
           {err && <p className="text-xs text-red-400">{err}</p>}
           <button className="btn-primary w-full justify-center">Save</button>
         </form>

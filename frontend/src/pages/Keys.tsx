@@ -4,7 +4,7 @@ import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { Badge, Card, ConfirmModal, Field, Modal, Select, Spinner } from "../components/ui";
 import type { ApiKey, ApiUser } from "../lib/types";
-import { fmtNum } from "../lib/format";
+import { fmtNum, prioLabel, prioOptions, prioTone } from "../lib/format";
 
 const SCOPES = [
   "chat", "completions", "embeddings", "models",
@@ -14,19 +14,21 @@ const SCOPES = [
 export default function KeysPage() {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["keys"], queryFn: () => api.get<{ keys: ApiKey[] }>("/api/keys") });
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: ApiUser[] }>("/api/projects") });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.get<{ projects: ApiUser[]; priority_classes?: number }>("/api/projects") });
   const [open, setOpen] = useState(false);
   const [token, setToken] = useState("");
   const [pendingDel, setPendingDel] = useState<{ id: string; name: string } | null>(null);
-  const [f, setF] = useState({ project_id: "", name: "", rpm_limit: 60, tpm_limit: 100000, max_concurrent: 4, scopes: new Set(SCOPES) });
+  const [f, setF] = useState({ project_id: "", name: "", rpm_limit: 60, tpm_limit: 100000, max_concurrent: 4, scopes: new Set(SCOPES), priority_class: "" });
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["keys"] });
+  const selProject = projects.data?.projects.find((p) => p.id === f.project_id);
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
     const r = await api.post<{ token: string }>("/api/keys", {
       project_id: f.project_id, name: f.name, rpm_limit: f.rpm_limit,
       tpm_limit: f.tpm_limit, max_concurrent: f.max_concurrent, scopes: [...f.scopes],
+      priority_class: f.priority_class === "" ? null : +f.priority_class,
     });
     setToken(r.token);
     refresh();
@@ -53,7 +55,7 @@ export default function KeysPage() {
       {q.isLoading ? <Spinner /> : (
         <Card className="overflow-x-auto p-0">
           <table className="w-full">
-            <thead><tr><th className="th">Name</th><th className="th">Prefix</th><th className="th">API user</th><th className="th">Limits (rpm/tpm/conc)</th><th className="th">Status</th><th className="th" /></tr></thead>
+            <thead><tr><th className="th">Name</th><th className="th">Prefix</th><th className="th">API user</th><th className="th">Limits (rpm/tpm/conc)</th><th className="th">Priority</th><th className="th">Status</th><th className="th" /></tr></thead>
             <tbody>
               {(q.data?.keys ?? []).map((k) => (
                 <tr key={k.id}>
@@ -61,6 +63,10 @@ export default function KeysPage() {
                   <td className="td font-mono text-muted">{k.prefix}…</td>
                   <td className="td text-muted">{projects.data?.projects.find((p) => p.id === k.project_id)?.name ?? k.project_id.slice(0, 8)}</td>
                   <td className="td text-muted">{k.rpm_limit}/{fmtNum(k.tpm_limit)}/{k.max_concurrent}</td>
+                  <td className="td">
+                    <Badge tone={prioTone(k.effective_priority)}>{prioLabel(k.effective_priority)}</Badge>
+                    {k.priority_class == null && <span className="ml-1 text-xs text-muted">inherit</span>}
+                  </td>
                   <td className="td">{k.active ? <Badge tone="ok">active</Badge> : <Badge tone="err">revoked</Badge>}</td>
                   <td className="td text-right">
                     <div className="flex justify-end gap-2">
@@ -70,7 +76,7 @@ export default function KeysPage() {
                   </td>
                 </tr>
               ))}
-              {(q.data?.keys ?? []).length === 0 && <tr><td className="td text-center text-muted" colSpan={6}>No API keys.</td></tr>}
+              {(q.data?.keys ?? []).length === 0 && <tr><td className="td text-center text-muted" colSpan={7}>No API keys.</td></tr>}
             </tbody>
           </table>
         </Card>
@@ -95,6 +101,13 @@ export default function KeysPage() {
               <Field label="TPM limit"><input className="input" type="number" min={0} value={f.tpm_limit} onChange={(e) => setF({ ...f, tpm_limit: +e.target.value })} /></Field>
               <Field label="Concurrency"><input className="input" type="number" min={0} value={f.max_concurrent} onChange={(e) => setF({ ...f, max_concurrent: +e.target.value })} /></Field>
             </div>
+            <Field label="Queue priority">
+              <Select value={f.priority_class} onChange={(v) => setF({ ...f, priority_class: v })}
+                options={[
+                  { value: "", label: selProject ? `Inherit (project: ${prioLabel(selProject.priority_class)})` : "Inherit from project" },
+                  ...prioOptions(projects.data?.priority_classes),
+                ]} />
+            </Field>
             <Field label="Scopes">
               <div className="flex gap-4 pt-1">
                 {SCOPES.map((s) => (

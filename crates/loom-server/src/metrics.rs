@@ -15,6 +15,12 @@ pub fn duration(s: f64) {
 pub fn queue_len(n: f64) {
     gauge!("loom_queue_depth").set(n);
 }
+/// Per-class queue depth: `class` is the priority class id (0 = highest).
+/// Lets the Grafana view show which priority tiers hold waiting work instead
+/// of only the flat `loom_queue_depth` total.
+pub fn queue_len_class(class: u32, n: f64) {
+    gauge!("loom_queue_depth_by_class", "class" => class.to_string()).set(n);
+}
 pub fn clients_online(n: f64) {
     gauge!("loom_clients_online").set(n);
 }

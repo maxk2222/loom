@@ -119,7 +119,8 @@ impl Auth {
         let row: Option<Row> = sqlx::query_as(
             "SELECT k.id, k.project_id, k.scopes, k.rpm_limit, k.tpm_limit,
                     k.max_concurrent, k.allowed_models,
-                    p.priority_class, p.weight, p.enabled AS project_enabled
+                    COALESCE(k.priority_class, p.priority_class) AS priority_class,
+                    p.weight, p.enabled AS project_enabled
              FROM api_keys k JOIN projects p ON p.id = k.project_id
              WHERE k.key_hash = $1 AND k.revoked_at IS NULL
                AND (k.expires_at IS NULL OR k.expires_at > now())",

@@ -175,6 +175,25 @@ impl Scheduler {
         (queued, active)
     }
 
+    /// Number of configured queue priority classes (≥1). Valid class ids are
+    /// `0..classes-1`; class 0 is the highest (popped first).
+    pub fn priority_classes(&self) -> u32 {
+        self.inner.cfg.priority_classes.max(1)
+    }
+
+    /// Queue depth per class (`0..classes-1`, index 0 = highest). For the
+    /// per-class dashboard/metrics view — `live_counts` only exposes the
+    /// global gauge.
+    pub async fn class_depths(&self) -> Vec<i64> {
+        let mut c = self.inner.rt.conn.clone();
+        let mut pipe = redis::pipe();
+        for p in 0..self.priority_classes() {
+            pipe.cmd("ZCARD")
+                .arg(self.inner.rt.k(&format!("queue:{p}")));
+        }
+        pipe.query_async(&mut c).await.unwrap_or_default()
+    }
+
     /// Does `model` currently have at least one dispatchable member?
     /// Combines the snapshot filter (enabled + capabilities for `api` and
     /// `required`) with runtime liveness — a member whose client is gone or
@@ -319,6 +338,7 @@ impl Scheduler {
     /// Mirror the Redis `queue:count` gauge into the metrics exporter. Cheap
     /// single GET — called on enqueue and once per dispatch pass so the
     /// exported depth tracks every mutation path (enqueue/pop/remove/expiry).
+    /// Also publishes the per-class depths (one pipelined ZCARD round-trip).
     async fn sync_queue_depth(&self) {
         let mut c = self.inner.rt.conn.clone();
         let n: Option<i64> = redis::cmd("GET")
@@ -327,6 +347,9 @@ impl Scheduler {
             .await
             .unwrap_or_default();
         crate::metrics::queue_len(n.unwrap_or(0) as f64);
+        for (p, d) in self.class_depths().await.iter().enumerate() {
+            crate::metrics::queue_len_class(p as u32, *d as f64);
+        }
     }
 
     async fn queue_remove(&self, request_id: &str) -> Result<bool, SchedErr> {
@@ -351,8 +374,13 @@ impl Scheduler {
 
     // ---- main submit path ----
 
-    pub async fn submit(&self, req: PendingRequest) -> Result<RequestOutcome, SchedErr> {
-        if self.class_queue_empty(req.prio).await {
+    pub async fn submit(&self, mut req: PendingRequest) -> Result<RequestOutcome, SchedErr> {
+        // Authoritative class clamp: an out-of-range class would land in a
+        // queue nothing ever pops (classes are `0..priority_classes`), where
+        // the request would sit until deadline. Covers every submit path —
+        // DB-derived key/project classes and router-internal submits alike.
+        req.prio = clamp_class(req.prio, self.priority_classes());
+        if self.higher_or_equal_empty(req.prio).await {
             match self.try_dispatch(&req).await {
                 Ok(o) => return Ok(o),
                 // AllUnavailable also queues: right after server restarts or
@@ -367,13 +395,24 @@ impl Scheduler {
         self.enqueue_and_wait(req).await
     }
 
-    async fn class_queue_empty(&self, prio: u32) -> bool {
+    /// Strict-priority fast-path guard: a request may only skip the queue when
+    /// no higher-or-equal class has waiting work. Checking only the request's
+    /// own class would let low-priority submits race ahead of queued
+    /// high-priority entries and steal freshly-freed capacity. Queued
+    /// *lower*-class work never blocks a higher-class submit — it may still
+    /// dispatch first, which is exactly strict ordering.
+    /// Fails closed (treated as non-empty) when Redis errors — enqueueing is
+    /// always the safe path.
+    async fn higher_or_equal_empty(&self, prio: u32) -> bool {
         let mut c = self.inner.rt.conn.clone();
-        let n: i64 = redis::cmd("ZCARD")
-            .arg(self.inner.rt.k(&format!("queue:{prio}")))
-            .query_async(&mut c)
+        let keys: Vec<String> = (0..=prio)
+            .map(|p| self.inner.rt.k(&format!("queue:{p}")))
+            .collect();
+        let n: i64 = redis::Script::new(crate::lua::QUEUE_ANY_NONEMPTY)
+            .key(keys)
+            .invoke_async(&mut c)
             .await
-            .unwrap_or(0);
+            .unwrap_or(1);
         n == 0
     }
 
@@ -1176,4 +1215,26 @@ fn fnv1a(s: &str) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     }
     h
+}
+
+/// Clamp a derived priority class to the valid queue range `0..=classes-1`.
+/// `classes` is normalized to ≥1 so the result always names a queue the pop
+/// path actually reads — an out-of-range class would be an invisible tomb.
+fn clamp_class(prio: u32, classes: u32) -> u32 {
+    prio.min(classes.max(1) - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_class_bounds_to_valid_queues() {
+        assert_eq!(clamp_class(0, 4), 0);
+        assert_eq!(clamp_class(3, 4), 3);
+        assert_eq!(clamp_class(99, 4), 3, "out-of-range clamps to last class");
+        assert_eq!(clamp_class(5, 1), 0, "single-class config clamps to 0");
+        assert_eq!(clamp_class(2, 0), 0, "zero-class config normalizes to 1");
+        assert_eq!(clamp_class(0, 0), 0);
+    }
 }

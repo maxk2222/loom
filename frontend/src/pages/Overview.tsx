@@ -3,9 +3,9 @@ import { Activity, Boxes, Cpu, ListOrdered, Zap } from "lucide-react";
 import { AreaChart, Area, BarChart, Bar, Cell, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
-import { LiveBadge, PageHeader, Stat } from "../components/ui";
+import { Badge, LiveBadge, PageHeader, Stat } from "../components/ui";
 import type { ClientRow, Overview, VirtualModel } from "../lib/types";
-import { fmtPct, fmtTs, fmtTime, fmtDay, fmtDayT, fmtNum, fmtMs } from "../lib/format";
+import { fmtPct, fmtTs, fmtTime, fmtDay, fmtDayT, fmtNum, fmtMs, PRIORITY_LABELS, prioTone } from "../lib/format";
 
 const API_ENDPOINTS = [
   { m: "POST", p: "/v1/chat/completions", d: "chat · stream · tools · vision" },
@@ -145,7 +145,17 @@ export default function OverviewPage() {
       <div className="stagger grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
         <Stat label="Clients online" value={<span className="flex items-center gap-2"><Cpu size={18} className="text-ok" />{online.length}<span className="text-sm text-muted">/ {d?.clients_total ?? 0}</span></span>} />
         <Stat label="Virtual models" value={<span className="flex items-center gap-2"><Boxes size={18} className="text-accent" />{d?.virtual_models ?? 0}</span>} />
-        <Stat label="Queued" value={<span className="flex items-center gap-2"><ListOrdered size={18} className="text-warn" />{d?.queued ?? 0}</span>} />
+        <Stat label="Queued" value={
+          <span className="flex items-center gap-2"><ListOrdered size={18} className="text-warn" />{d?.queued ?? 0}
+            {(d?.queued_by_class ?? []).some((n) => n > 0) && (
+              <span className="flex gap-1">
+                {d!.queued_by_class!.map((n, i) => n > 0 && (
+                  <Badge key={i} tone={prioTone(i)}>{`${PRIORITY_LABELS[i] ?? `Class ${i}`} ${n}`}</Badge>
+                ))}
+              </span>
+            )}
+          </span>
+        } />
         <Stat label="In flight" value={<span className="flex items-center gap-2"><Activity size={18} className="text-accent" />{d?.inflight ?? 0}</span>} />
         <Stat label="Requests (24h)" value={<span className="flex items-center gap-2"><Zap size={18} className="text-ok" />{fmtNum(d?.requests_24h ?? 0)}</span>} />
       </div>

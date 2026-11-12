@@ -106,3 +106,31 @@ export function fmtGiB(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v)) return "—";
   return (v / 1024 ** 3).toFixed(1);
 }
+
+// Queue priority classes — index = class id (0 = highest, popped first).
+// Keep in sync with SchedulerConfig.priority_classes (default 4).
+export const PRIORITY_LABELS = ["High", "Normal", "Low", "Batch"] as const;
+
+export function prioLabel(p: number | null | undefined): string {
+  if (p == null || p < 0) return "—";
+  return `${PRIORITY_LABELS[p] ?? `Class ${p}`} (${p})`;
+}
+
+// Options for a priority <Select>: `classes` comes from /api/projects
+// (server SchedulerConfig) so a non-default class count stays selectable.
+export function prioOptions(classes = PRIORITY_LABELS.length): { value: string; label: string }[] {
+  return Array.from({ length: Math.max(1, classes) }, (_, i) => ({
+    value: String(i),
+    label: `${PRIORITY_LABELS[i] ?? `Class ${i}`} (${i})`,
+  }));
+}
+
+// Badge tone per class so priority reads at a glance in tables.
+export function prioTone(p: number | null | undefined): "warn" | "ok" | "accent" | "muted" {
+  switch (p) {
+    case 0: return "warn";
+    case 1: return "ok";
+    case 2: return "accent";
+    default: return "muted";
+  }
+}

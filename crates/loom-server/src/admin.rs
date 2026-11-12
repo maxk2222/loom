@@ -329,6 +329,7 @@ async fn overview(State(s): State<AdminState>) -> Json<Value> {
     // stores terminal states, so querying it for 'queued'/'streaming'
     // always returns 0.
     let (queued, active) = s.scheduler.live_counts().await;
+    let by_class = s.scheduler.class_depths().await;
     let today: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM requests_history WHERE created_at > now() - interval '1 day'",
     )
@@ -340,6 +341,7 @@ async fn overview(State(s): State<AdminState>) -> Json<Value> {
         "clients_online": online,
         "virtual_models": vms.len(),
         "queued": queued,
+        "queued_by_class": by_class,
         "inflight": active,
         "requests_24h": today,
     }))
@@ -473,6 +475,30 @@ async fn delete_user(State(s): State<AdminState>, Path(id): Path<String>) -> Res
 
 // ---------------- projects ----------------
 
+/// Validate `priority_class` from a request body: absent/null → None. A
+/// present integer must satisfy `0 <= n < configured class count`; anything
+/// else returns `Some(400)` rather than being silently clamped — a typo must
+/// not quietly land a project/key in the Batch queue (or an unpopped
+/// out-of-range queue).
+fn check_priority_class(s: &AdminState, b: &Value) -> Option<Response> {
+    let v = b.get("priority_class")?;
+    if v.is_null() {
+        return None;
+    }
+    let max = s.scheduler.priority_classes().saturating_sub(1) as i64;
+    let ok = v.as_i64().is_some_and(|n| (0..=max).contains(&n));
+    if !ok {
+        return Some(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("priority_class must be an integer 0..={max}")})),
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
 async fn list_projects(State(s): State<AdminState>) -> Json<Value> {
     let rows: Vec<(uuid::Uuid, String, String, i32, i32, bool)> = sqlx::query_as(
         "SELECT id, slug, name, priority_class, weight, enabled FROM projects ORDER BY slug",
@@ -481,7 +507,8 @@ async fn list_projects(State(s): State<AdminState>) -> Json<Value> {
     .await
     .unwrap_or_default();
     Json(
-        json!({"projects": rows.iter().map(|(id,s,n,p,w,e)| json!({"id":id,"slug":s,"name":n,"priority_class":p,"weight":w,"enabled":e})).collect::<Vec<_>>()}),
+        json!({"projects": rows.iter().map(|(id,s,n,p,w,e)| json!({"id":id,"slug":s,"name":n,"priority_class":p,"weight":w,"enabled":e})).collect::<Vec<_>>(),
+               "priority_classes": s.scheduler.priority_classes()}),
     )
 }
 
@@ -494,6 +521,9 @@ async fn create_project(State(s): State<AdminState>, Json(b): Json<Value>) -> Re
             Json(json!({"error":"slug required"})),
         )
             .into_response();
+    }
+    if let Some(resp) = check_priority_class(&s, &b) {
+        return resp;
     }
     match sqlx::query("INSERT INTO projects (slug,name,priority_class,weight) VALUES ($1,$2,$3,$4)")
         .bind(slug)
@@ -516,6 +546,9 @@ async fn update_project(
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> Response {
+    if let Some(resp) = check_priority_class(&s, &b) {
+        return resp;
+    }
     let _ = sqlx::query(
         "UPDATE projects SET name=COALESCE($2,name), priority_class=COALESCE($3,priority_class), weight=COALESCE($4,weight), enabled=COALESCE($5,enabled) WHERE id=$1::uuid")
         .bind(&id)
@@ -596,12 +629,21 @@ async fn list_keys(State(s): State<AdminState>) -> Json<Value> {
         bool,
         serde_json::Value,
         serde_json::Value,
+        Option<i32>,
+        i32,
     );
     let rows: Vec<KeyRow> = sqlx::query_as(
-        "SELECT id, project_id, name, prefix, rpm_limit, tpm_limit, max_concurrent, (revoked_at IS NULL) AS active, scopes, allowed_models FROM api_keys ORDER BY created_at DESC",
-    ).fetch_all(&s.db).await.unwrap_or_default();
+        "SELECT k.id, k.project_id, k.name, k.prefix, k.rpm_limit, k.tpm_limit, k.max_concurrent,
+                (k.revoked_at IS NULL) AS active, k.scopes, k.allowed_models,
+                k.priority_class, COALESCE(k.priority_class, p.priority_class) AS effective_priority
+         FROM api_keys k JOIN projects p ON p.id = k.project_id
+         ORDER BY k.created_at DESC",
+    )
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default();
     Json(
-        json!({"keys": rows.iter().map(|(id,p,n,pre,rpm,tpm,mc,act,sc,am)| json!({"id":id,"project_id":p,"name":n,"prefix":pre,"rpm_limit":rpm,"tpm_limit":tpm,"max_concurrent":mc,"active":act,"scopes":sc,"allowed_models":am})).collect::<Vec<_>>()}),
+        json!({"keys": rows.iter().map(|(id,p,n,pre,rpm,tpm,mc,act,sc,am,pc,ep)| json!({"id":id,"project_id":p,"name":n,"prefix":pre,"rpm_limit":rpm,"tpm_limit":tpm,"max_concurrent":mc,"active":act,"scopes":sc,"allowed_models":am,"priority_class":pc,"effective_priority":ep})).collect::<Vec<_>>()}),
     )
 }
 
@@ -614,12 +656,15 @@ async fn create_key(State(s): State<AdminState>, Json(b): Json<Value>) -> Respon
         )
             .into_response();
     }
+    if let Some(resp) = check_priority_class(&s, &b) {
+        return resp;
+    }
     let token = format!("sk-{}", opaque_token(24));
     let hash = sha256_hex(&token);
     let prefix = token.chars().take(10).collect::<String>();
     let res = sqlx::query(
-        "INSERT INTO api_keys (project_id,name,key_hash,prefix,scopes,rpm_limit,tpm_limit,max_concurrent,allowed_models)
-         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id::text")
+        "INSERT INTO api_keys (project_id,name,key_hash,prefix,scopes,rpm_limit,tpm_limit,max_concurrent,allowed_models,priority_class)
+         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id::text")
         .bind(project)
         .bind(b["name"].as_str().unwrap_or(""))
         .bind(&hash).bind(&prefix)
@@ -628,6 +673,7 @@ async fn create_key(State(s): State<AdminState>, Json(b): Json<Value>) -> Respon
         .bind(b["tpm_limit"].as_i64().unwrap_or(100000) as i32)
         .bind(b["max_concurrent"].as_i64().unwrap_or(4) as i32)
         .bind(b.get("allowed_models").cloned().unwrap_or_else(|| json!([])))
+        .bind(b.get("priority_class").and_then(|v| v.as_i64()).map(|v| v as i32))
         .fetch_one(&s.db).await;
     match res {
         Ok(row) => {
@@ -683,9 +729,13 @@ async fn update_key(
 ) -> Response {
     // Partial update: only fields present in the body change; the rest keep
     // their stored values (avoids clobbering limits/models on renames etc).
+    if let Some(resp) = check_priority_class(&s, &b) {
+        return resp;
+    }
     let cur: Option<Value> = sqlx::query_scalar(
         "SELECT jsonb_build_object('name',name,'rpm_limit',rpm_limit,'tpm_limit',tpm_limit,
-                'max_concurrent',max_concurrent,'scopes',scopes,'allowed_models',allowed_models)
+                'max_concurrent',max_concurrent,'scopes',scopes,'allowed_models',allowed_models,
+                'priority_class',priority_class)
          FROM api_keys WHERE id=$1::uuid AND revoked_at IS NULL",
     )
     .bind(&id)
@@ -700,9 +750,16 @@ async fn update_key(
             .into_response();
     };
     let get = |k: &str| b.get(k).cloned().unwrap_or_else(|| cur[k].clone());
+    // priority_class is nullable: JSON null clears the override (key falls
+    // back to inheriting the project class); absent keeps the stored value.
+    let prio_patch: Option<i32> = match get("priority_class") {
+        Value::Null => None,
+        v => v.as_i64().map(|n| n as i32),
+    };
     let r = sqlx::query(
         "UPDATE api_keys SET name=$2, rpm_limit=$3, tpm_limit=$4, max_concurrent=$5,
-                scopes=$6, allowed_models=$7 WHERE id=$1::uuid AND revoked_at IS NULL",
+                scopes=$6, allowed_models=$7, priority_class=$8
+         WHERE id=$1::uuid AND revoked_at IS NULL",
     )
     .bind(&id)
     .bind(get("name").as_str().unwrap_or_default().to_string())
@@ -711,6 +768,7 @@ async fn update_key(
     .bind(get("max_concurrent").as_i64().unwrap_or(4) as i32)
     .bind(get("scopes"))
     .bind(get("allowed_models"))
+    .bind(prio_patch)
     .execute(&s.db)
     .await;
     match r {
@@ -1671,10 +1729,7 @@ async fn stats_series(State(s): State<AdminState>, Query(q): Query<StatsQ>) -> J
 /// Request counts bucketed by time × total-token size — feeds the dashboard
 /// heatmap ("how large were the requests when"). Token buckets are log-spaced
 /// so a 200-token chat ping and a 200k-token agent context share one chart.
-async fn stats_token_heatmap(
-    State(s): State<AdminState>,
-    Query(q): Query<StatsQ>,
-) -> Json<Value> {
+async fn stats_token_heatmap(State(s): State<AdminState>, Query(q): Query<StatsQ>) -> Json<Value> {
     let (interval, bucket) = stats_window(q.window.as_ref());
     let rows: Vec<(chrono::DateTime<chrono::Utc>, i32, i64)> = sqlx::query_as(
         "SELECT to_timestamp(floor(extract(epoch from created_at)/$2)*$2) AS t,

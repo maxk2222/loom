@@ -16,6 +16,8 @@ export interface Overview {
   clients_online: number;
   virtual_models: number;
   queued: number;
+  /** Per-class queue depth, index = class id (0 = highest). */
+  queued_by_class?: number[];
   inflight: number;
   requests_24h: number;
 }
@@ -106,6 +108,8 @@ export interface ApiKey {
   tpm_limit: number;
   max_concurrent: number;
   active: boolean;
+  priority_class?: number | null;
+  effective_priority?: number;
 }
 
 export interface UserRow {

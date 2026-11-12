@@ -455,6 +455,54 @@ async fn queue_fifo_and_pop_order() {
 }
 
 #[tokio::test]
+async fn queue_any_nonempty_reports_higher_class_waiters() {
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let q0 = format!("{p}queue:0");
+    let q1 = format!("{p}queue:1");
+    let q2 = format!("{p}queue:2");
+
+    async fn any(c: &mut ConnectionManager, keys: Vec<String>) -> i64 {
+        redis::Script::new(lua::QUEUE_ANY_NONEMPTY)
+            .key(keys)
+            .invoke_async::<i64>(c)
+            .await
+            .unwrap()
+    }
+
+    // all empty → 0 on any subset
+    assert_eq!(any(&mut c, vec![q0.clone()]).await, 0);
+    assert_eq!(any(&mut c, vec![q0.clone(), q1.clone()]).await, 0);
+
+    // an entry in class 1 is seen when scanning 0..=1 (a class-1 submit
+    // defers) but NOT when scanning only class 0 — a class-0 submit may
+    // fast-path past lower-class waiters, which is strict ordering.
+    redis::cmd("ZADD")
+        .arg(&q1)
+        .arg(1000i64)
+        .arg("req-x")
+        .query_async::<i64>(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(any(&mut c, vec![q0.clone()]).await, 0);
+    assert_eq!(any(&mut c, vec![q0.clone(), q1.clone()]).await, 1);
+    assert_eq!(
+        any(&mut c, vec![q0.clone(), q1.clone(), q2.clone()]).await,
+        1
+    );
+
+    // once the class-1 entry leaves, the scan reports empty again
+    redis::cmd("ZREM")
+        .arg(&q1)
+        .arg("req-x")
+        .query_async::<i64>(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(any(&mut c, vec![q0, q1, q2]).await, 0);
+}
+
+#[tokio::test]
 async fn kv_budget_gates_acquire_and_release_returns_footprint() {
     let Some((mut c, p)) = conn().await else {
         return;

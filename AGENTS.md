@@ -106,6 +106,20 @@ Building x86_64 binaries from Apple Silicon requires an explicit
 platform (otherwise aarch64 → `203/EXEC` on the nodes):
 `docker build --platform linux/amd64 ...`
 
+## Queue priority semantics
+- Requests carry a class `0..priority_classes-1` (config `priority_classes`,
+  default 4). Class 0 is highest; queues pop strictly high→low, FIFO in-class.
+- Effective class = `COALESCE(api_keys.priority_class, projects.priority_class)`;
+  key NULL inherits the project. Admin API rejects out-of-range values (400);
+  `Scheduler::submit` clamps defensively anyway (unpopped-queue tomb guard).
+- Fast-path rule: a request may skip the queue only when `queue:{0..=prio}`
+  are ALL empty (`higher_or_equal_empty`) — never let a low-class submit race
+  ahead of queued high-class work. Queued lower-class work never blocks a
+  higher-class submit.
+- Tier-1 local client traffic never enters this queue — it outranks all
+  classes by architecture.
+- `projects.weight` exists but is intentionally unused (reserved knob — no UI).
+
 ## Conventions
 - No prompt/response bodies in Redis, logs, metrics, or requests_history — metadata only.
 - Server NEVER connects to backend endpoints; inference data flows only over the client-initiated gRPC/WS channel.
