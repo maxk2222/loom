@@ -238,7 +238,6 @@ $BUILD_BLOCK
       LOOM_GRPC_TLS_KEY: /data/tls/server.key
       LOOM_MTLS: "1"
       LOOM_DATA_DIR: /data
-      LOOM_DASHBOARD_DIR: /var/lib/loom/dashboard
       RUST_LOG: "info,loom_server=debug"
     volumes:
       - serverdata:/data

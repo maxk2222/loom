@@ -60,7 +60,7 @@ buf lint proto/                    # if buf installed; otherwise build via cargo
 
 Releases are tag-triggered (`git tag vX.Y.Z && git push --tags`). The
 workflow produces signed binaries for linux x86_64/aarch64, macOS aarch64
-and Windows, **plus GHCR images** (`ghcr.io/<repo>/loom-{server,client}:X.Y.Z`)
+and Windows, **plus GHCR images** (`ghcr.io/<owner>/loom-{server,client}:X.Y.Z`)
 built FROM those same signed binaries — identical bits on every path.
 
 Update matrix — pick by component:
@@ -69,7 +69,7 @@ Update matrix — pick by component:
 |---|---|
 | Server (docker) | `POST /api/server/update` (admin session) — downloads the signed binary, swaps it into `/data/bin`, exits; restart policy brings it up |
 | Client (any)   | Dashboard → Clients → Update, or `POST /api/clients/<id>/update`, or client-local `POST :8391/local/api/update` |
-| Compose stack  | Pin `image: ghcr.io/…/loom-server:X.Y.Z` and `docker compose pull && up -d` — for rebuilds/fresh installs, not rolling updates |
+| Compose stack  | Pin `image: ghcr.io/<owner>/loom-server:X.Y.Z` and `docker compose pull && up -d` — for rebuilds/fresh installs, not rolling updates |
 
 Why both work: container entrypoints seed the binary into the state volume
 (`/data/bin`, `/etc/loom-client/bin`) and exec it from there. On each start

@@ -176,8 +176,11 @@ if [ "${LOOM_FORCE_RESEED:-}" = "1" ]; then
         || echo "loom-client: forced re-seed FAILED — running volume binary" >&2
 elif [ -x "$BIN" ]; then
     IMG_V="$(ver "$SEED_BIN")"; VOL_V="$(ver "$BIN")"
-    # Unreadable/empty version reports count as 0 → always re-seeded.
-    VOL_V="${VOL_V:-0}"
+    # Only dotted-digit strings count as versions: garbage output sorts
+    # ABOVE real versions under sort -V and would silently keep a broken
+    # volume binary. Unparseable volume versions count as 0 → re-seeded.
+    case "$IMG_V" in *[!0-9.]*) IMG_V="" ;; esac
+    case "$VOL_V" in *[!0-9.]*) VOL_V=0 ;; esac
     NEWER="$(printf '%s\n%s\n' "$IMG_V" "$VOL_V" | sort -V | tail -1)"
     VOL_ID="$(cat "$BIN.build-id" 2>/dev/null || echo 0)"
     case "$VOL_ID" in ''|*[!0-9]*) VOL_ID=0 ;; esac
