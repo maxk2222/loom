@@ -8,6 +8,32 @@ export function localKey(): string {
   return localStorage.getItem(LOCAL_KEY_STORAGE) ?? "";
 }
 
+/** Clipboard copy that also works over plain-HTTP LAN access, where
+ * navigator.clipboard is unavailable (non-secure context). */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fall through to execCommand */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const auth: Record<string, string> =
     APP_VARIANT === "client" && localKey()

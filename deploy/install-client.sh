@@ -5,6 +5,8 @@
 #   curl -fsSL https://<loom-gateway>/install-client.sh | sudo bash -s -- --token enroll_...
 # Or with explicit values:
 #   curl -fsSL https://<loom-gateway>/install-client.sh | sudo bash -s -- --server https://grpc.example.com --token enroll_...
+# Docker instead of a native daemon (no root needed beyond docker access):
+#   curl -fsSL https://<loom-gateway>/install-client.sh | bash -s -- --docker --token enroll_...
 set -euo pipefail
 
 # Substituted by the LOOM gateway when served from /install-client.sh; the
@@ -122,6 +124,7 @@ download_release() {
   [[ "$ver" == latest ]] && ver="$(latest_tag)"
   [[ -n "$ver" ]] || { echo "!! could not resolve latest release tag" >&2; return 1; }
   ver="${ver#v}"
+  RESOLVED_VERSION="$ver"   # reused by docker_install's raw-file fallback
   base="https://github.com/${LOOM_REPO}/releases/download/v${ver}"
   STAGE_DIR="$(mktemp -d)"
   for b in loom-client loom; do
@@ -200,12 +203,26 @@ docker_install() {
     rm -f "$WORK_DIR/docker-entrypoint-client.sh"
   done
   if [[ "$fetched" == "0" ]]; then
+    # Gateways older than this route → tag-pinned GitHub raw (matches the
+    # release binary just downloaded; RESOLVED_VERSION set by download_release).
+    local ver2="${RESOLVED_VERSION:-}"
+    if [[ -z "$ver2" && "$LOOM_VERSION" != latest ]]; then ver2="${LOOM_VERSION#v}"; fi
+    if [[ -n "$ver2" ]] \
+       && curl -fsSL -o "$WORK_DIR/docker-entrypoint-client.sh" \
+          "https://raw.githubusercontent.com/${LOOM_REPO}/v${ver2}/deploy/docker-entrypoint-client.sh" 2>/dev/null \
+       && grep -q 'loom-client' "$WORK_DIR/docker-entrypoint-client.sh" 2>/dev/null; then
+      fetched=1
+    else
+      rm -f "$WORK_DIR/docker-entrypoint-client.sh"
+    fi
+  fi
+  if [[ "$fetched" == "0" ]]; then
     local self_dir
     self_dir="$(cd "$(dirname "$0")" && pwd)"
     if [[ -f "${self_dir}/docker-entrypoint-client.sh" ]]; then
       cp "${self_dir}/docker-entrypoint-client.sh" "$WORK_DIR/"
     else
-      echo "!! could not fetch docker-entrypoint-client.sh from the gateway" >&2
+      echo "!! could not fetch docker-entrypoint-client.sh (gateway + GitHub)" >&2
       exit 1
     fi
   fi
@@ -294,6 +311,12 @@ COMPOSE
     lkey="lk-$(tr -d '-' < /proc/sys/kernel/random/uuid)"
   fi
 
+  # Existing state volume? Then config.toml (incl. the LIVE api key) persists
+  # and the env vars below only matter for a fresh first start — flag that so
+  # a re-run doesn't hand out a key that isn't actually in force.
+  local have_state=0
+  docker volume inspect loom-client_loom-client-data >/dev/null 2>&1 && have_state=1
+
   cat > "$WORK_DIR/.env" <<EOF
 LOOM_SERVER_URL=${SERVER_URL}
 LOOM_ENROLL_TOKEN=${ENROLL_TOKEN}
@@ -306,12 +329,22 @@ LOOM_LOCAL_API_KEY=${lkey}
 # LOOM_MODELS=model-a,model-b
 EOF
   chmod 600 "$WORK_DIR/.env"
+  # Under sudo the project lands root-owned in the caller's $PWD — hand it
+  # back so later `docker compose` runs can read .env as the real user.
+  if [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]]; then
+    chown -R "${SUDO_UID}:${SUDO_GID}" "$WORK_DIR" 2>/dev/null || true
+  fi
 
   (cd "$WORK_DIR" && docker compose up -d --build)
 
   echo ""
   echo "Done. Client UI:   http://127.0.0.1:8391"
-  [[ -n "$lkey" ]] && echo "Local API key:   $lkey"
+  if [[ "$have_state" == "1" ]]; then
+    echo "NOTE: existing client state kept — the configured local API key is unchanged"
+    echo "      (read/rotate it in the client UI → Status → API key)."
+  elif [[ -n "$lkey" ]]; then
+    echo "Local API key:   $lkey"
+  fi
   echo "Project dir:     $WORK_DIR   (docker compose logs -f | down)"
 }
 

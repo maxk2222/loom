@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Check, Copy, ExternalLink, Plus } from "lucide-react";
 import { useState, type FormEvent } from "react";
-import { api } from "../lib/api";
+import { api, copyText } from "../lib/api";
 import { Badge, Card, ConfirmModal, Field, Modal, Spinner } from "../components/ui";
 import type { ClientRow } from "../lib/types";
 import { fmtPct, fmtTs } from "../lib/format";
@@ -15,7 +15,7 @@ function CopyCmd({ cmd, hint }: { cmd: string; hint?: string }) {
         <button
           className="btn-ghost absolute right-2 top-2 inline-flex items-center gap-1 px-2 py-1 text-[11px]"
           onClick={async () => {
-            await navigator.clipboard.writeText(cmd);
+            await copyText(cmd);
             setCopied(true);
             setTimeout(() => setCopied(false), 1500);
           }}
@@ -172,7 +172,7 @@ export default function ClientsPage() {
               <button
                 className="btn-ghost absolute right-2 top-2 inline-flex items-center gap-1 px-2 py-1 text-[11px]"
                 onClick={async () => {
-                  await navigator.clipboard.writeText(issued);
+                  await copyText(issued);
                   setTokCopied(true);
                   setTimeout(() => setTokCopied(false), 1500);
                 }}

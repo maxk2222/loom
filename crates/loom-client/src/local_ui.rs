@@ -3,6 +3,7 @@
 //! When the assets are missing (dev without frontend build), serves a stub page.
 
 use axum::{
+    http::StatusCode,
     response::{Html, IntoResponse},
     routing::get,
     Router,
@@ -22,7 +23,16 @@ where
         .route("/ui", get(index))
         .route("/ui/", get(index))
         .route("/ui/{*path}", get(asset))
-        .fallback(get(index))
+        // SPA fallback for unknown pages — but never for API namespaces:
+        // an unmatched /local/api/* or /v1/* GET must 404 as JSON consumers
+        // expect, not silently serve index.html.
+        .fallback(get(|uri: axum::http::Uri| async move {
+            let p = uri.path();
+            if p.starts_with("/local/api/") || p.starts_with("/v1/") || p == "/healthz" {
+                return (StatusCode::NOT_FOUND, "not found").into_response();
+            }
+            index().await.into_response()
+        }))
 }
 
 async fn index() -> Html<String> {

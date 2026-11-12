@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, LOCAL_KEY_STORAGE, localKey } from "../../lib/api";
+import { api, copyText, LOCAL_KEY_STORAGE, localKey } from "../../lib/api";
 import { WindowPicker } from "../Overview";
 import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { Badge, Card, ConfirmModal, Field, Modal, Stat } from "../../components/ui";
@@ -143,7 +143,7 @@ function ApiKeyCard() {
 
   const copy = async () => {
     if (!key) return;
-    await navigator.clipboard.writeText(key);
+    await copyText(key);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
