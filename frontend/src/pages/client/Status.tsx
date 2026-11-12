@@ -432,7 +432,9 @@ function ClientCharts() {
       grid[bi][ti]++;
       if (grid[bi][ti] > max) max = grid[bi][ti];
     }
-    return { grid, max, t0: end - span, bw };
+    // Mirror reqSeries: day+time ticks on the unbounded window, time-of-day otherwise.
+    const tick = win === "all" ? fmtDayT : fmtTimeS;
+    return { grid, max, t0: end - span, bw, every: Math.ceil(N / 8), tick };
   })();
   const latChart = rows.slice(-30).map((r: any) => ({ t: fmtTimeS(r.ended_unix_ms), ms: r.duration_ms }));
   const tokRows = rows.slice(-30).map((r: any) => ({
@@ -474,8 +476,8 @@ function ClientCharts() {
           grid={heat.grid}
           labels={TOK_LABELS}
           max={heat.max}
-          colLabel={(i) => (i % 6 === 0 ? fmtTimeS(heat.t0 + i * heat.bw) : "")}
-          title={(r, c, n) => `${n} requests · ${TOK_LABELS[r]} tokens · ${fmtTimeS(heat.t0 + c * heat.bw)}`}
+          colLabel={(i) => (i % heat.every === 0 ? heat.tick(heat.t0 + i * heat.bw) : "")}
+          title={(r, c, n) => `${n} requests · ${TOK_LABELS[r]} tokens · ${heat.tick(heat.t0 + c * heat.bw)}`}
         />
       </div>
     )}

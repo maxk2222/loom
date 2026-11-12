@@ -4,7 +4,7 @@ import { api } from "../lib/api";
 import { Card, ConfirmModal, Spinner } from "../components/ui";
 import { TokenHeatmap } from "../components/Heatmap";
 import type { HistoryRow, ApiUser, UsageStat } from "../lib/types";
-import { fmtTs, fmtTimeS, fmtMs, fmtNum } from "../lib/format";
+import { fmtTs, fmtTimeS, fmtDayT, fmtDay, fmtMs, fmtNum } from "../lib/format";
 import { WindowPicker } from "./Overview";
 import {
   Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -86,7 +86,11 @@ export default function MonitoringPage() {
       grid[c.b][i] += c.n;
       if (grid[c.b][i] > max) max = grid[c.b][i];
     }
-    return { grid, max, t0, bw };
+    // ~8 x-labels; time format follows the window (hours for a day,
+    // day+time for weeks, plain date beyond).
+    const every = Math.max(1, Math.ceil(cols / 8));
+    const tick = win === "24h" ? fmtTimeS : win === "all" || win === "1y" || win === "365d" ? fmtDay : fmtDayT;
+    return { grid, max, t0, bw, every, tick };
   })();
 
   const rows = hist.data?.requests ?? [];
@@ -134,8 +138,8 @@ export default function MonitoringPage() {
             grid={heat.grid}
             labels={heatmap.data?.token_buckets ?? []}
             max={heat.max}
-            colLabel={(i) => (i % Math.max(1, Math.floor(heat.grid[0].length / 8)) === 0 ? fmtTimeS(heat.t0 + i * heat.bw) : "")}
-            title={(r, c, n) => `${n} requests · ${heatmap.data?.token_buckets[r] ?? r} tokens · ${fmtTimeS(heat.t0 + c * heat.bw)}`}
+            colLabel={(i) => (i % heat.every === 0 ? heat.tick(heat.t0 + i * heat.bw) : "")}
+            title={(r, c, n) => `${n} requests · ${heatmap.data?.token_buckets[r] ?? r} tokens · ${heat.tick(heat.t0 + c * heat.bw)}`}
           />
         </Card>
       )}
