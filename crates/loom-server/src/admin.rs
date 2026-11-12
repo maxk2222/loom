@@ -141,6 +141,7 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/history", get(history))
         .route("/api/stats/usage", get(usage_stats))
         .route("/api/stats/series", get(stats_series))
+        .route("/api/stats/token-heatmap", get(stats_token_heatmap))
         .route("/api/stats/breakdown", get(stats_breakdown))
         .route("/api/stats/purge-orphans", post(purge_orphan_stats))
         // settings
@@ -1664,6 +1665,41 @@ async fn stats_series(State(s): State<AdminState>, Query(q): Query<StatsQ>) -> J
             "p95_ms": p95.unwrap_or(0.0), "p99_ms": p99.unwrap_or(0.0),
             "duration_ms": dur, "decode_ms": dec,
         })).collect::<Vec<_>>()
+    }))
+}
+
+/// Request counts bucketed by time × total-token size — feeds the dashboard
+/// heatmap ("how large were the requests when"). Token buckets are log-spaced
+/// so a 200-token chat ping and a 200k-token agent context share one chart.
+async fn stats_token_heatmap(
+    State(s): State<AdminState>,
+    Query(q): Query<StatsQ>,
+) -> Json<Value> {
+    let (interval, bucket) = stats_window(q.window.as_ref());
+    let rows: Vec<(chrono::DateTime<chrono::Utc>, i32, i64)> = sqlx::query_as(
+        "SELECT to_timestamp(floor(extract(epoch from created_at)/$2)*$2) AS t,
+                CASE WHEN prompt_tokens + completion_tokens < 256    THEN 0
+                     WHEN prompt_tokens + completion_tokens < 1024   THEN 1
+                     WHEN prompt_tokens + completion_tokens < 4096   THEN 2
+                     WHEN prompt_tokens + completion_tokens < 16384  THEN 3
+                     WHEN prompt_tokens + completion_tokens < 65536  THEN 4
+                     WHEN prompt_tokens + completion_tokens < 262144 THEN 5
+                     ELSE 6 END AS b,
+                count(*)::bigint AS n
+           FROM requests_history
+          WHERE created_at > now() - $1::interval
+          GROUP BY t, b ORDER BY t, b",
+    )
+    .bind(interval)
+    .bind(bucket as f64)
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default();
+    Json(json!({
+        "window": q.window.unwrap_or_else(|| "24h".into()),
+        "bucket_secs": bucket,
+        "token_buckets": ["<256","256–1k","1k–4k","4k–16k","16k–64k","64k–256k","≥256k"],
+        "cells": rows.iter().map(|(t,b,n)| json!({"t":t,"b":b,"n":n})).collect::<Vec<_>>()
     }))
 }
 

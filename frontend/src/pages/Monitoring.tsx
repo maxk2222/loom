@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../lib/api";
 import { Card, ConfirmModal, Spinner } from "../components/ui";
+import { TokenHeatmap } from "../components/Heatmap";
 import type { HistoryRow, ApiUser, UsageStat } from "../lib/types";
 import { fmtTs, fmtTimeS, fmtMs, fmtNum } from "../lib/format";
 import { WindowPicker } from "./Overview";
@@ -57,6 +58,11 @@ export default function MonitoringPage() {
     queryFn: () => api.get<{ models: BreakdownRow[]; clients: BreakdownRow[]; keys: BreakdownRow[]; projects: BreakdownRow[] }>(`/api/stats/breakdown?window=${win}`),
     refetchInterval: 15000,
   });
+  const heatmap = useQuery({
+    queryKey: ["tok-heatmap", win],
+    queryFn: () => api.get<{ bucket_secs: number; token_buckets: string[]; cells: { t: string; b: number; n: number }[] }>(`/api/stats/token-heatmap?window=${win}`),
+    refetchInterval: 15000,
+  });
   const pname = (id: string) => projects.data?.projects.find((p) => p.id === id)?.name ?? id.slice(0, 8);
 
   const data = (usage.data?.usage_24h ?? []).map((u) => ({
@@ -64,6 +70,24 @@ export default function MonitoringPage() {
     requests: u.requests,
     tokens: u.prompt_tokens + u.completion_tokens,
   }));
+
+  // Heatmap: server returns {t,b,n} cells — expand to a dense time×bucket
+  // grid from first data point to now (empty columns stay dark).
+  const heat = (() => {
+    const d = heatmap.data;
+    if (!d || d.cells.length === 0) return null;
+    const bw = d.bucket_secs * 1000;
+    const t0 = Math.min(...d.cells.map((c) => new Date(c.t).getTime()));
+    const cols = Math.max(1, Math.ceil((Date.now() - t0) / bw));
+    const grid = Array.from({ length: d.token_buckets.length }, () => new Array<number>(cols).fill(0));
+    let max = 0;
+    for (const c of d.cells) {
+      const i = Math.min(cols - 1, Math.floor((new Date(c.t).getTime() - t0) / bw));
+      grid[c.b][i] += c.n;
+      if (grid[c.b][i] > max) max = grid[c.b][i];
+    }
+    return { grid, max, t0, bw };
+  })();
 
   const rows = hist.data?.requests ?? [];
   const ttfts = rows.filter((r) => r.ttft_ms > 0).map((r) => r.ttft_ms).sort((a, b) => a - b);
@@ -103,6 +127,18 @@ export default function MonitoringPage() {
           </ResponsiveContainer>
         )}
       </Card>
+      {heat && (
+        <Card>
+          <div className="mb-3 text-sm font-medium">Tokens per request <span className="text-xs text-muted">({win}) — cell intensity = requests in bucket</span></div>
+          <TokenHeatmap
+            grid={heat.grid}
+            labels={heatmap.data?.token_buckets ?? []}
+            max={heat.max}
+            colLabel={(i) => (i % Math.max(1, Math.floor(heat.grid[0].length / 8)) === 0 ? fmtTimeS(heat.t0 + i * heat.bw) : "")}
+            title={(r, c, n) => `${n} requests · ${heatmap.data?.token_buckets[r] ?? r} tokens · ${fmtTimeS(heat.t0 + c * heat.bw)}`}
+          />
+        </Card>
+      )}
       <Card className="overflow-x-auto p-0">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div className="text-sm font-medium">Token totals <span className="text-xs text-muted">({win})</span></div>

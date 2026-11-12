@@ -4,6 +4,7 @@ import { api, copyText, LOCAL_KEY_STORAGE, localKey } from "../../lib/api";
 import { WindowPicker } from "../Overview";
 import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { Badge, Card, ConfirmModal, Field, Modal, Stat } from "../../components/ui";
+import { TokenHeatmap } from "../../components/Heatmap";
 import { Check, Copy, Eye, EyeOff, Megaphone, RefreshCw, X } from "lucide-react";
 import type { ClientNote, ClientStatus } from "../../lib/types";
 import { fmtPct, fmtTs, fmtTimeS, fmtDayT, fmtUptime, fmtGiB, fmtNum, fmtMs } from "../../lib/format";
@@ -352,6 +353,10 @@ const CLIENT_WINDOWS = [
   { v: "all", l: "All" },
 ];
 const WIN_MS: Record<string, number> = { "1h": 3.6e6, "6h": 21.6e6, "24h": 86.4e6, all: Infinity };
+// Same log-spaced buckets as the server heatmap — a 200-token ping and a
+// 200k agent context share one chart.
+const TOK_BOUNDS = [256, 1024, 4096, 16384, 65536, 262144];
+const TOK_LABELS = ["<256", "256–1k", "1k–4k", "4k–16k", "16k–64k", "64k–256k", "≥256k"];
 
 function ClientCharts() {
   const q = useQuery({ queryKey: ["client-hist"], queryFn: () => api.get<{ history: any[] }>("/local/api/history"), refetchInterval: 8000 });
@@ -407,6 +412,28 @@ function ClientCharts() {
     }
     return bkt;
   })();
+  // Token-per-request heatmap over the picked window — client-side bucketed
+  // from the same history rows (local + shared requests share the ring).
+  const heat = (() => {
+    if (rows.length === 0) return null;
+    const end = Date.now();
+    const span = Number.isFinite(WIN_MS[win])
+      ? WIN_MS[win]
+      : Math.max(1, end - rows[0].ended_unix_ms);
+    const N = 48;
+    const bw = span / N;
+    const grid = Array.from({ length: TOK_LABELS.length }, () => new Array<number>(N).fill(0));
+    let max = 0;
+    for (const r of rows) {
+      const tot = (r.prompt_tokens ?? 0) + (r.completion_tokens ?? 0);
+      let bi = TOK_BOUNDS.findIndex((x) => tot < x);
+      if (bi < 0) bi = TOK_BOUNDS.length;
+      const ti = Math.min(N - 1, Math.max(0, Math.floor((r.ended_unix_ms - (end - span)) / bw)));
+      grid[bi][ti]++;
+      if (grid[bi][ti] > max) max = grid[bi][ti];
+    }
+    return { grid, max, t0: end - span, bw };
+  })();
   const latChart = rows.slice(-30).map((r: any) => ({ t: fmtTimeS(r.ended_unix_ms), ms: r.duration_ms }));
   const tokRows = rows.slice(-30).map((r: any) => ({
     t: fmtTimeS(r.ended_unix_ms),
@@ -438,6 +465,18 @@ function ClientCharts() {
             <Area yAxisId="r" type="monotone" dataKey="tok" name="tokens" stroke="#8fb3d9" fill="none" strokeWidth={1.5} dot={false} isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
+      </div>
+    )}
+    {heat && (
+      <div className="card p-4">
+        <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">tokens / request over time <span className="normal-case text-muted/70">(cell intensity = requests in bucket)</span></div>
+        <TokenHeatmap
+          grid={heat.grid}
+          labels={TOK_LABELS}
+          max={heat.max}
+          colLabel={(i) => (i % 6 === 0 ? fmtTimeS(heat.t0 + i * heat.bw) : "")}
+          title={(r, c, n) => `${n} requests · ${TOK_LABELS[r]} tokens · ${fmtTimeS(heat.t0 + c * heat.bw)}`}
+        />
       </div>
     )}
     <div className="grid gap-4 md:grid-cols-2">
