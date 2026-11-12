@@ -154,7 +154,10 @@ impl Auth {
             rpm_limit: r.rpm_limit as i64,
             tpm_limit: r.tpm_limit as i64,
             max_concurrent: r.max_concurrent as i64,
-            priority_class: r.priority_class.max(0) as u32,
+            // Defensive mapping for malformed DB values: a negative class
+            // degrades to u32::MAX → submit() clamps it to the *lowest*
+            // queue. `max(0)` would silently escalate it to the highest.
+            priority_class: u32::try_from(r.priority_class).unwrap_or(u32::MAX),
             weight: r.weight as i64,
         }))
     }
