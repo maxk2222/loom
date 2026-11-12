@@ -107,6 +107,40 @@ redis.call('ZADD', leases, exp, KEYS[3])
 return { fencing }
 "#;
 
+/// capacity_apply: apply a client capacity report atomically.
+/// KEYS=[dep:{id}, dep:{id}:leases]
+/// ARGV=[tier2_total, inflight_local, inflight_tier2, sharing_mode, state,
+///       pressure_gated, last_report, health, kv_reported_used, reported_free]
+/// -> recomputed tier2_free
+///
+/// `tier2_free` is server-authoritative: LEASE_ACQUIRE/LEASE_RELEASE maintain
+/// it via HINCRBY, so a stale client report must never overwrite the counter
+/// (a delayed `free=0` report would starve the queue until the next tick; a
+/// stale `free=N` would over-admit). The report's own value is kept only as
+/// `tier2_reported_free` telemetry — free is recomputed from the authoritative
+/// lease set: `clamp(tier2_total - ZCARD(leases), 0, tier2_total)`.
+pub const CAPACITY_APPLY: &str = r#"
+local dep = KEYS[1]
+redis.call('HSET', dep,
+  'tier2_total', ARGV[1],
+  'inflight_local', ARGV[2],
+  'inflight_tier2', ARGV[3],
+  'sharing_mode', ARGV[4],
+  'state', ARGV[5],
+  'pressure_gated', ARGV[6],
+  'last_report', ARGV[7],
+  'tier2_reported_free', ARGV[10])
+if ARGV[8] ~= '' then redis.call('HSET', dep, 'health', ARGV[8]) end
+if tonumber(ARGV[9]) > 0 then redis.call('HSET', dep, 'kv_reported_used', ARGV[9]) end
+local total = tonumber(ARGV[1]) or 0
+local held = redis.call('ZCARD', KEYS[2])
+local free = total - held
+if free < 0 then free = 0 end
+if free > total then free = total end
+redis.call('HSET', dep, 'tier2_free', free)
+return free
+"#;
+
 /// lease_confirm: KEYS=[lease:{lid}, dep:{id}]
 /// ARGV=[fencing] -> "OK" | "STALE" | "NOT_FOUND"
 pub const LEASE_CONFIRM: &str = r#"

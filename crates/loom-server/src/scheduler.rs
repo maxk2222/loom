@@ -843,15 +843,18 @@ impl Scheduler {
         // `NoCapacity`/`Rejected` mean a member exists and could serve once it
         // frees up — transient. `ClientOffline` means unavailable; only when
         // every candidate is unreachable is the shortage structural.
-        // A member filtered out for `free == 0` while still `available` is
-        // merely busy, not gone. `draining` is transient too: a member under
-        // local pressure or mid-rewarm reopens once it recovers — requests
-        // queued behind it must wait (bounded by the request deadline), not
-        // fail fast as if the member were gone. Only `offline` is structural.
+        // A member whose client still reports in — `available` or `draining`,
+        // regardless of health — is by construction transient: it may be
+        // pressure-gated, mid-rewarm, or recovering behind a generation
+        // breaker, and rejoins on its own within seconds. Requests queued
+        // behind it must wait (bounded by queue_timeout), not burn attempts
+        // and die just before an ~8s recovery completes. Only members that
+        // are unreachable outright — `offline`/`unavailable`, i.e. session
+        // dead or deployment removed — make the shortage structural.
         let any_busy = ranked.is_empty()
             && runtime
                 .values()
-                .any(|(_, st, h)| (st == "available" || st == "draining") && h != "down");
+                .any(|(_, st, _)| st == "available" || st == "draining");
         let mut saw_transient = false;
         for member in ranked {
             match self.lease_and_assign(req, &member).await {

@@ -903,3 +903,101 @@ async fn requeue_preserves_attempts() {
         .unwrap();
     assert_eq!(attempts, 2, "requeue must preserve the attempts counter");
 }
+
+/// Regression: a capacity report must never overwrite the server-maintained
+/// `tier2_free` counter. Leases are server-authoritative — a stale report
+/// (client counted its own inflight view) used to clobber the HINCRBY'd
+/// field, starving the queue (stale `free=0`) or over-admitting (stale
+/// `free=N`) until the next tick.
+#[tokio::test]
+async fn capacity_apply_recomputes_free_from_lease_set() {
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let dep = format!("{p}dep:d1");
+    let leases = format!("{p}dep:d1:leases");
+    let fencing_key = format!("{p}cap:fencing");
+
+    async fn apply(
+        c: &mut ConnectionManager,
+        dep: &str,
+        leases: &str,
+        total: i64,
+        reported_free: i64,
+    ) -> i64 {
+        redis::Script::new(lua::CAPACITY_APPLY)
+            .key(dep)
+            .key(leases)
+            .arg(total)
+            .arg(0) // inflight_local
+            .arg(0) // inflight_tier2
+            .arg("shared")
+            .arg("available")
+            .arg(0) // pressure_gated
+            .arg(now_ms())
+            .arg("healthy")
+            .arg(0) // kv_reported_used
+            .arg(reported_free)
+            .invoke_async(c)
+            .await
+            .unwrap()
+    }
+
+    // Fresh report on an idle deployment: free = total (no leases held).
+    assert_eq!(apply(&mut c, &dep, &leases, 4, 4).await, 4);
+
+    // Acquire two leases → server bookkeeping decrements free to 2.
+    for i in 0..2 {
+        let v: redis::Value = redis::Script::new(lua::LEASE_ACQUIRE)
+            .key(&dep)
+            .key(&leases)
+            .key(format!("{p}lease:l{i}"))
+            .key(&fencing_key)
+            .arg(format!("req-{i}"))
+            .arg("client-1")
+            .arg("d1")
+            .arg(60_000i64)
+            .arg(now_ms())
+            .arg(0)
+            .invoke_async(&mut c)
+            .await
+            .unwrap();
+        assert!(fencing_from(v) > 0);
+    }
+
+    // Stale report claiming free=0 (client still counting its own inflight)
+    // must NOT starve the queue: free stays total - leases = 2.
+    assert_eq!(apply(&mut c, &dep, &leases, 4, 0).await, 2);
+
+    // Stale report claiming free=4 (pre-lease view) must NOT over-admit.
+    assert_eq!(apply(&mut c, &dep, &leases, 4, 4).await, 2);
+
+    // The reported value is kept as telemetry only.
+    let reported: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("tier2_reported_free")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(reported, 4);
+
+    // Releasing one lease → next report recomputes free = 3.
+    let l0 = format!("{p}lease:l0");
+    let _: redis::Value = redis::Script::new(lua::LEASE_RELEASE)
+        .key(&l0)
+        .key(&dep)
+        .key(&leases)
+        .arg(
+            redis::cmd("HGET")
+                .arg(&l0)
+                .arg("fencing")
+                .query_async::<i64>(&mut c)
+                .await
+                .unwrap(),
+        )
+        .arg("req-0")
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(apply(&mut c, &dep, &leases, 4, 4).await, 3);
+}

@@ -343,38 +343,29 @@ impl ClientRegistry {
             } else {
                 "draining"
             };
-            let mut h = redis::cmd("HSET");
-            h.arg(&key)
-                .arg("tier2_total")
+            // Capacity fields land atomically in one Lua script. `tier2_free`
+            // is recomputed server-side from the lease set — the client's own
+            // `free` value is telemetry only (`tier2_reported_free`): leases
+            // are server-authoritative, and a stale report would otherwise
+            // clobber the HINCRBY bookkeeping and starve/over-admit the queue
+            // (same hazard `kv_used` is already protected against below).
+            // `health`/`kv_reported_used` stay conditional inside the script:
+            // "" = older client without health reporting, 0 = cannot measure.
+            let _: i64 = redis::Script::new(crate::lua::CAPACITY_APPLY)
+                .key(&key)
+                .key(self.rt.k(&format!("dep:{}:leases", cap.deployment_id)))
                 .arg(cap.tier2_total)
-                .arg("tier2_free")
-                .arg(cap.tier2_free)
-                .arg("inflight_local")
                 .arg(cap.inflight_local)
-                .arg("inflight_tier2")
                 .arg(cap.inflight_tier2)
-                .arg("sharing_mode")
                 .arg(&cap.sharing_mode)
-                .arg("state")
                 .arg(state)
-                .arg("pressure_gated")
                 .arg(cap.pressure_gated as u32)
-                .arg("last_report")
-                .arg(now_ms());
-            // Newer clients report effective health per capacity tick — the
-            // scheduler needs "down" here, not just the (staler) inventory
-            // value, or a dead-but-draining member looks "busy" forever.
-            // Older clients send "" → keep the inventory-written value.
-            if !cap.health.is_empty() {
-                h.arg("health").arg(&cap.health);
-            }
-            // Client-observed backend KV usage — telemetry/drift signal only.
-            // `kv_used` itself stays server-authoritative (lease footprint
-            // sums), otherwise a stale report would corrupt admission.
-            if cap.kv_used_tokens > 0 {
-                h.arg("kv_reported_used").arg(cap.kv_used_tokens);
-            }
-            let _: () = h.query_async(&mut c).await?;
+                .arg(now_ms())
+                .arg(&cap.health)
+                .arg(cap.kv_used_tokens)
+                .arg(cap.tier2_free)
+                .invoke_async(&mut c)
+                .await?;
             // Adapter-derived budget feeds the effective budget when no admin
             // override exists. 0 = client cannot measure → leave stored value.
             if cap.kv_budget_tokens > 0 {
