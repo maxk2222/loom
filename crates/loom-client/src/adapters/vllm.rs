@@ -16,6 +16,32 @@ pub struct VllmAdapter {
     http: reqwest::Client,
 }
 
+/// Extract the effective KV token budget from a prometheus /metrics body:
+/// `kv_cache_size_tokens` label wins (exact capacity for both pure-attention
+/// and hybrid models), `num_gpu_blocks × block_size` is the legacy fallback.
+fn kv_tokens_from_cache_config(body: &str) -> Option<u64> {
+    for line in body.lines() {
+        let Some(rest) = line.strip_prefix("vllm:cache_config_info{") else {
+            continue;
+        };
+        let label = |key: &str| -> Option<u64> {
+            let marker = format!("{key}=\"");
+            let start = rest.find(&marker)? + marker.len();
+            let end = rest[start..].find('"')? + start;
+            rest[start..end].parse().ok()
+        };
+        if let Some(n) = label("kv_cache_size_tokens") {
+            if n > 0 {
+                return Some(n);
+            }
+        }
+        if let (Some(blocks), Some(size)) = (label("num_gpu_blocks"), label("block_size")) {
+            return Some(blocks * size);
+        }
+    }
+    None
+}
+
 impl VllmAdapter {
     pub fn new(cfg: BackendConfig, http: reqwest::Client) -> Self {
         Self { cfg, http }
@@ -47,7 +73,12 @@ impl VllmAdapter {
     }
 
     /// `vllm:cache_config_info` info metric carries the physical KV pool
-    /// geometry: num_gpu_blocks × block_size = total token slots.
+    /// geometry. Prefer its `kv_cache_size_tokens` label — the canonical
+    /// capacity vLLM itself logs ("GPU KV cache size: N tokens"). Only fall
+    /// back to num_gpu_blocks × block_size when the label is absent:
+    /// hybrid models (mamba/GDN, e.g. Qwen3-Next) resolve block_size to the
+    /// mamba page size and the product overshoots massively (observed:
+    /// 5319 × 3008 ≈ 16M vs the real 880k on qwen3.8-flash-next).
     async fn metrics_kv_tokens(&self) -> Option<u64> {
         let url = format!("{}/metrics", self.endpoint());
         let mut req = self.http.get(&url).timeout(Duration::from_secs(5));
@@ -55,21 +86,7 @@ impl VllmAdapter {
             req = req.bearer_auth(&self.cfg.api_key);
         }
         let body = req.send().await.ok()?.text().await.ok()?;
-        for line in body.lines() {
-            let Some(rest) = line.strip_prefix("vllm:cache_config_info{") else {
-                continue;
-            };
-            let label = |key: &str| -> Option<u64> {
-                let marker = format!("{key}=\"");
-                let start = rest.find(&marker)? + marker.len();
-                let end = rest[start..].find('"')? + start;
-                rest[start..end].parse().ok()
-            };
-            if let (Some(blocks), Some(size)) = (label("num_gpu_blocks"), label("block_size")) {
-                return Some(blocks * size);
-            }
-        }
-        None
+        kv_tokens_from_cache_config(&body)
     }
 
     /// `/get_server_info` `max_model_len` — a conservative floor (admits at
@@ -354,5 +371,46 @@ fn collect_mm_types(v: &Value, out: &mut std::collections::HashSet<String>) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kv_tokens_from_cache_config;
+
+    // Real metric line from vllm serve qwen3.8-flash-next (hybrid GDN/mamba):
+    // block_size resolves to the 3008-token mamba page, so blocks×size
+    // (5319×3008≈16M) overshoots the true KV pool ~18x.
+    const HYBRID: &str = r#"vllm:cache_config_info{block_size="3008",kv_cache_size_tokens="880267",num_gpu_blocks="5319",engine="0"} 1.0"#;
+    // Pure-attention model: canonical label equals blocks×size.
+    const DENSE: &str = r#"vllm:cache_config_info{block_size="16",kv_cache_size_tokens="1048576",num_gpu_blocks="65536",engine="0"} 1.0"#;
+    // Older vLLM without the canonical label — legacy product still works.
+    const LEGACY: &str =
+        r#"vllm:cache_config_info{block_size="16",num_gpu_blocks="4096",engine="0"} 1.0"#;
+
+    #[test]
+    fn kv_budget_prefers_canonical_label_for_hybrid() {
+        assert_eq!(kv_tokens_from_cache_config(HYBRID), Some(880267));
+    }
+
+    #[test]
+    fn kv_budget_dense_model() {
+        assert_eq!(kv_tokens_from_cache_config(DENSE), Some(1048576));
+    }
+
+    #[test]
+    fn kv_budget_falls_back_to_blocks_times_size() {
+        assert_eq!(kv_tokens_from_cache_config(LEGACY), Some(4096 * 16));
+    }
+
+    #[test]
+    fn kv_budget_zero_label_falls_back() {
+        let body = r#"vllm:cache_config_info{block_size="16",kv_cache_size_tokens="0",num_gpu_blocks="100",engine="0"} 1.0"#;
+        assert_eq!(kv_tokens_from_cache_config(body), Some(1600));
+    }
+
+    #[test]
+    fn kv_budget_absent() {
+        assert_eq!(kv_tokens_from_cache_config("vllm:other_metric 1.0"), None);
     }
 }
