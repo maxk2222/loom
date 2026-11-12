@@ -272,6 +272,19 @@ impl Scheduler {
         Err(())
     }
 
+    /// Mirror the Redis `queue:count` gauge into the metrics exporter. Cheap
+    /// single GET — called on enqueue and once per dispatch pass so the
+    /// exported depth tracks every mutation path (enqueue/pop/remove/expiry).
+    async fn sync_queue_depth(&self) {
+        let mut c = self.inner.rt.conn.clone();
+        let n: Option<i64> = redis::cmd("GET")
+            .arg(self.inner.rt.k("queue:count"))
+            .query_async(&mut c)
+            .await
+            .unwrap_or_default();
+        crate::metrics::queue_len(n.unwrap_or(0) as f64);
+    }
+
     async fn queue_remove(&self, request_id: &str) -> Result<bool, SchedErr> {
         let mut c = self.inner.rt.conn.clone();
         // prio unknown → try all class queues
@@ -357,6 +370,7 @@ impl Scheduler {
             self.inner.pending.lock().await.remove(&rid);
             return Err(SchedErr::QueueFull);
         }
+        self.sync_queue_depth().await;
         self.inner.wake.notify_one();
         let wait = self.inner.cfg.queue_timeout_secs.max(5);
         match tokio::time::timeout(Duration::from_secs(wait), done_rx).await {
@@ -583,6 +597,7 @@ impl Scheduler {
         for (e, rid, count) in deferred {
             self.requeue(e, &rid, count).await;
         }
+        self.sync_queue_depth().await;
     }
 
     /// Requeue a popped entry back into its class queue. Returns true when the

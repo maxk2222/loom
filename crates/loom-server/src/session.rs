@@ -49,11 +49,11 @@ impl SessionManager {
         session_id: &str,
         tx: mpsc::Sender<ServerEnvelope>,
     ) {
-        self.inner
-            .lock()
-            .await
+        let mut inner = self.inner.lock().await;
+        inner
             .sessions
             .insert(client_id.to_string(), (session_id.to_string(), tx));
+        crate::metrics::clients_online(inner.sessions.len() as f64);
     }
 
     /// Remove a session only when it is still the registered one — a stale
@@ -67,6 +67,7 @@ impl SessionManager {
         {
             inner.sessions.remove(client_id);
             inner.kicks.remove(client_id);
+            crate::metrics::clients_online(inner.sessions.len() as f64);
         }
     }
 

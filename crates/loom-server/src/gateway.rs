@@ -354,6 +354,14 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                 // Heuristic: ~1 output token per 25ms of decode after TTFT.
                 (meta.duration_ms.saturating_sub(meta.ttft_ms).max(0) / 25) as u32
             };
+            let status = if meta.status.is_empty() {
+                "aborted".into()
+            } else {
+                meta.status
+            };
+            crate::metrics::req(&status);
+            crate::metrics::queue_wait(queue_wait_ms as f64 / 1000.0);
+            crate::metrics::duration(started2.elapsed().as_secs_f64());
             usage
                 .record(crate::usage::UsageRecord {
                     request_id: rid_f.clone(),
@@ -362,11 +370,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                     virtual_model_id: vm_id.clone(),
                     deployment_id: dep,
                     client_id: client,
-                    status: if meta.status.is_empty() {
-                        "aborted".into()
-                    } else {
-                        meta.status
-                    },
+                    status,
                     queue_wait_ms,
                     ttft_ms: meta.ttft_ms,
                     duration_ms: started2.elapsed().as_millis() as i64,
@@ -557,6 +561,19 @@ fn split(o: crate::scheduler::RequestOutcome) -> RequestOutcomeParts {
 }
 
 fn sched_err(e: SchedErr, rid: &str) -> Response {
+    // Pre-dispatch failures never reach the usage finalizer — count them here
+    // so loom_requests_total covers the full request lifecycle.
+    crate::metrics::req(match &e {
+        SchedErr::QueueFull => "queue_full",
+        SchedErr::NoCapacity => "no_capacity",
+        SchedErr::NoCandidates => "no_candidates",
+        SchedErr::ClientOffline => "client_offline",
+        SchedErr::AllUnavailable => "unavailable",
+        SchedErr::Rejected(_) => "rejected",
+        SchedErr::Timeout => "timeout",
+        SchedErr::Cancelled => "cancelled",
+        SchedErr::Backend(_) => "backend_error",
+    });
     let (code, msg): (ErrorCode, String) = match e {
         SchedErr::QueueFull => (ErrorCode::Overloaded, "queue full".into()),
         SchedErr::NoCapacity => (ErrorCode::Overloaded, "no capacity".into()),
