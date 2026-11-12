@@ -167,8 +167,17 @@ IMG_ID="$(cat /etc/loom-build-id 2>/dev/null || echo 0)"
 # Swap via rename, not in-place cp: overwriting the file a still-running
 # process executes fails with ETXTBSY and would silently keep the stale bin.
 seed() { cp "$SEED_BIN" "$BIN.new" && mv -f "$BIN.new" "$BIN" && echo "$IMG_ID" > "$BIN.build-id"; }
-if [ -x "$BIN" ]; then
+# Intentional downgrades: the version guard below protects self-updated
+# binaries from older images — LOOM_FORCE_RESEED=1 is the documented escape
+# hatch to pin the image's version back onto the volume.
+if [ "${LOOM_FORCE_RESEED:-}" = "1" ]; then
+    mkdir -p "$STATE_DIR/bin"
+    seed && echo "loom-client: forced re-seed to v$(ver "$SEED_BIN") (LOOM_FORCE_RESEED=1)" >&2 \
+        || echo "loom-client: forced re-seed FAILED — running volume binary" >&2
+elif [ -x "$BIN" ]; then
     IMG_V="$(ver "$SEED_BIN")"; VOL_V="$(ver "$BIN")"
+    # Unreadable/empty version reports count as 0 → always re-seeded.
+    VOL_V="${VOL_V:-0}"
     NEWER="$(printf '%s\n%s\n' "$IMG_V" "$VOL_V" | sort -V | tail -1)"
     VOL_ID="$(cat "$BIN.build-id" 2>/dev/null || echo 0)"
     case "$VOL_ID" in ''|*[!0-9]*) VOL_ID=0 ;; esac

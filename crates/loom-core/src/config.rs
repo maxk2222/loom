@@ -554,9 +554,6 @@ pub struct ServerConfig {
     /// Directory for mutable data (logo uploads, release artifacts).
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
-    /// Static dashboard dir (empty = embedded assets if built with them).
-    #[serde(default)]
-    pub dashboard_dir: String,
     /// Trust reverse-proxy identity headers (CF-Connecting-IP,
     /// X-Forwarded-For, X-Forwarded-Proto). Set ONLY when every request is
     /// guaranteed to arrive through a trusted proxy (e.g. Cloudflare Tunnel
@@ -606,7 +603,6 @@ impl Default for ServerConfig {
             grpc_plain_bind: None,
             grpc_bootstrap_bind: None,
             data_dir: default_data_dir(),
-            dashboard_dir: String::new(),
             trusted_proxy: false,
             scheduler: SchedulerConfig::default(),
             history_retention_days: default_retention(),

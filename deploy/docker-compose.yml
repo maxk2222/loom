@@ -44,6 +44,12 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.server
+    # Release image instead of a local source build — bit-identical to the
+    # release binaries (same signed artifact). The volume-binary entrypoint
+    # still applies: self-updates newer than this tag win, an image bump to
+    # a newer tag re-seeds. LOOM_FORCE_RESEED=1 forces the image's version
+    # onto the volume (documented downgrade path).
+    # image: ghcr.io/maxk2222/loom-server:${LOOM_IMAGE_TAG:-latest}
     restart: unless-stopped
     depends_on:
       postgres:

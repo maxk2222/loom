@@ -22,6 +22,11 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.client
     image: loom-client:latest
+    # Release image instead of a local source build — bit-identical to the
+    # signed release binary. Remove `build:` and `image:` above, then use:
+    # image: ghcr.io/maxk2222/loom-client:${LOOM_IMAGE_TAG:-latest}
+    # (Self-updates newer than the tag win; LOOM_FORCE_RESEED=1 forces the
+    # image's version onto the volume — documented downgrade path.)
     container_name: loom-client
     restart: unless-stopped
     environment:

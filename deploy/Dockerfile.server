@@ -24,7 +24,6 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
 RUN useradd -r -u 10001 loom
 COPY --from=rust-build /out-server /usr/local/bin/loom-server
-COPY --from=ui-build /ui/dist /var/lib/loom/dashboard
 COPY migrations /opt/loom/migrations
 COPY deploy/docker-entrypoint-server.sh /usr/local/bin/docker-entrypoint-server.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint-server.sh && \
@@ -35,7 +34,6 @@ USER root
 ENV LOOM_HTTP_BIND=0.0.0.0:8080 \
     LOOM_GRPC_BIND=0.0.0.0:9443 \
     LOOM_DATA_DIR=/var/lib/loom \
-    LOOM_DASHBOARD_DIR=/var/lib/loom/dashboard \
     LOOM_REDIS_PREFIX=loom:prod:
 EXPOSE 8080 9443
 HEALTHCHECK --interval=10s --timeout=3s --retries=5 CMD curl -fsS http://localhost:8080/healthz || exit 1

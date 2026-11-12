@@ -1,0 +1,21 @@
+# Release image — built FROM the signed release binaries (no source compile).
+# See Dockerfile.release-server: identical bits across release asset, GHCR
+# image and self-update payload.
+FROM debian:bookworm-slim
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 10001 -m loom \
+    && mkdir -p /etc/loom-client && chown loom:loom /etc/loom-client
+COPY out/client/${TARGETARCH}/loom-client /usr/local/bin/loom-client
+COPY deploy/docker-entrypoint-client.sh /usr/local/bin/docker-entrypoint-client.sh
+RUN chmod +x /usr/local/bin/loom-client /usr/local/bin/docker-entrypoint-client.sh && \
+    date +%s > /etc/loom-build-id
+USER root
+ENV LOOM_CONFIG=/etc/loom-client/config.toml \
+    LOOM_LOCAL_API_BIND=0.0.0.0:8391
+VOLUME /etc/loom-client
+EXPOSE 8391
+# LOOM_LAPI_PORT lets generated configs move the local API port (setup
+# auto-picks a free one when 8391 is taken) without breaking this check.
+HEALTHCHECK --interval=15s --timeout=3s --retries=5 CMD curl -fsS "http://localhost:${LOOM_LAPI_PORT:-8391}/healthz" || exit 1
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint-client.sh"]

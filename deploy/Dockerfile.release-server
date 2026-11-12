@@ -1,0 +1,24 @@
+# Release image — built FROM the signed release binaries (no source compile).
+# The release workflow stages artifacts as out/<kind>/<docker-arch>/loom-<kind>
+# so this stays a dumb COPY: image bits == release asset bits == self-update
+# payload. Bit-identical across all three delivery paths.
+FROM debian:bookworm-slim
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN useradd -r -u 10001 loom
+COPY out/server/${TARGETARCH}/loom-server /usr/local/bin/loom-server
+# Informational only — migrations are embedded in the binary (sqlx::migrate!).
+COPY migrations /opt/loom/migrations
+COPY deploy/docker-entrypoint-server.sh /usr/local/bin/docker-entrypoint-server.sh
+RUN chmod +x /usr/local/bin/loom-server /usr/local/bin/docker-entrypoint-server.sh && \
+    date +%s > /etc/loom-build-id
+# Starts as root: the entrypoint ownership-heals /data then drops to uid
+# 10001 via runuser (host-mounted TLS/state dirs are often foreign-uid).
+USER root
+ENV LOOM_HTTP_BIND=0.0.0.0:8080 \
+    LOOM_GRPC_BIND=0.0.0.0:9443 \
+    LOOM_DATA_DIR=/var/lib/loom \
+    LOOM_REDIS_PREFIX=loom:prod:
+EXPOSE 8080 9443
+HEALTHCHECK --interval=10s --timeout=3s --retries=5 CMD curl -fsS http://localhost:8080/healthz || exit 1
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint-server.sh"]

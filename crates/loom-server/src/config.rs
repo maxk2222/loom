@@ -28,9 +28,6 @@ pub fn load() -> Result<ServerConfig> {
     if let Ok(v) = std::env::var("LOOM_DATA_DIR") {
         cfg.data_dir = v;
     }
-    if let Ok(v) = std::env::var("LOOM_DASHBOARD_DIR") {
-        cfg.dashboard_dir = v;
-    }
     // gRPC TLS: cert+key enable TLS on grpc_bind; an optional extra
     // plaintext listener (LOOM_GRPC_PLAIN_BIND) keeps legacy clients
     // reachable during a fleet migration.

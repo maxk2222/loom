@@ -58,27 +58,49 @@ buf lint proto/                    # if buf installed; otherwise build via cargo
 
 ## Deployment (always via updater, never manual binary copy)
 
-Clients self-update from signed GitHub release artifacts. After a tag
-release completes (`gh run list --workflow release`), push updates from
-the admin dashboard (Clients → Update) or API:
+Releases are tag-triggered (`git tag vX.Y.Z && git push --tags`). The
+workflow produces signed binaries for linux x86_64/aarch64, macOS aarch64
+and Windows, **plus GHCR images** (`ghcr.io/<repo>/loom-{server,client}:X.Y.Z`)
+built FROM those same signed binaries — identical bits on every path.
+
+Update matrix — pick by component:
+
+| Component | Canonical update path |
+|---|---|
+| Server (docker) | `POST /api/server/update` (admin session) — downloads the signed binary, swaps it into `/data/bin`, exits; restart policy brings it up |
+| Client (any)   | Dashboard → Clients → Update, or `POST /api/clients/<id>/update`, or client-local `POST :8391/local/api/update` |
+| Compose stack  | Pin `image: ghcr.io/…/loom-server:X.Y.Z` and `docker compose pull && up -d` — for rebuilds/fresh installs, not rolling updates |
+
+Why both work: container entrypoints seed the binary into the state volume
+(`/data/bin`, `/etc/loom-client/bin`) and exec it from there. On each start
+the version guard decides: image version > volume → re-seed; same version
+newer `/etc/loom-build-id` → re-seed; volume version > image → keep
+(self-updated binary survives `--force-recreate`). Swaps are atomic renames.
 
 ```bash
-# per client
+# per client (server-pushed over the live control stream)
 curl -X POST http://server:8080/api/clients/<id>/update -H "Cookie: loom_session=$TOK"
 # client-side check/apply
 curl http://127.0.0.1:8391/local/api/update-check
 curl -X POST http://127.0.0.1:8391/local/api/update
 ```
 
+Rollback runbook:
+- **Crash after self-update**: the updater keeps `<binary>.prev` next to the
+  live binary on the volume — `cp loom-server.prev loom-server && docker
+  restart loom-server-1`.
+- **Intentional downgrade** (pinning an older image tag alone does NOT
+  downgrade — the version guard protects the volume binary): set
+  `LOOM_FORCE_RESEED=1` on the service, pin the older image tag, `docker
+  compose up -d`, then remove the env var.
+- Self-update is recreate-safe but NOT image-rollback-safe by design —
+  always prefer `LOOM_FORCE_RESEED` over deleting files on the volume.
+
 New-client install is one command: the gateway serves `deploy/install-client.sh`
 at `GET /install-client.sh` with the `scope=public` URL from the `endpoint_hints`
 setting (`public_base` fallback) substituted as `SERVER_URL`. The script resolves
 the latest GitHub release, detects arch, sha256-verifies, installs client+CLI,
 and writes config/token/systemd-or-launchd unit.
-
-Server image re-seed: docker entrypoints seed `$DATA_DIR/bin/` from
-`/etc/loom-build-id` (image build epoch), not the version string — same-version
-rebuilds propagate, binaries swapped via atomic rename (running exe → ETXTBSY).
 
 Building x86_64 binaries from Apple Silicon requires an explicit
 platform (otherwise aarch64 → `203/EXEC` on the nodes):
