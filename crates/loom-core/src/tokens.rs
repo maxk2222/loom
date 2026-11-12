@@ -33,6 +33,19 @@ pub fn estimate_tokens(text: &str) -> u32 {
 /// tool schemas, and legacy function definitions.
 /// Falls back to embedding-shaped `input` fields for embeddings requests.
 pub fn estimate_request_tokens(body: &serde_json::Value) -> u32 {
+    // Anthropic-style top-level `system` prompt (string or content blocks) —
+    // costs nothing for OpenAI bodies where system lives inside messages,
+    // and it coexists with `messages` in Anthropic-shaped bodies.
+    let mut extra = 0u32;
+    match body.get("system") {
+        Some(serde_json::Value::String(s)) => extra += estimate_tokens(s),
+        Some(serde_json::Value::Array(parts)) => {
+            for p in parts {
+                extra += estimate_content_part(p);
+            }
+        }
+        _ => {}
+    }
     // Chat: sum message contents + ~4 tokens structural overhead per message.
     if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
         let mut t = 0u32;
@@ -77,15 +90,16 @@ pub fn estimate_request_tokens(body: &serde_json::Value) -> u32 {
                 t += estimate_tokens(&v.to_string());
             }
         }
-        // Structured-output schema (response_format.json_schema).
+        // Structured-output schema (response_format.json_schema) — injected
+        // into the prompt verbatim, so it counts in full.
         if let Some(v) = body.get("response_format") {
-            t += estimate_tokens(&v.to_string()) / 2;
+            t += estimate_tokens(&v.to_string());
         }
-        return t.max(1);
+        return (t + extra).max(1);
     }
-    // Legacy completions: `prompt` string or list.
+    // Legacy completions: `prompt` string or list (+ optional FIM suffix).
     if let Some(p) = body.get("prompt") {
-        return match p {
+        let mut t = match p {
             serde_json::Value::String(s) => estimate_tokens(s),
             serde_json::Value::Array(a) => a
                 .iter()
@@ -93,36 +107,45 @@ pub fn estimate_request_tokens(body: &serde_json::Value) -> u32 {
                 .sum(),
             _ => 0,
         };
+        if let Some(s) = body.get("suffix").and_then(|v| v.as_str()) {
+            t += estimate_tokens(s);
+        }
+        return (t + extra).max(1);
     }
     // Embeddings: `input` string or list.
     if let Some(i) = body.get("input") {
         return match i {
-            serde_json::Value::String(s) => estimate_tokens(s),
-            serde_json::Value::Array(a) => a
+            serde_json::Value::String(s) => (estimate_tokens(s) + extra).max(1),
+            serde_json::Value::Array(a) => (a
                 .iter()
                 .filter_map(|v| v.as_str().map(estimate_tokens))
-                .sum(),
-            _ => 0,
+                .sum::<u32>()
+                + extra)
+                .max(1),
+            _ => extra,
         };
     }
-    0
+    extra
 }
 
 /// Request KV footprint: the tokens a lease should reserve on a deployment.
-/// `prompt estimate + min(requested output, output_reserve) + margin%`.
-/// `max_tokens`/`max_completion_tokens` cap the output reservation; absent
-/// values fall back to `output_reserve` so under-specified requests still
-/// reserve honest headroom. The margin absorbs estimate error (±20% BPE
-/// drift) — it is intentionally part of the reservation rather than a
-/// separate budget bump so `kv_used` stays the sum of lease footprints.
+/// `prompt estimate + declared output + margin%`.
+///
+/// The output reservation is the request's *declared* worst case —
+/// `max_tokens`/`max_completion_tokens` — not a capped proxy. Capping it
+/// would under-reserve long generations: a request allowed to emit 200k
+/// tokens must reserve 200k, or the budget gate admits more concurrent
+/// decoders than the KV pool can hold and the backend is forced into
+/// context compression — precisely what this accounting prevents.
+/// Absent `max_tokens` falls back to `output_reserve` so under-specified
+/// requests still reserve honest headroom.
 pub fn request_footprint(body: &serde_json::Value, output_reserve: u64, margin_pct: u64) -> u64 {
     let prompt = estimate_request_tokens(body) as u64;
-    let requested = body
+    let out = body
         .get("max_tokens")
         .or_else(|| body.get("max_completion_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(output_reserve);
-    let out = requested.min(output_reserve);
     let base = prompt + out;
     base + (base * margin_pct / 100)
 }
@@ -152,12 +175,22 @@ fn estimate_content_part(p: &serde_json::Value) -> u32 {
                 .unwrap_or("auto");
             match detail {
                 "low" => 85,
-                _ => 765,
+                // OpenAI high-detail tiling reaches ~1.3k+ for large images;
+                // Qwen-VL mrope sections exceed that. 765 was the old
+                // single-tile figure — under-reserves real multimodal calls.
+                _ => 1200,
             }
         }
+        "video_url" | "video" | "input_video" => {
+            // Frame-sampled video: tens of frames × image-tile tokens. Backend
+            // frame caps bound the real cost; a bare-JSON estimate (~512)
+            // would miss it by an order of magnitude.
+            4096
+        }
         "input_audio" | "audio" => {
-            // No reliable duration without decoding; assume a short clip.
-            200
+            // ~25–32 tokens/second of audio; a bare placeholder misses
+            // multi-minute clips by an order of magnitude.
+            800
         }
         "file" | "input_file" => {
             // Inline file data (base64) — estimate by payload size, cap it.

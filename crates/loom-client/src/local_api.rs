@@ -445,9 +445,20 @@ async fn openai_inference_raw(
         }
     }
 
+    // KV footprint for local accounting: local work burns the same KV the
+    // tier-2 budget protects, so it must count into kv_used — counted, not
+    // gated (local priority is never refused over the budget). Mirrors the
+    // server's estimate: declared output + margin on the prompt estimate.
+    let footprint = match &ib {
+        InBody::Json(b) if matches!(api, ApiType::Chat | ApiType::Completions) => {
+            let cfg = loom_core::config::SchedulerConfig::default();
+            loom_core::tokens::request_footprint(b, cfg.kv_output_reserve_tokens, cfg.kv_margin_pct)
+        }
+        _ => loom_core::tokens::flat_footprint(),
+    };
     let token = match s
         .scheduler
-        .try_admit(&dep_id, RequestClass::Local, &request_id, 0)
+        .try_admit(&dep_id, RequestClass::Local, &request_id, footprint)
     {
         Ok(t) => t,
         Err(r) => {

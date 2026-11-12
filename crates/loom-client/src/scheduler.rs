@@ -163,6 +163,13 @@ impl DeploymentSlots {
                     return Err(RejectReason::NoCapacity);
                 }
                 self.counters.local_active.fetch_add(1, Ordering::SeqCst);
+                // Local work occupies real KV — count it into kv_used so the
+                // tier-2 backstop (and the reported backend usage) sees it.
+                // Deliberately NOT gated: local priority means a local
+                // request is never refused over the token budget.
+                if footprint > 0 {
+                    self.counters.kv_used.fetch_add(footprint, Ordering::SeqCst);
+                }
             }
             RequestClass::Tier2 => {
                 if !sharing_enabled {
@@ -222,22 +229,26 @@ impl DeploymentSlots {
     }
 
     fn release(&self, class: RequestClass, footprint: u64) {
+        let dec_kv = |fp: u64| {
+            if fp > 0 {
+                // Saturating release — a stale/duplicate drop must never
+                // underflow the counter.
+                self.counters
+                    .kv_used
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                        Some(v.saturating_sub(fp))
+                    })
+                    .ok();
+            }
+        };
         match class {
             RequestClass::Local => {
                 self.counters.local_active.fetch_sub(1, Ordering::SeqCst);
+                dec_kv(footprint);
             }
             RequestClass::Tier2 => {
                 self.counters.tier2_active.fetch_sub(1, Ordering::SeqCst);
-                if footprint > 0 {
-                    // Saturating release — a stale/duplicate drop must never
-                    // underflow the counter.
-                    self.counters
-                        .kv_used
-                        .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                            Some(v.saturating_sub(footprint))
-                        })
-                        .ok();
-                }
+                dec_kv(footprint);
             }
         }
     }
@@ -415,7 +426,9 @@ impl LocalScheduler {
     }
 
     /// Try to admit a request on a specific deployment. `footprint` is the
-    /// server's KV-token reservation for the request (0 = not counted).
+    /// request's KV-token reservation — server-estimated for tier-2,
+    /// client-estimated for local (counted into kv_used but never gated:
+    /// local priority outranks the budget). 0 = not counted.
     pub fn try_admit(
         &self,
         dep_id: &str,
