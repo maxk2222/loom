@@ -13,6 +13,8 @@ SERVER_URL="__LOOM_SERVER_URL__"
 ENROLL_TOKEN=""
 CLIENT_NAME="$(hostname -s 2>/dev/null || hostname)"
 PREFIX="/usr/local"
+METHOD="native"
+WORK_DIR="${LOOM_DOCKER_DIR:-${PWD}/loom-client-docker}"
 CONFIG_DIR="/etc/loom-client"
 DATA_DIR="/var/lib/loom-client"
 OS="$(uname -s)"
@@ -21,7 +23,7 @@ LOOM_REPO="${LOOM_REPO:-maxk2222/loom}"
 LOOM_VERSION="${LOOM_VERSION:-latest}"
 
 usage() {
-  echo "Usage: install-client.sh --server URL --token TOKEN [--name NAME] [--prefix DIR]"
+  echo "Usage: install-client.sh [--docker] --server URL --token TOKEN [--name NAME] [--prefix DIR]"
   exit 1
 }
 
@@ -32,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --token) ENROLL_TOKEN="$2"; shift 2 ;;
     --name) CLIENT_NAME="$2"; shift 2 ;;
     --prefix) PREFIX="$2"; shift 2 ;;
+    --docker) METHOD="docker"; shift ;;
     *) usage ;;
   esac
 done
@@ -39,7 +42,9 @@ case "$SERVER_URL" in
   __LOOM_SERVER_URL__|"") usage ;;
 esac
 
-if [[ "$EUID" -ne 0 ]] && [[ "$OS" == "Linux" ]]; then
+# Native install needs root (systemd + system dirs); the docker method only
+# needs a reachable docker daemon.
+if [[ "$METHOD" != "docker" && "$EUID" -ne 0 && "$OS" == "Linux" ]]; then
   echo "Please run as root (systemd + ${CONFIG_DIR})." >&2
   exit 1
 fi
@@ -109,9 +114,10 @@ latest_tag() {
 
 # Download loom-client (+ loom when the release ships it) into $STAGE_DIR so the
 # find_bin path picks them up. sha256 is verified when published.
+# RELEASE_ARCH_OVERRIDE forces the artifact arch (docker always needs linux/*).
 download_release() {
   local arch ver base f want got
-  arch="$(release_arch)" || { echo "!! no release for platform ${OS}-$(uname -m)" >&2; return 1; }
+  arch="${RELEASE_ARCH_OVERRIDE:-$(release_arch)}" || { echo "!! no release for platform ${OS}-$(uname -m)" >&2; return 1; }
   ver="$LOOM_VERSION"
   [[ "$ver" == latest ]] && ver="$(latest_tag)"
   [[ -n "$ver" ]] || { echo "!! could not resolve latest release tag" >&2; return 1; }
@@ -137,8 +143,186 @@ download_release() {
   done
 }
 
+# Gateway candidates derived from --server:
+#   https://host:5005{1..4} → same host on the gateway port convention :8080
+#   wss://pub.example.com  → https://pub.example.com (the public tunnel route
+#                           terminates on the gateway)
+gw_candidates() {
+  local url="$1" scheme rest host port
+  scheme="${url%%://*}"
+  rest="${url#*://}"
+  host="${rest%%[:/]*}"
+  port=""
+  case "$rest" in
+    *:*) port="${rest#*:}"; port="${port%%/*}" ;;
+  esac
+  case "$scheme" in
+    wss|grpcs) scheme="https" ;;
+    ws|grpc)   scheme="http" ;;
+  esac
+  case "$port" in
+    50051|50052|50053|50054) echo "${scheme}://${host}:8080" ;;
+    *) echo "${scheme}://${host}${port:+:$port}" ;;
+  esac
+}
+
+# --- docker method -------------------------------------------------------------
+# `--docker` builds a local image from the signed release binary plus the
+# gateway-served container entrypoint, writes a compose project into
+# $WORK_DIR and starts it. No registry required; client state lives in the
+# named volume `loom-client-data`, ./seed carries the pinned CA into
+# /etc/loom-seed for the entrypoint.
+docker_install() {
+  command -v docker >/dev/null 2>&1 || { echo "!! docker not found in PATH" >&2; exit 1; }
+  docker compose version >/dev/null 2>&1 || { echo "!! docker compose plugin missing" >&2; exit 1; }
+  case "$(uname -m)" in
+    x86_64)        RELEASE_ARCH_OVERRIDE=linux-x86_64 ;;
+    aarch64|arm64) RELEASE_ARCH_OVERRIDE=linux-aarch64 ;;
+    *) echo "!! no linux release binary for $(uname -m)" >&2; exit 1 ;;
+  esac
+
+  mkdir -p "$WORK_DIR/seed"
+  echo ">> Building docker client project in $WORK_DIR"
+
+  # Build context: the linux release binary + the entrypoint served by the
+  # same gateway that served this script.
+  download_release
+  install -m 0755 "${STAGE_DIR}/loom-client" "$WORK_DIR/loom-client"
+  local fetched=0 base kflag
+  for base in $(gw_candidates "$SERVER_URL"); do
+    kflag=""
+    case "$base" in *:8080*) kflag="-k" ;; esac
+    if curl -fsSL $kflag -o "$WORK_DIR/docker-entrypoint-client.sh" "$base/docker-entrypoint-client.sh" 2>/dev/null \
+       && grep -q 'loom-client' "$WORK_DIR/docker-entrypoint-client.sh" 2>/dev/null; then
+      fetched=1
+      break
+    fi
+    rm -f "$WORK_DIR/docker-entrypoint-client.sh"
+  done
+  if [[ "$fetched" == "0" ]]; then
+    local self_dir
+    self_dir="$(cd "$(dirname "$0")" && pwd)"
+    if [[ -f "${self_dir}/docker-entrypoint-client.sh" ]]; then
+      cp "${self_dir}/docker-entrypoint-client.sh" "$WORK_DIR/"
+    else
+      echo "!! could not fetch docker-entrypoint-client.sh from the gateway" >&2
+      exit 1
+    fi
+  fi
+  chmod +x "$WORK_DIR/docker-entrypoint-client.sh"
+
+  # Pinned internal CA → seed mount → /etc/loom-seed/ca.crt. Enables LAN /
+  # Tailscale mTLS endpoints learned via endpoint hints after enrollment.
+  for base in $(gw_candidates "$SERVER_URL"); do
+    kflag=""
+    case "$base" in *:8080*) kflag="-k" ;; esac
+    if curl -fsSL $kflag -o "$WORK_DIR/seed/ca.crt.tmp" "$base/api/tls/ca.crt" 2>/dev/null \
+       && grep -q "BEGIN CERTIFICATE" "$WORK_DIR/seed/ca.crt.tmp" 2>/dev/null; then
+      mv "$WORK_DIR/seed/ca.crt.tmp" "$WORK_DIR/seed/ca.crt"
+      echo ">> Pinned internal CA -> seed/ca.crt"
+      break
+    fi
+    rm -f "$WORK_DIR/seed/ca.crt.tmp"
+  done
+  rmdir "$WORK_DIR/seed" 2>/dev/null || true   # drop empty seed dir when no CA
+
+  cat > "$WORK_DIR/Dockerfile" <<'DOCKERFILE'
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 10001 -m loom \
+    && mkdir -p /etc/loom-client && chown loom:loom /etc/loom-client
+COPY loom-client /usr/local/bin/loom-client
+COPY docker-entrypoint-client.sh /usr/local/bin/docker-entrypoint-client.sh
+RUN chmod +x /usr/local/bin/loom-client /usr/local/bin/docker-entrypoint-client.sh \
+    && date +%s > /etc/loom-build-id
+# Starts as root: the entrypoint ownership-heals the state dir then drops
+# to uid 10001 via runuser.
+USER root
+ENV LOOM_CONFIG=/etc/loom-client/config.toml \
+    LOOM_LOCAL_API_BIND=0.0.0.0:8391
+VOLUME /etc/loom-client
+EXPOSE 8391
+HEALTHCHECK --interval=15s --timeout=3s --retries=5 \
+    CMD curl -fsS http://localhost:8391/healthz || exit 1
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint-client.sh"]
+DOCKERFILE
+
+  cat > "$WORK_DIR/compose.yml" <<'COMPOSE'
+name: loom-client
+services:
+  loom-client:
+    build: .
+    image: loom-client:local
+    container_name: loom-client
+    restart: unless-stopped
+    environment:
+      LOOM_SERVER_URL: ${LOOM_SERVER_URL:?set LOOM_SERVER_URL in .env}
+      LOOM_ENROLL_TOKEN: ${LOOM_ENROLL_TOKEN:-}
+      LOOM_CLIENT_NAME: ${LOOM_CLIENT_NAME:-docker-node}
+      LOOM_SHARING: ${LOOM_SHARING:-true}
+      LOOM_LOCAL_API_KEY: ${LOOM_LOCAL_API_KEY:-}
+      LOOM_PRESSURE_CPU: ${LOOM_PRESSURE_CPU:-0}
+      LOOM_PRESSURE_RAM: ${LOOM_PRESSURE_RAM:-0}
+      LOOM_UNLOAD_MODELS: ${LOOM_UNLOAD_MODELS:-false}
+      LOOM_BACKEND_TYPE: ${LOOM_BACKEND_TYPE:-}
+      LOOM_BACKEND_URL: ${LOOM_BACKEND_URL:-}
+      LOOM_BACKEND_KEY: ${LOOM_BACKEND_KEY:-}
+      LOOM_MODELS: ${LOOM_MODELS:-}
+    extra_hosts:
+      # Lets LOOM_BACKEND_URL=http://host.docker.internal:… reach services on
+      # the Docker host (native on Docker Desktop, explicit on Linux).
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Named volume keeps client_id + device credential + issued certs safe.
+      - loom-client-data:/etc/loom-client
+      - ./seed:/etc/loom-seed:ro
+    ports:
+      # Local dashboard + priority API — loopback-only by default. Set
+      # LOOM_UI_BIND=0.0.0.0 in .env to reach it from the LAN.
+      - "${LOOM_UI_BIND:-127.0.0.1}:${LOOM_UI_PORT:-8391}:8391"
+volumes:
+  loom-client-data:
+COMPOSE
+
+  # Fresh bearer key for the local API — the UI port is loopback-only by
+  # default, but the key keeps the API protected when it gets exposed.
+  local lkey=""
+  if command -v openssl >/dev/null 2>&1; then
+    lkey="lk-$(openssl rand -hex 16)"
+  elif [[ -f /proc/sys/kernel/random/uuid ]]; then
+    lkey="lk-$(tr -d '-' < /proc/sys/kernel/random/uuid)"
+  fi
+
+  cat > "$WORK_DIR/.env" <<EOF
+LOOM_SERVER_URL=${SERVER_URL}
+LOOM_ENROLL_TOKEN=${ENROLL_TOKEN}
+LOOM_CLIENT_NAME=${CLIENT_NAME}
+LOOM_LOCAL_API_KEY=${lkey}
+# Optional one-backend bootstrap, applied on the container's FIRST start
+# (afterwards manage backends via the client UI):
+# LOOM_BACKEND_TYPE=ollama
+# LOOM_BACKEND_URL=http://host.docker.internal:11434
+# LOOM_MODELS=model-a,model-b
+EOF
+  chmod 600 "$WORK_DIR/.env"
+
+  (cd "$WORK_DIR" && docker compose up -d --build)
+
+  echo ""
+  echo "Done. Client UI:   http://127.0.0.1:8391"
+  [[ -n "$lkey" ]] && echo "Local API key:   $lkey"
+  echo "Project dir:     $WORK_DIR   (docker compose logs -f | down)"
+}
+
+if [[ "$METHOD" == "docker" ]]; then
+  docker_install
+  exit 0
+fi
+
 # Fetch the newest release when the client binary isn't already available.
-if ! find_bin_opt loom-client >/dev/null 2>&1; then
+# (docker method fetches its own linux/* artifact inside docker_install.)
+if [[ "$METHOD" != "docker" ]] && ! find_bin_opt loom-client >/dev/null 2>&1; then
   echo ">> loom-client not found locally — downloading latest release"
   download_release
 fi
@@ -191,30 +375,6 @@ fi
 # still gate every session). Pinning it up-front lets the client verify
 # LAN/Tailscale mTLS endpoints immediately: the cert bootstrap listener and
 # later endpoint-hints failovers learned after enrollment.
-#
-# Gateway candidates derived from --server:
-#   https://host:5005{1..4} → same host on the gateway port convention :8080
-#   wss://pub.example.com  → https://pub.example.com (the public tunnel route
-#                           terminates on the gateway)
-gw_candidates() {
-  local url="$1" scheme rest host port
-  scheme="${url%%://*}"
-  rest="${url#*://}"
-  host="${rest%%[:/]*}"
-  port=""
-  case "$rest" in
-    *:*) port="${rest#*:}"; port="${port%%/*}" ;;
-  esac
-  case "$scheme" in
-    wss|grpcs) scheme="https" ;;
-    ws|grpc)   scheme="http" ;;
-  esac
-  case "$port" in
-    50051|50052|50053|50054) echo "${scheme}://${host}:8080" ;;
-    *) echo "${scheme}://${host}${port:+:$port}" ;;
-  esac
-}
-
 CA_FILE="${CONFIG_DIR}/ca.crt"
 if [[ ! -f "$CA_FILE" ]]; then
   for base in $(gw_candidates "$SERVER_URL"); do

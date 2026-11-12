@@ -183,6 +183,15 @@ pub fn router(state: AppState) -> Router {
         .route("/local/api/auth/skip", post(local_skip))
         .route("/local/api/auth/login", post(local_login))
         .route("/local/api/auth/logout", post(local_logout))
+        // NOTE: deliberately outside the /local/api/auth/ prefix — that
+        // prefix is public by design (status/setup/login). The key endpoint
+        // must run through the normal admin auth gate.
+        .route(
+            "/local/api/api-key",
+            get(auth_api_key_get)
+                .post(auth_api_key_post)
+                .delete(auth_api_key_delete),
+        )
         .route("/healthz", get(|| async { "ok" }));
 
     let api = if state.cfg_blocking().local_api.serve_ui {
@@ -1241,7 +1250,7 @@ async fn auth_status(State(s): State<AppState>) -> Json<Value> {
     } else {
         "login"
     };
-    Json(json!({"mode": mode, "user": cfg.local_api.user_name}))
+    Json(json!({"mode": mode, "user": cfg.local_api.user_name, "key_set": key_set}))
 }
 
 /// First-run wizard: create the local UI user. Only usable while no user
@@ -1356,4 +1365,62 @@ async fn local_logout(State(s): State<AppState>, req: axum::extract::Request) ->
 async fn local_skip(State(s): State<AppState>) -> Response {
     let _ = s.cfg.update(|c| c.local_api.setup_done = true).await;
     Json(json!({"ok":true})).into_response()
+}
+
+/// Reveal the configured local API bearer key. The requester already
+/// authenticated (session cookie or the key itself), so returning plaintext
+/// is no weaker than reading config.toml on the host.
+async fn auth_api_key_get(State(s): State<AppState>) -> Json<Value> {
+    let cfg = s.cfg.get().await;
+    Json(json!({
+        "set": !cfg.local_api.api_key.is_empty(),
+        "api_key": cfg.local_api.api_key,
+        "bind": cfg.local_api.bind,
+        "user_set": !cfg.local_api.user_hash.is_empty(),
+    }))
+}
+
+/// Set or rotate the local API bearer key: `{rotate:true}` generates a fresh
+/// `lk-` key, `{api_key:"…"}` installs a caller-supplied one (min 8 chars).
+/// Cookie sessions survive the rotation; bearer callers must switch keys.
+async fn auth_api_key_post(State(s): State<AppState>, Json(b): Json<Value>) -> Response {
+    let key = if b["rotate"].as_bool().unwrap_or(false) {
+        format!("lk-{}", loom_core::ids::opaque_token(20))
+    } else if let Some(k) = b["api_key"].as_str() {
+        let k = k.trim();
+        if k.len() < 8 {
+            return (
+                StatusCode::BAD_REQUEST,
+                "api_key needs at least 8 characters",
+            )
+                .into_response();
+        }
+        k.to_string()
+    } else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "send {\"rotate\":true} or {\"api_key\":\"…\"}",
+        )
+            .into_response();
+    };
+    if s.cfg
+        .update(|c| c.local_api.api_key = key.clone())
+        .await
+        .is_err()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    Json(json!({"ok": true, "api_key": key})).into_response()
+}
+
+/// Clear the bearer key — the API drops to open mode (loopback semantics).
+async fn auth_api_key_delete(State(s): State<AppState>) -> Response {
+    if s.cfg
+        .update(|c| c.local_api.api_key = String::new())
+        .await
+        .is_err()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    Json(json!({"ok": true})).into_response()
 }

@@ -1,10 +1,32 @@
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLink, Plus } from "lucide-react";
+import { Check, Copy, ExternalLink, Plus } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { api } from "../lib/api";
 import { Badge, Card, ConfirmModal, Field, Modal, Spinner } from "../components/ui";
 import type { ClientRow } from "../lib/types";
 import { fmtPct, fmtTs } from "../lib/format";
+
+function CopyCmd({ cmd, hint }: { cmd: string; hint?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div>
+      <div className="relative">
+        <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-md bg-panel2 p-3 pr-20 font-mono text-xs">{cmd}</pre>
+        <button
+          className="btn-ghost absolute right-2 top-2 inline-flex items-center gap-1 px-2 py-1 text-[11px]"
+          onClick={async () => {
+            await navigator.clipboard.writeText(cmd);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }}
+        >
+          {copied ? <Check size={12} className="text-ok" /> : <Copy size={12} />} {copied ? "copied" : "copy"}
+        </button>
+      </div>
+      {hint && <p className="mt-1.5 text-xs text-muted">{hint}</p>}
+    </div>
+  );
+}
 
 export default function ClientsPage() {
   const q = useQuery({ queryKey: ["clients"], queryFn: () => api.get<{ clients: ClientRow[] }>("/api/clients"), refetchInterval: 5000 });
@@ -13,6 +35,8 @@ export default function ClientsPage() {
   const [maxUses, setMaxUses] = useState(1);
   const [hours, setHours] = useState(24);
   const [issued, setIssued] = useState("");
+  const [method, setMethod] = useState<"native" | "docker">("native");
+  const [tokCopied, setTokCopied] = useState(false);
 
   const issue = async (e: FormEvent) => {
     e.preventDefault();
@@ -69,7 +93,7 @@ export default function ClientsPage() {
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold">Clients</h1>
-        <button className="btn-primary" onClick={() => { setEnroll(true); setIssued(""); }}>
+        <button className="btn-primary" onClick={() => { setEnroll(true); setIssued(""); setMethod("native"); }}>
           <Plus size={16} /> Issue enroll token
         </button>
       </div>
@@ -141,12 +165,56 @@ export default function ClientsPage() {
       )}
       <Modal open={enroll} title="Issue enroll token" onClose={() => setEnroll(false)}>
         {issued ? (
-          <div className="space-y-3">
+          <div className="space-y-4">
             <p className="text-sm text-muted">One-time token — store it now, it is only shown once.</p>
-            <code className="block break-all rounded-md bg-panel2 p-3 text-xs">{issued}</code>
-            <p className="text-xs text-muted">
-              Run on the workstation: <code>loom enroll --server &lt;url&gt; --token &lt;token&gt;</code>
-            </p>
+            <div className="relative">
+              <code className="block break-all rounded-md bg-panel2 p-3 pr-20 font-mono text-xs">{issued}</code>
+              <button
+                className="btn-ghost absolute right-2 top-2 inline-flex items-center gap-1 px-2 py-1 text-[11px]"
+                onClick={async () => {
+                  await navigator.clipboard.writeText(issued);
+                  setTokCopied(true);
+                  setTimeout(() => setTokCopied(false), 1500);
+                }}
+              >
+                {tokCopied ? <Check size={12} className="text-ok" /> : <Copy size={12} />} {tokCopied ? "copied" : "copy"}
+              </button>
+            </div>
+            <div>
+              <div className="label mb-1.5">Install method</div>
+              <div className="grid grid-cols-2 gap-1 rounded-lg bg-panel2 p-1">
+                {(["native", "docker"] as const).map((m) => (
+                  <button
+                    key={m}
+                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${method === m ? "bg-card text-text shadow" : "text-muted hover:text-text"}`}
+                    onClick={() => setMethod(m)}
+                  >
+                    {m === "native" ? "Native (systemd/launchd)" : "Docker"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {method === "native" ? (
+              <>
+                <CopyCmd
+                  cmd={`curl -fsSL ${location.origin}/install-client.sh | sudo bash -s -- --token ${issued}`}
+                  hint="Installs the client daemon — systemd unit on Linux, launchd tray app on macOS. Self-updates via signed releases."
+                />
+                <p className="text-xs text-muted">
+                  Already installed? Enroll manually: <code className="font-mono">loom enroll --server &lt;url&gt; --token &lt;token&gt;</code>
+                </p>
+              </>
+            ) : (
+              <>
+                <CopyCmd
+                  cmd={`curl -fsSL ${location.origin}/install-client.sh | bash -s -- --docker --token ${issued}`}
+                  hint="Builds a local image (release binary + entrypoint) and starts it via Docker Compose. Requires Docker + compose plugin on the target; state persists in the named volume loom-client-data."
+                />
+                <p className="text-xs text-muted">
+                  Writes the project to <code className="font-mono">./loom-client-docker/</code> — backend bootstrap vars (LOOM_BACKEND_URL, LOOM_MODELS, …) live in its <code className="font-mono">.env</code> and apply on the container's first start.
+                </p>
+              </>
+            )}
             <button className="btn-primary w-full justify-center" onClick={() => setEnroll(false)}>Done</button>
           </div>
         ) : (

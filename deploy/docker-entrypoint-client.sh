@@ -106,6 +106,14 @@ if [ ! -f "$CFG" ]; then
         echo "[tray]"
         echo "enabled = false"
 
+        # A pinned internal CA seeded via /etc/loom-seed lets the client verify
+        # LAN/Tailscale mTLS endpoints learned through endpoint hints.
+        if [ -f "$(dirname "$CFG")/ca.crt" ]; then
+            echo ""
+            echo "[connector]"
+            echo "ca_cert_path = \"$(dirname "$CFG")/ca.crt\""
+        fi
+
         if [ -n "${LOOM_BACKEND_URL:-}" ]; then
             BTYPE="${LOOM_BACKEND_TYPE:-ollama}"
             BID="$(cat /proc/sys/kernel/random/uuid)"

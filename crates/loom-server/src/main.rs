@@ -287,6 +287,10 @@ async fn main() -> anyhow::Result<()> {
         env!("CARGO_MANIFEST_DIR"),
         "/../../deploy/install-client.sh"
     ));
+    const DOCKER_ENTRYPOINT_SH: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/docker-entrypoint-client.sh"
+    ));
     // WebSocket agent transport on the HTTP listener — the only
     // bidirectional path that survives proxies which buffer request
     // bodies (cloudflared http2 without QUIC). Same auth model as the
@@ -347,6 +351,20 @@ async fn main() -> anyhow::Result<()> {
                         )
                     }
                 }
+            }),
+        )
+        // Companion asset for `install-client.sh --docker`: the container
+        // entrypoint the generated Dockerfile copies into the image.
+        .route(
+            "/docker-entrypoint-client.sh",
+            get(|| async {
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/x-shellscript; charset=utf-8",
+                    )],
+                    DOCKER_ENTRYPOINT_SH,
+                )
             }),
         )
         .route(

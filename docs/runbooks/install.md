@@ -116,7 +116,24 @@ curl -fsSL https://loom.example.com/install-client.sh | \
    fetched raw, `--server` is required. `LOOM_VERSION=vX.Y.Z` pins a
    version instead of latest.)
 
-What it does:
+   **Docker instead of systemd/launchd:** pass `--docker` — no root needed
+   beyond a reachable docker daemon:
+
+```bash
+curl -fsSL https://loom.example.com/install-client.sh | \
+  bash -s -- --docker --token enroll_…
+```
+
+   This builds a local `loom-client:local` image from the signed release
+   binary plus the gateway-served `docker-entrypoint-client.sh`, writes a
+   compose project to `./loom-client-docker/` (env file with server URL,
+   token, generated `LOOM_LOCAL_API_KEY`, optional `LOOM_BACKEND_*`/`LOOM_MODELS`
+   bootstrap) and runs `docker compose up -d`. State lives in the named
+   volume `loom-client-data`; the UI publishes on `127.0.0.1:8391`.
+   For a full repo-checkout docker setup with backend auto-discovery use
+   `deploy/setup-client.sh` instead.
+
+What it does (native):
 
 - installs `loom-client` + `loom` to `/usr/local/bin`
 - pins the internal CA into `/etc/loom-client/ca.crt` — fetched from the
@@ -157,9 +174,17 @@ curl http://127.0.0.1:8391/v1/models          # local priority API
 ```
 
 The local UI/API binds loopback by default. For LAN access pass `--lan`
-to `setup-client.sh` (docker) or set `local_api.bind = "0.0.0.0:8391"`
-(native) — always keep `local_api.api_key` configured; the setup script
-generates one automatically.
+to `setup-client.sh` (docker), `LOOM_UI_BIND=0.0.0.0` in the generated
+`.env` (install script docker method) or set `local_api.bind = "0.0.0.0:8391"`
+(native) — always keep `local_api.api_key` configured; the setup flows
+generate one automatically.
+
+The configured key is managed from the client UI (Status → API key card):
+reveal, copy, rotate (`POST /local/api/api-key {"rotate":true}`),
+set a custom value, or clear it (API drops to open/loopback mode unless a
+UI user exists). `GET /local/api/api-key` returns the plaintext key to
+an authenticated caller; `DELETE` removes it. Cookie sessions survive a
+rotation — bearer-authenticated tools must switch to the new key.
 
 ## Smoke test (central)
 

@@ -1,10 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { api } from "../../lib/api";
+import { api, LOCAL_KEY_STORAGE, localKey } from "../../lib/api";
 import { WindowPicker } from "../Overview";
 import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
-import { Badge, Card, Stat } from "../../components/ui";
-import { Megaphone, X } from "lucide-react";
+import { Badge, Card, ConfirmModal, Field, Modal, Stat } from "../../components/ui";
+import { Check, Copy, Eye, EyeOff, Megaphone, RefreshCw, X } from "lucide-react";
 import type { ClientNote, ClientStatus } from "../../lib/types";
 import { fmtPct, fmtTs, fmtTimeS, fmtDayT, fmtUptime, fmtGiB, fmtNum, fmtMs } from "../../lib/format";
 
@@ -75,6 +75,160 @@ const LOCAL_ENDPOINTS = [
 
 interface LocalBackend { id: string; name: string; backend_type: string; deployments: { id: string; name: string; model_name: string; enabled: boolean }[] }
 
+interface ApiKeyInfo { set: boolean; api_key: string; bind: string; user_set: boolean }
+
+function ApiKeyCard() {
+  const qc = useQueryClient();
+  const auth = useQuery({
+    queryKey: ["client-auth"],
+    queryFn: () => api.get<{ mode: string; user: string; key_set: boolean }>("/local/api/auth/status"),
+    refetchInterval: 10000,
+  });
+  const [key, setKey] = useState<string | null>(null);
+  const [showSet, setShowSet] = useState(false);
+  const [confirmRot, setConfirmRot] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [custom, setCustom] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  const keySet = auth.data?.key_set ?? false;
+
+  const reveal = async () => {
+    setErr("");
+    try {
+      const d = await api.get<ApiKeyInfo>("/local/api/api-key");
+      setKey(d.api_key);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "request failed");
+    }
+  };
+
+  const submit = async (body: unknown) => {
+    setBusy(true);
+    setErr("");
+    try {
+      const d = await api.post<{ ok: boolean; api_key: string }>("/local/api/api-key", body);
+      // Keep this browser authenticated: if it signed in with the old key,
+      // swap the stored bearer for the fresh one (cookie sessions unaffected).
+      if (localKey()) localStorage.setItem(LOCAL_KEY_STORAGE, d.api_key);
+      setKey(d.api_key);
+      setConfirmRot(false);
+      setShowSet(false);
+      setCustom("");
+      qc.invalidateQueries({ queryKey: ["client-auth"] });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "request failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      await api.del("/local/api/api-key");
+      localStorage.removeItem(LOCAL_KEY_STORAGE);
+      setKey(null);
+      setConfirmClear(false);
+      qc.invalidateQueries({ queryKey: ["client-auth"] });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "request failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copy = async () => {
+    if (!key) return;
+    await navigator.clipboard.writeText(key);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <Card className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="text-xs font-medium uppercase tracking-wide text-muted">API key</div>
+        {keySet ? <Badge tone="ok">protected</Badge> : <Badge tone="warn">open</Badge>}
+      </div>
+      <p className="text-xs text-muted">
+        {keySet
+          ? "Bearer key required for local API requests."
+          : "No key configured — the local API accepts unauthenticated requests on its bind address."}
+      </p>
+      {key !== null && keySet && (
+        <div className="flex items-center gap-1.5">
+          <code className="flex-1 truncate rounded bg-panel2 px-2 py-1.5 font-mono text-xs select-all">{key}</code>
+          <button className="btn-ghost p-1.5" onClick={copy} title="copy to clipboard">
+            {copied ? <Check className="h-3.5 w-3.5 text-ok" /> : <Copy className="h-3.5 w-3.5" />}
+          </button>
+        </div>
+      )}
+      {err && <div className="text-xs text-err">{err}</div>}
+      <div className="flex flex-wrap items-center gap-2">
+        {keySet && (key === null ? (
+          <button className="btn-ghost inline-flex items-center gap-1.5 px-2.5 py-1 text-xs" onClick={reveal}>
+            <Eye className="h-3.5 w-3.5" /> Reveal
+          </button>
+        ) : (
+          <button className="btn-ghost inline-flex items-center gap-1.5 px-2.5 py-1 text-xs" onClick={() => setKey(null)}>
+            <EyeOff className="h-3.5 w-3.5" /> Hide
+          </button>
+        ))}
+        <button className="btn-ghost inline-flex items-center gap-1.5 px-2.5 py-1 text-xs" onClick={() => setConfirmRot(true)}>
+          <RefreshCw className="h-3.5 w-3.5" /> Rotate
+        </button>
+        <button className="btn-ghost px-2.5 py-1 text-xs" onClick={() => { setShowSet(true); setErr(""); }}>
+          Set custom…
+        </button>
+        {keySet && (
+          <button className="px-2.5 py-1 text-xs text-err hover:underline" onClick={() => setConfirmClear(true)}>
+            Clear
+          </button>
+        )}
+      </div>
+
+      <Modal open={showSet} title="Set API key" onClose={() => setShowSet(false)}>
+        <div className="space-y-4">
+          <Field label="Bearer key" hint="Minimum 8 characters. Stored in the client config; replaces any existing key.">
+            <input className="input w-full font-mono" value={custom} onChange={(e) => setCustom(e.target.value)} placeholder="my-secret-key" autoFocus />
+          </Field>
+          {err && <div className="text-xs text-err">{err}</div>}
+          <div className="flex justify-end gap-2">
+            <button className="btn-ghost px-3 py-1.5 text-sm" onClick={() => setShowSet(false)} disabled={busy}>Cancel</button>
+            <button className="btn px-3 py-1.5 text-sm" onClick={() => submit({ api_key: custom })} disabled={busy || custom.trim().length < 8}>
+              {busy ? "…" : "Set key"}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      <ConfirmModal
+        open={confirmRot}
+        title="Rotate API key"
+        body="Generates a fresh bearer key and invalidates the current one. Tools and scripts using the old key must be updated."
+        confirmLabel="Rotate"
+        busy={busy}
+        onConfirm={() => submit({ rotate: true })}
+        onClose={() => setConfirmRot(false)}
+      />
+      <ConfirmModal
+        open={confirmClear}
+        title="Clear API key"
+        body="Removes the bearer key. Unless a UI user is configured, the local API accepts unauthenticated requests on its bind address."
+        confirmLabel="Clear key"
+        danger
+        busy={busy}
+        onConfirm={clear}
+        onClose={() => setConfirmClear(false)}
+      />
+    </Card>
+  );
+}
+
 export default function ClientStatusPage() {
   const q = useQuery({
     queryKey: ["client-status"],
@@ -141,7 +295,8 @@ export default function ClientStatusPage() {
         </Card>
       )}
       <NotesCard />
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <ApiKeyCard />
         <Card className="space-y-1.5">
           <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">Local API <span className="normal-case text-muted/70">(port 8391)</span></div>
           {LOCAL_ENDPOINTS.map(e => (
