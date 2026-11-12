@@ -118,7 +118,7 @@ export function prioLabel(p: number | null | undefined): string {
 
 // Options for a priority <Select>: `classes` comes from /api/projects
 // (server SchedulerConfig) so a non-default class count stays selectable.
-export function prioOptions(classes = PRIORITY_LABELS.length): { value: string; label: string }[] {
+export function prioOptions(classes: number = PRIORITY_LABELS.length): { value: string; label: string }[] {
   return Array.from({ length: Math.max(1, classes) }, (_, i) => ({
     value: String(i),
     label: `${PRIORITY_LABELS[i] ?? `Class ${i}`} (${i})`,

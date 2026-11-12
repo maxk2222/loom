@@ -4,6 +4,7 @@ import { AreaChart, Area, BarChart, Bar, Cell, ComposedChart, ResponsiveContaine
 import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { Badge, LiveBadge, PageHeader, Stat } from "../components/ui";
+import { TokenHeatmap, expandHeatmap, type HeatmapData } from "../components/Heatmap";
 import type { ClientRow, Overview, VirtualModel } from "../lib/types";
 import { fmtPct, fmtTs, fmtTime, fmtDay, fmtDayT, fmtNum, fmtMs, PRIORITY_LABELS, prioTone } from "../lib/format";
 
@@ -74,6 +75,11 @@ export default function OverviewPage() {
     queryFn: () => api.get<{ models: BreakdownRow[]; clients: BreakdownRow[]; keys: BreakdownRow[]; projects: BreakdownRow[] }>(`/api/stats/breakdown?window=${win}`),
     refetchInterval: 15000,
   });
+  const heatmap = useQuery({
+    queryKey: ["stats-heatmap", win],
+    queryFn: () => api.get<HeatmapData>(`/api/stats/token-heatmap?window=${win}`),
+    refetchInterval: 15000,
+  });
   // Keys must match the owning pages ("deployments"/"vms") — a divergent
   // key forks the cache and leaves this view permanently stale.
   const depCap = useQuery({ queryKey: ["deployments"], queryFn: () => api.get<{ deployments: any[] }>("/api/deployments"), refetchInterval: 5000 });
@@ -82,6 +88,7 @@ export default function OverviewPage() {
   // Tick formatter per window: HH:mm for a day, "MM-DD HH:mm" for week/month,
   // "YYYY-MM-DD" beyond that.
   const tickFmt = win === "24h" ? fmtTime : win === "7d" || win === "30d" ? fmtDayT : fmtDay;
+  const heat = expandHeatmap(heatmap.data, tickFmt);
   const buckets = series.data?.buckets ?? [];
   const chart = buckets.map(b => ({ t: tickFmt(b.t), n: b.requests, tok: b.prompt_tokens + b.completion_tokens }));
   const ttftChart = buckets.filter(b => b.ttft_ms > 0).map(b => ({ t: tickFmt(b.t), ttft: Math.round(b.ttft_ms) }));
@@ -315,6 +322,21 @@ export default function OverviewPage() {
               <Area yAxisId="r" dataKey="tps" name="tok/s" stroke="#8fb3d9" fill="none" strokeWidth={1.5} dot={false} isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>
+        </div>
+      )}
+      {heat && (
+        <div className="card p-4">
+          <div className="mb-2 flex items-baseline justify-between">
+            <div className="text-xs font-medium uppercase tracking-wide text-muted">tokens / request over time <span className="normal-case text-muted/70">({win})</span></div>
+            <div className="text-[10px] text-muted">cell intensity = requests in bucket</div>
+          </div>
+          <TokenHeatmap
+            grid={heat.grid}
+            labels={heatmap.data?.token_buckets ?? []}
+            max={heat.max}
+            colLabel={(i) => heat.tick(heat.t0 + i * heat.bw)}
+            title={(r, c, n) => `${n} requests · ${heatmap.data?.token_buckets[r] ?? r} tokens · ${heat.tick(heat.t0 + c * heat.bw)}`}
+          />
         </div>
       )}
       <div className="grid gap-4 md:grid-cols-2">

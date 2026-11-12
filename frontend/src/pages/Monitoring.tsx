@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../lib/api";
 import { Card, ConfirmModal, Spinner } from "../components/ui";
-import { TokenHeatmap } from "../components/Heatmap";
+import { TokenHeatmap, expandHeatmap } from "../components/Heatmap";
 import type { HistoryRow, ApiUser, UsageStat } from "../lib/types";
 import { fmtTs, fmtTimeS, fmtDayT, fmtDay, fmtMs, fmtNum } from "../lib/format";
 import { WindowPicker } from "./Overview";
@@ -72,26 +72,10 @@ export default function MonitoringPage() {
   }));
 
   // Heatmap: server returns {t,b,n} cells — expand to a dense time×bucket
-  // grid from first data point to now (empty columns stay dark).
-  const heat = (() => {
-    const d = heatmap.data;
-    if (!d || d.cells.length === 0) return null;
-    const bw = d.bucket_secs * 1000;
-    const t0 = Math.min(...d.cells.map((c) => new Date(c.t).getTime()));
-    const cols = Math.max(1, Math.ceil((Date.now() - t0) / bw));
-    const grid = Array.from({ length: d.token_buckets.length }, () => new Array<number>(cols).fill(0));
-    let max = 0;
-    for (const c of d.cells) {
-      const i = Math.min(cols - 1, Math.floor((new Date(c.t).getTime() - t0) / bw));
-      grid[c.b][i] += c.n;
-      if (grid[c.b][i] > max) max = grid[c.b][i];
-    }
-    // ~8 x-labels; time format follows the window (hours for a day,
-    // day+time for weeks, plain date beyond).
-    const every = Math.max(1, Math.ceil(cols / 8));
-    const tick = win === "24h" ? fmtTimeS : win === "all" || win === "1y" || win === "365d" ? fmtDay : fmtDayT;
-    return { grid, max, t0, bw, every, tick };
-  })();
+  // grid from first data point to now (empty columns stay dark). Time format
+  // follows the window (hours for a day, day+time for weeks, plain date beyond).
+  const tick = win === "24h" ? fmtTimeS : win === "all" || win === "1y" || win === "365d" ? fmtDay : fmtDayT;
+  const heat = expandHeatmap(heatmap.data, tick);
 
   const rows = hist.data?.requests ?? [];
   const ttfts = rows.filter((r) => r.ttft_ms > 0).map((r) => r.ttft_ms).sort((a, b) => a - b);
@@ -138,7 +122,7 @@ export default function MonitoringPage() {
             grid={heat.grid}
             labels={heatmap.data?.token_buckets ?? []}
             max={heat.max}
-            colLabel={(i) => (i % heat.every === 0 ? heat.tick(heat.t0 + i * heat.bw) : "")}
+            colLabel={(i) => heat.tick(heat.t0 + i * heat.bw)}
             title={(r, c, n) => `${n} requests · ${heatmap.data?.token_buckets[r] ?? r} tokens · ${heat.tick(heat.t0 + c * heat.bw)}`}
           />
         </Card>
