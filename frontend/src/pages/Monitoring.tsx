@@ -7,7 +7,7 @@ import type { HistoryRow, ApiUser, UsageStat } from "../lib/types";
 import { fmtTs, fmtTimeS, fmtDayT, fmtDay, fmtMs, fmtNum } from "../lib/format";
 import { WindowPicker } from "./Overview";
 import {
-  Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
+  Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 
 const TOOLTIP_STYLE = { background: "#10161d", border: "1px solid #1f2a36", borderRadius: 6, color: "#dbe4ee" } as const;
@@ -106,11 +106,14 @@ export default function MonitoringPage() {
           <ResponsiveContainer width="100%" height={260}>
             <BarChart data={data}>
               <CartesianGrid stroke="#1f2a36" strokeDasharray="3 3" />
-              <XAxis dataKey="project" stroke="#8b9bad" fontSize={12} />
-              <YAxis stroke="#8b9bad" fontSize={12} tickFormatter={fmtNum} />
+              <XAxis dataKey="project" stroke="#8b9bad" fontSize={12} tickFormatter={(v: string) => v.length > 14 ? `${v.slice(0, 13)}…` : v} />
+              {/* Two axes: token volume dwarfs request counts on one scale. */}
+              <YAxis yAxisId="l" stroke="#5b8def" fontSize={12} tickFormatter={fmtNum} allowDecimals={false} />
+              <YAxis yAxisId="r" orientation="right" stroke="#3fb96c" fontSize={12} tickFormatter={fmtNum} />
               <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={TOOLTIP_STYLE} formatter={(v) => fmtNum(Number(v))} />
-              <Bar dataKey="requests" fill="#5b8def" radius={[3, 3, 0, 0]} />
-              <Bar dataKey="tokens" fill="#3fb96c" radius={[3, 3, 0, 0]} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar yAxisId="l" dataKey="requests" fill="#5b8def" radius={[3, 3, 0, 0]} />
+              <Bar yAxisId="r" dataKey="tokens" fill="#3fb96c" radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         )}
