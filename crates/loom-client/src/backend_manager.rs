@@ -480,6 +480,14 @@ impl BackendManager {
                                 // Manual capability fields from config merge in.
                                 merge_overrides(&mut probed, &de.cfg.capabilities);
                                 *de.caps.write().await = Some(probed);
+                                // KV capacity is static per model/backend
+                                // (pool geometry), so it shares the caps
+                                // probe cadence rather than the health tick.
+                                let budget = be
+                                    .adapter
+                                    .kv_budget_tokens(&model, de.cfg.max_concurrent)
+                                    .await;
+                                sched.set_kv_capacity(&did, budget);
                                 inv_changed = true;
                             }
                             Err(e) => {

@@ -485,6 +485,10 @@ pub struct DesiredDeployment {
     /// re-created by the next inventory report (upsert is authoritative).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed: Option<bool>,
+    /// Effective KV token budget the client's local admission mirrors as a
+    /// backstop (0/None = fall back to the adapter-measured budget).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_budget_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -641,6 +645,14 @@ pub struct SchedulerConfig {
     /// never killed mid-generation.
     #[serde(default = "default_request_deadline", alias = "request_deadline_secs")]
     pub stream_idle_timeout_secs: u64,
+    /// Output tokens reserved per request for KV-budget admission when the
+    /// caller does not specify max_tokens (also caps explicit values).
+    #[serde(default = "default_kv_output_reserve")]
+    pub kv_output_reserve_tokens: u64,
+    /// Safety margin (%) added to every request footprint to absorb
+    /// prompt-estimate error against real tokenizer counts.
+    #[serde(default = "default_kv_margin_pct")]
+    pub kv_margin_pct: u64,
 }
 
 fn default_max_queue() -> usize {
@@ -664,6 +676,12 @@ fn default_classes() -> u32 {
 fn default_request_deadline() -> u64 {
     600
 }
+fn default_kv_output_reserve() -> u64 {
+    8192
+}
+fn default_kv_margin_pct() -> u64 {
+    15
+}
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
@@ -675,6 +693,8 @@ impl Default for SchedulerConfig {
             max_attempts: default_attempts(),
             priority_classes: default_classes(),
             stream_idle_timeout_secs: default_request_deadline(),
+            kv_output_reserve_tokens: default_kv_output_reserve(),
+            kv_margin_pct: default_kv_margin_pct(),
         }
     }
 }

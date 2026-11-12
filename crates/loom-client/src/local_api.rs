@@ -447,7 +447,7 @@ async fn openai_inference_raw(
 
     let token = match s
         .scheduler
-        .try_admit(&dep_id, RequestClass::Local, &request_id)
+        .try_admit(&dep_id, RequestClass::Local, &request_id, 0)
     {
         Ok(t) => t,
         Err(r) => {

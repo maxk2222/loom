@@ -233,6 +233,7 @@ async fn client_offline_splits_reserved_and_active() {
     let _: String = redis::Script::new(lua::LEASE_ACTIVATE)
         .key(format!("{p}lease:a1"))
         .arg(f2)
+        .arg(now_ms())
         .invoke_async(&mut c)
         .await
         .unwrap();
@@ -353,7 +354,9 @@ async fn lease_sweep_expires_reserved_only() {
     let leases = format!("{p}dep:d1:leases");
     let fencing_key = format!("{p}cap:fencing");
 
-    // lease with 1ms ttl (expires immediately as far as sweep score goes)
+    // lease already past its lease-score expiry — created 2min ago with a
+    // 60s ttl, so the sweep score is in the past while the hash's own
+    // PEXPIRE (ttl*3) still keeps it readable.
     let v: redis::Value = redis::Script::new(lua::LEASE_ACQUIRE)
         .key(&dep)
         .key(&leases)
@@ -362,8 +365,8 @@ async fn lease_sweep_expires_reserved_only() {
         .arg("req-e1")
         .arg("client-1")
         .arg("d1")
-        .arg(1i64)
-        .arg(now_ms() - 10_000)
+        .arg(60_000i64)
+        .arg(now_ms() - 120_000)
         .arg(0)
         .invoke_async(&mut c)
         .await
@@ -449,6 +452,349 @@ async fn queue_fifo_and_pop_order() {
     assert_eq!(pop(&mut c, &q0, &q1).await.as_deref(), Some("req-a"));
     assert_eq!(pop(&mut c, &q0, &q1).await.as_deref(), Some("req-b"));
     assert_eq!(pop(&mut c, &q0, &q1).await, None);
+}
+
+#[tokio::test]
+async fn kv_budget_gates_acquire_and_release_returns_footprint() {
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let dep = format!("{p}dep:d1");
+    let leases = format!("{p}dep:d1:leases");
+    let fencing_key = format!("{p}cap:fencing");
+
+    // acquire with fp/budget args
+    #[allow(clippy::too_many_arguments)]
+    async fn acquire(
+        c: &mut ConnectionManager,
+        dep: &str,
+        leases: &str,
+        fencing_key: &str,
+        lease: &str,
+        req: &str,
+        fp: i64,
+        budget: i64,
+    ) -> redis::Value {
+        redis::Script::new(lua::LEASE_ACQUIRE)
+            .key(dep)
+            .key(leases)
+            .key(lease)
+            .key(fencing_key)
+            .arg(req)
+            .arg("client-1")
+            .arg("d1")
+            .arg(60_000i64)
+            .arg(now_ms())
+            .arg(0)
+            .arg(fp)
+            .arg(budget)
+            .invoke_async::<redis::Value>(c)
+            .await
+            .unwrap()
+    }
+
+    let f1 = fencing_from(
+        acquire(
+            &mut c,
+            &dep,
+            &leases,
+            &fencing_key,
+            &format!("{p}lease:k1"),
+            "req-k1",
+            60_000,
+            100_000,
+        )
+        .await,
+    );
+    assert!(f1 > 0);
+    let used: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("kv_used")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(used, 60_000);
+
+    // 50_000 would push kv_used to 110_000 > 100_000 → KV_FULL (not NO_CAPACITY:
+    // slots remain — the gate is the token budget)
+    let v = acquire(
+        &mut c,
+        &dep,
+        &leases,
+        &fencing_key,
+        &format!("{p}lease:k2"),
+        "req-k2",
+        50_000,
+        100_000,
+    )
+    .await;
+    assert_eq!(redis::from_redis_value::<String>(&v).unwrap(), "KV_FULL");
+    let used: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("kv_used")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(used, 60_000, "a rejected acquire must not reserve");
+
+    // exact-boundary footprint still fits
+    let f2 = fencing_from(
+        acquire(
+            &mut c,
+            &dep,
+            &leases,
+            &fencing_key,
+            &format!("{p}lease:k3"),
+            "req-k3",
+            40_000,
+            100_000,
+        )
+        .await,
+    );
+    assert!(f2 > 0);
+    let used: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("kv_used")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(used, 100_000);
+
+    // release returns the footprint exactly once (re-release → NOT_FOUND, no double decrement)
+    let r: String = redis::Script::new(lua::LEASE_RELEASE)
+        .key(format!("{p}lease:k1"))
+        .key(&dep)
+        .key(&leases)
+        .arg(f1)
+        .arg("req-k1")
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(r, "OK");
+    let r2: String = redis::Script::new(lua::LEASE_RELEASE)
+        .key(format!("{p}lease:k1"))
+        .key(&dep)
+        .key(&leases)
+        .arg(f1)
+        .arg("req-k1")
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(r2, "NOT_FOUND");
+    let used: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("kv_used")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(used, 40_000);
+
+    // the freed headroom admits again
+    let f3 = fencing_from(
+        acquire(
+            &mut c,
+            &dep,
+            &leases,
+            &fencing_key,
+            &format!("{p}lease:k4"),
+            "req-k4",
+            60_000,
+            100_000,
+        )
+        .await,
+    );
+    assert!(f3 > 0);
+}
+
+#[tokio::test]
+async fn kv_budget_zero_is_legacy_slot_only() {
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let dep = format!("{p}dep:d1");
+    let leases = format!("{p}dep:d1:leases");
+    let fencing_key = format!("{p}cap:fencing");
+
+    // budget=0 → footprint is not gated at all (tracked but unbounded)
+    let v: redis::Value = redis::Script::new(lua::LEASE_ACQUIRE)
+        .key(&dep)
+        .key(&leases)
+        .key(format!("{p}lease:g1"))
+        .key(&fencing_key)
+        .arg("req-g1")
+        .arg("client-1")
+        .arg("d1")
+        .arg(60_000i64)
+        .arg(now_ms())
+        .arg(0)
+        .arg(9_999_999i64) // absurd footprint
+        .arg(0i64) // no budget
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert!(fencing_from(v) > 0);
+}
+
+#[tokio::test]
+async fn kv_fp_update_is_monotonic_and_fenced() {
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let dep = format!("{p}dep:d1");
+    let leases = format!("{p}dep:d1:leases");
+    let lkey = format!("{p}lease:u1");
+    let fencing_key = format!("{p}cap:fencing");
+
+    let v: redis::Value = redis::Script::new(lua::LEASE_ACQUIRE)
+        .key(&dep)
+        .key(&leases)
+        .key(&lkey)
+        .key(&fencing_key)
+        .arg("req-u1")
+        .arg("client-1")
+        .arg("d1")
+        .arg(60_000i64)
+        .arg(now_ms())
+        .arg(0)
+        .arg(50_000i64)
+        .arg(100_000i64)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    let f = fencing_from(v);
+
+    // wrong fencing → STALE
+    let r: String = redis::Script::new(lua::LEASE_FP_UPDATE)
+        .key(&lkey)
+        .key(&dep)
+        .arg(f + 7)
+        .arg(80_000i64)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(r, "STALE");
+
+    // growth applies the delta to dep.kv_used
+    let r: String = redis::Script::new(lua::LEASE_FP_UPDATE)
+        .key(&lkey)
+        .key(&dep)
+        .arg(f)
+        .arg(80_000i64)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(r, "OK");
+    let used: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("kv_used")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(used, 80_000);
+
+    // a lower (stale/lagging) report must not shrink the reservation
+    let r: String = redis::Script::new(lua::LEASE_FP_UPDATE)
+        .key(&lkey)
+        .key(&dep)
+        .arg(f)
+        .arg(30_000i64)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(r, "OK");
+    let used: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("kv_used")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(used, 80_000);
+}
+
+#[tokio::test]
+async fn kv_used_returned_by_sweep_and_client_offline() {
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let dep = format!("{p}dep:d1");
+    let leases = format!("{p}dep:d1:leases");
+    let fencing_key = format!("{p}cap:fencing");
+
+    // expired reserved lease carrying a footprint (score past, hash alive —
+    // same pattern as lease_sweep_expires_reserved_only)
+    let v: redis::Value = redis::Script::new(lua::LEASE_ACQUIRE)
+        .key(&dep)
+        .key(&leases)
+        .key(format!("{p}lease:s1"))
+        .key(&fencing_key)
+        .arg("req-s1")
+        .arg("client-1")
+        .arg("d1")
+        .arg(60_000i64)
+        .arg(now_ms() - 120_000)
+        .arg(0)
+        .arg(70_000i64)
+        .arg(100_000i64)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert!(fencing_from(v) > 0);
+
+    let swept: Vec<String> = redis::Script::new(lua::LEASE_SWEEP)
+        .key(&dep)
+        .key(&leases)
+        .arg(now_ms())
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(swept, vec!["req-s1".to_string()]);
+    let used: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("kv_used")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(used, 0, "swept lease must return its footprint");
+
+    // active lease reaped by CLIENT_OFFLINE returns its footprint too
+    let v: redis::Value = redis::Script::new(lua::LEASE_ACQUIRE)
+        .key(&dep)
+        .key(&leases)
+        .key(format!("{p}lease:o1"))
+        .key(&fencing_key)
+        .arg("req-o1")
+        .arg("client-1")
+        .arg("d1")
+        .arg(60_000i64)
+        .arg(now_ms())
+        .arg(0)
+        .arg(90_000i64)
+        .arg(100_000i64)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    let f = fencing_from(v);
+    let _: String = redis::Script::new(lua::LEASE_ACTIVATE)
+        .key(format!("{p}lease:o1"))
+        .arg(f)
+        .arg(now_ms())
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    let res: Vec<Vec<String>> = redis::Script::new(lua::CLIENT_OFFLINE)
+        .key(&dep)
+        .key(&leases)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(res[1], vec!["req-o1".to_string()]);
+    let used: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("kv_used")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(used, 0);
 }
 
 #[tokio::test]

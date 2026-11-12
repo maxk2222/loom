@@ -39,6 +39,9 @@ pub struct Member {
     /// deployments.enabled (the client-side toggle — changes arrive with
     /// inventory reports and are patched into the snapshot live).
     pub dep_enabled: bool,
+    /// Effective KV budget in tokens: admin override falling back to the
+    /// client-reported adapter capacity. None = slot-only admission.
+    pub kv_budget: Option<i64>,
 }
 
 impl Member {
@@ -90,6 +93,7 @@ impl ModelRegistry {
             manual_pinned: bool,
             member_enabled: bool,
             dep_enabled: bool,
+            kv_budget: Option<i64>,
         }
 
         let vms: Vec<VmRow> = sqlx::query_as(
@@ -103,7 +107,8 @@ impl ModelRegistry {
         let members: Vec<MRow> = sqlx::query_as(
             "SELECT m.virtual_model_id, m.deployment_id, d.client_id, d.model_name,
                     d.capabilities, m.priority, m.weight, m.manual_pinned,
-                    m.enabled AS member_enabled, d.enabled AS dep_enabled
+                    m.enabled AS member_enabled, d.enabled AS dep_enabled,
+                    COALESCE(d.kv_budget_tokens, d.reported_kv_budget_tokens) AS kv_budget
              FROM virtual_model_members m
              JOIN deployments d ON d.id = m.deployment_id
              ORDER BY m.priority",
@@ -127,6 +132,7 @@ impl ModelRegistry {
                     manual_pinned: m.manual_pinned,
                     member_enabled: m.member_enabled,
                     dep_enabled: m.dep_enabled,
+                    kv_budget: m.kv_budget,
                 });
         }
 
@@ -224,6 +230,30 @@ impl ModelRegistry {
     pub async fn fallback(&self, vm: &VirtualModel) -> Option<VirtualModel> {
         let id = vm.fallback_virtual_model_id.as_ref()?;
         self.resolve_by_id(id).await
+    }
+
+    /// Re-read the effective KV budget (override ?? reported) from Postgres
+    /// and patch it onto every member pointing at this deployment — without
+    /// this a newly-reported adapter budget stays invisible to lease
+    /// admission until the next full snapshot reload.
+    pub async fn patch_kv_budget(&self, deployment_id: &str) {
+        let effective: Option<i64> = sqlx::query_scalar(
+            "SELECT COALESCE(kv_budget_tokens, reported_kv_budget_tokens) \
+             FROM deployments WHERE id = $1::uuid",
+        )
+        .bind(deployment_id)
+        .fetch_optional(&self.db)
+        .await
+        .unwrap_or_default()
+        .flatten();
+        let mut snap = self.snapshot.write().await;
+        for vm in snap.values_mut() {
+            for m in &mut vm.members {
+                if m.deployment_id == deployment_id {
+                    m.kv_budget = effective;
+                }
+            }
+        }
     }
 
     /// Patch live deployment attributes (capabilities, enabled flag) into

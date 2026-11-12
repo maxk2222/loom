@@ -99,6 +99,7 @@ pub mod server_msgs {
         virtual_model: &str,
         deployment_id: &str,
         content_type: &str,
+        footprint_tokens: u64,
     ) -> ServerEnvelope {
         ServerEnvelope {
             msg: Some(server_envelope::Msg::AssignRequest(AssignRequest {
@@ -112,6 +113,7 @@ pub mod server_msgs {
                 virtual_model: virtual_model.into(),
                 deployment_id: deployment_id.into(),
                 content_type: content_type.into(),
+                footprint_tokens,
             })),
         }
     }
@@ -258,6 +260,15 @@ pub mod client_msgs {
                 completion_tokens,
                 ttft_ms,
                 duration_ms,
+            })),
+        }
+    }
+
+    pub fn lease_usage(request_id: &str, tokens_used: u64) -> ClientEnvelope {
+        ClientEnvelope {
+            msg: Some(client_envelope::Msg::LeaseUsage(LeaseUsage {
+                request_id: request_id.into(),
+                tokens_used,
             })),
         }
     }

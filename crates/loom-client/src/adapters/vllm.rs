@@ -46,6 +46,62 @@ impl VllmAdapter {
         out
     }
 
+    /// `vllm:cache_config_info` info metric carries the physical KV pool
+    /// geometry: num_gpu_blocks × block_size = total token slots.
+    async fn metrics_kv_tokens(&self) -> Option<u64> {
+        let url = format!("{}/metrics", self.endpoint());
+        let mut req = self.http.get(&url).timeout(Duration::from_secs(5));
+        if !self.cfg.api_key.is_empty() {
+            req = req.bearer_auth(&self.cfg.api_key);
+        }
+        let body = req.send().await.ok()?.text().await.ok()?;
+        for line in body.lines() {
+            let Some(rest) = line.strip_prefix("vllm:cache_config_info{") else {
+                continue;
+            };
+            let label = |key: &str| -> Option<u64> {
+                let marker = format!("{key}=\"");
+                let start = rest.find(&marker)? + marker.len();
+                let end = rest[start..].find('"')? + start;
+                rest[start..end].parse().ok()
+            };
+            if let (Some(blocks), Some(size)) = (label("num_gpu_blocks"), label("block_size")) {
+                return Some(blocks * size);
+            }
+        }
+        None
+    }
+
+    /// `/get_server_info` `max_model_len` — a conservative floor (admits at
+    /// least one full-context request) when metrics can't be measured.
+    async fn server_info_max_model_len(&self) -> u64 {
+        let url = format!("{}/get_server_info", self.endpoint());
+        let mut req = self.http.get(&url).timeout(Duration::from_secs(5));
+        if !self.cfg.api_key.is_empty() {
+            req = req.bearer_auth(&self.cfg.api_key);
+        }
+        let Ok(resp) = req.send().await else {
+            return 0;
+        };
+        if !resp.status().is_success() {
+            return 0;
+        }
+        let v: Value = resp.json().await.unwrap_or_default();
+        fn find(v: &Value) -> Option<u64> {
+            match v {
+                Value::Object(m) => {
+                    if let Some(n) = m.get("max_model_len").and_then(|n| n.as_u64()) {
+                        return Some(n);
+                    }
+                    m.values().find_map(find)
+                }
+                Value::Array(a) => a.iter().find_map(find),
+                _ => None,
+            }
+        }
+        find(&v).unwrap_or(0)
+    }
+
     /// Does the served model accept `kind` ("image"/"video") input parts?
     /// A real request proves support independent of model naming. Any
     /// transport/timeout error → treated as unsupported (conservative:
@@ -195,6 +251,15 @@ impl BackendAdapter for VllmAdapter {
         }
         let _ = models;
         Ok(caps)
+    }
+
+    /// vLLM has one shared KV pool (the GPU blocks) — the budget is the
+    /// pool size, independent of slot count.
+    async fn kv_budget_tokens(&self, _model: &str, _slots: u32) -> u64 {
+        if let Some(n) = self.metrics_kv_tokens().await {
+            return n;
+        }
+        self.server_info_max_model_len().await
     }
 
     async fn health(&self) -> Health {

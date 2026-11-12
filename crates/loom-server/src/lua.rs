@@ -55,9 +55,11 @@ return 'NOT_FOUND'
 "#;
 
 /// lease_acquire: KEYS=[dep:{id}, dep:{id}:leases, lease:{lid}, cap:fencing]
-/// ARGV=[request_id, client_id, dep_id, ttl_ms, now_ms, fencing_in]
-/// -> {fencing} | "NO_CAPACITY" | "UNAVAILABLE"
+/// ARGV=[request_id, client_id, dep_id, ttl_ms, now_ms, fencing_in, fp, kv_budget]
+/// -> {fencing} | "NO_CAPACITY" | "KV_FULL" | "UNAVAILABLE"
 /// Idempotent per request_id (same lease returned).
+/// `kv_used` always tracks the sum of live lease footprints; the budget gate
+/// applies only when kv_budget > 0 (unset = pure slot counting).
 pub const LEASE_ACQUIRE: &str = r#"
 local dep = KEYS[1]
 local leases = KEYS[2]
@@ -70,7 +72,14 @@ if existing == ARGV[1] then
 end
 local free = tonumber(redis.call('HGET', dep, 'tier2_free') or '0')
 if free <= 0 then return 'NO_CAPACITY' end
+local fp = tonumber(ARGV[7]) or 0
+local budget = tonumber(ARGV[8]) or 0
+if budget > 0 then
+  local used = tonumber(redis.call('HGET', dep, 'kv_used') or '0')
+  if used + fp > budget then return 'KV_FULL' end
+end
 redis.call('HINCRBY', dep, 'tier2_free', -1)
+redis.call('HINCRBY', dep, 'kv_used', fp)
 local fencing = redis.call('INCR', KEYS[4])
 local exp = tonumber(ARGV[5]) + tonumber(ARGV[4])
 redis.call('HSET', lkey,
@@ -80,7 +89,8 @@ redis.call('HSET', lkey,
   'fencing', fencing,
   'state', 'reserved',
   'created', ARGV[5],
-  'expires', exp)
+  'expires', exp,
+  'fp', fp)
 redis.call('PEXPIRE', lkey, tonumber(ARGV[4]) * 3)
 redis.call('ZADD', leases, exp, KEYS[3])
 return { fencing }
@@ -125,10 +135,15 @@ for _,lkey in ipairs(leases) do
   local at = tonumber(redis.call('HGET', lkey, 'activated_at') or '0')
   if st == 'active' and at > 0 and now - at > deadline then
     local rq = redis.call('HGET', lkey, 'request_id')
+    local fp = tonumber(redis.call('HGET', lkey, 'fp') or '0')
     table.insert(out, rq or lkey)
     redis.call('DEL', lkey)
     redis.call('ZREM', lset, lkey)
     redis.call('HINCRBY', dep, 'tier2_free', 1)
+    if fp > 0 then
+      local u = redis.call('HINCRBY', dep, 'kv_used', -fp)
+      if u < 0 then redis.call('HSET', dep, 'kv_used', 0) end
+    end
   end
 end
 return out
@@ -136,14 +151,39 @@ return out
 
 /// lease_release: KEYS=[lease:{lid}, dep:{id}, dep:{id}:leases]
 /// ARGV=[fencing, request_id] -> "OK" | "STALE" | "NOT_FOUND"
-/// Idempotent: only frees the slot if lease still held.
+/// Idempotent: only frees the slot if lease still held. Gives back the
+/// lease's token footprint alongside the slot.
 pub const LEASE_RELEASE: &str = r#"
 local f = redis.call('HGET', KEYS[1], 'fencing')
 if not f then return 'NOT_FOUND' end
 if tonumber(f) ~= tonumber(ARGV[1]) then return 'STALE' end
+local fp = tonumber(redis.call('HGET', KEYS[1], 'fp') or '0')
 redis.call('DEL', KEYS[1])
 redis.call('ZREM', KEYS[3], KEYS[1])
 redis.call('HINCRBY', KEYS[2], 'tier2_free', 1)
+if fp > 0 then
+  local u = redis.call('HINCRBY', KEYS[2], 'kv_used', -fp)
+  if u < 0 then redis.call('HSET', KEYS[2], 'kv_used', 0) end
+end
+return 'OK'
+"#;
+
+/// lease_fp_update: converge a lease's reserved footprint to the client's
+/// reported cumulative token usage mid-flight. Monotonic — actuals only
+/// ever grow a reservation (usage can lag but never shrink), so a stale or
+/// lower report is ignored instead of opening the gate against reality.
+/// KEYS=[lease:{lid}, dep:{id}] ARGV=[fencing, tokens_used]
+/// -> "OK" | "STALE" | "NOT_FOUND"
+pub const LEASE_FP_UPDATE: &str = r#"
+local f = redis.call('HGET', KEYS[1], 'fencing')
+if not f then return 'NOT_FOUND' end
+if tonumber(f) ~= tonumber(ARGV[1]) then return 'STALE' end
+local cur = tonumber(redis.call('HGET', KEYS[1], 'fp') or '0')
+local actual = tonumber(ARGV[2]) or 0
+if actual > cur then
+  redis.call('HSET', KEYS[1], 'fp', actual)
+  redis.call('HINCRBY', KEYS[2], 'kv_used', actual - cur)
+end
 return 'OK'
 "#;
 
@@ -162,6 +202,7 @@ for i=1,#KEYS,2 do
   for _,lkey in ipairs(leases) do
     local st = redis.call('HGET', lkey, 'state')
     local rq = redis.call('HGET', lkey, 'request_id')
+    local fp = tonumber(redis.call('HGET', lkey, 'fp') or '0')
     if rq then
       if st == 'reserved' then
         table.insert(reserved, rq)
@@ -170,6 +211,10 @@ for i=1,#KEYS,2 do
       end
       redis.call('DEL', lkey)
       redis.call('ZREM', lset, lkey)
+      if fp > 0 then
+        local u = redis.call('HINCRBY', dep, 'kv_used', -fp)
+        if u < 0 then redis.call('HSET', dep, 'kv_used', 0) end
+      end
     end
   end
 end
@@ -190,10 +235,15 @@ for _,lkey in ipairs(expired) do
   if rq then
     -- only free 'reserved' leases; confirmed/active die via watchdog not sweep
     if st == 'reserved' then
+      local fp = tonumber(redis.call('HGET', lkey, 'fp') or '0')
       table.insert(out, rq)
       redis.call('DEL', lkey)
       redis.call('ZREM', lset, lkey)
       redis.call('HINCRBY', dep, 'tier2_free', 1)
+      if fp > 0 then
+        local u = redis.call('HINCRBY', dep, 'kv_used', -fp)
+        if u < 0 then redis.call('HSET', dep, 'kv_used', 0) end
+      end
     end
   end
 end

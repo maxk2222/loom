@@ -135,6 +135,7 @@ impl MockAgentServer {
                 virtual_model,
                 deployment_id,
                 "application/json",
+                0,
             ))
             .await
             .map_err(|_| Status::unavailable("control stream closed"))?;
@@ -310,6 +311,9 @@ impl Agent for MockAgentServer {
                     }
                     client_envelope::Msg::ErrorReport(e) => {
                         format!("err:{}:{}", e.code, e.request_id)
+                    }
+                    client_envelope::Msg::LeaseUsage(l) => {
+                        format!("lease_usage:{}:{}", l.request_id, l.tokens_used)
                     }
                     client_envelope::Msg::Pong(_) => continue,
                     client_envelope::Msg::Hello(_) => "hello_dup".to_string(),

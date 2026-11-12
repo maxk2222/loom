@@ -45,6 +45,9 @@ pub enum RejectReason {
     BackendDown,
     UnknownDeployment,
     AdmissionClosed,
+    /// Request's token footprint would push the deployment over its KV
+    /// token budget — the backstop to the server's authoritative gate.
+    KvFull,
 }
 
 impl RejectReason {
@@ -55,6 +58,7 @@ impl RejectReason {
             RejectReason::BackendDown => "backend_down",
             RejectReason::UnknownDeployment => "unknown_deployment",
             RejectReason::AdmissionClosed => "admission_closed",
+            RejectReason::KvFull => "kv_full",
         }
     }
 }
@@ -78,6 +82,13 @@ struct DeploymentLimits {
     /// Model actually servable: installed and — for auto_load deployments —
     /// resident in the backend (not evicted). Tier-2 only.
     model_ready: AtomicU32,
+    /// Adapter-measured KV token capacity (reported to the server as the
+    /// deployment's derived budget). 0 = backend cannot be measured.
+    kv_budget: std::sync::atomic::AtomicU64,
+    /// Server-pushed budget override (desired state). Wins over the
+    /// adapter-measured value for admission; never reported back up —
+    /// the server already owns that number.
+    kv_budget_admin: std::sync::atomic::AtomicU64,
 }
 
 impl DeploymentLimits {
@@ -95,6 +106,8 @@ impl DeploymentLimits {
             health_ok: AtomicU32::new(1),
             health: AtomicU32::new(1),
             model_ready: AtomicU32::new(1),
+            kv_budget: std::sync::atomic::AtomicU64::new(0),
+            kv_budget_admin: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -113,6 +126,8 @@ impl DeploymentLimits {
 struct Counters {
     local_active: AtomicU32,
     tier2_active: AtomicU32,
+    /// Tier-2 token footprints currently reserved (KV budget accounting).
+    kv_used: std::sync::atomic::AtomicU64,
 }
 
 pub struct DeploymentSlots {
@@ -123,7 +138,12 @@ pub struct DeploymentSlots {
 }
 
 impl DeploymentSlots {
-    fn admit(&self, class: RequestClass, sharing_enabled: bool) -> Result<(), RejectReason> {
+    fn admit(
+        &self,
+        class: RequestClass,
+        sharing_enabled: bool,
+        footprint: u64,
+    ) -> Result<(), RejectReason> {
         let max_c = self.limits.max_concurrent.load(Ordering::SeqCst);
         let reserve = self.limits.local_reserve.load(Ordering::SeqCst);
         let t2_max = self.limits.tier2_max.load(Ordering::SeqCst);
@@ -163,19 +183,49 @@ impl DeploymentSlots {
                 if local + t2 >= max_c.saturating_sub(reserve) {
                     return Err(RejectReason::NoCapacity);
                 }
+                // KV token budget backstop: the server's lease gate is
+                // authoritative; this mirrors it so a mis-admitted or
+                // oversized assignment is still refused. Admin override
+                // (desired state) wins over the adapter-measured budget;
+                // 0/unknown → slot-only admission.
+                let budget = {
+                    let admin = self.limits.kv_budget_admin.load(Ordering::SeqCst);
+                    if admin > 0 {
+                        admin
+                    } else {
+                        self.limits.kv_budget.load(Ordering::SeqCst)
+                    }
+                };
+                if budget > 0 && footprint > 0 {
+                    let used = self.counters.kv_used.load(Ordering::SeqCst);
+                    if used + footprint > budget {
+                        return Err(RejectReason::KvFull);
+                    }
+                    self.counters.kv_used.fetch_add(footprint, Ordering::SeqCst);
+                }
                 self.counters.tier2_active.fetch_add(1, Ordering::SeqCst);
             }
         }
         Ok(())
     }
 
-    fn release(&self, class: RequestClass) {
+    fn release(&self, class: RequestClass, footprint: u64) {
         match class {
             RequestClass::Local => {
                 self.counters.local_active.fetch_sub(1, Ordering::SeqCst);
             }
             RequestClass::Tier2 => {
                 self.counters.tier2_active.fetch_sub(1, Ordering::SeqCst);
+                if footprint > 0 {
+                    // Saturating release — a stale/duplicate drop must never
+                    // underflow the counter.
+                    self.counters
+                        .kv_used
+                        .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                            Some(v.saturating_sub(footprint))
+                        })
+                        .ok();
+                }
             }
         }
     }
@@ -208,6 +258,8 @@ pub struct AdmitToken {
     class: RequestClass,
     sched: LocalScheduler,
     cancel: CancellationToken,
+    /// KV tokens this admission reserved — returned to the counter on drop.
+    footprint: u64,
     _priv: (),
 }
 
@@ -226,7 +278,7 @@ impl AdmitToken {
 
 impl Drop for AdmitToken {
     fn drop(&mut self) {
-        self.sched.release(&self.dep, self.class);
+        self.sched.release(&self.dep, self.class, self.footprint);
     }
 }
 
@@ -292,6 +344,7 @@ impl LocalScheduler {
                         counters: Counters {
                             local_active: AtomicU32::new(0),
                             tier2_active: AtomicU32::new(0),
+                            kv_used: std::sync::atomic::AtomicU64::new(0),
                         },
                     }),
                 );
@@ -308,6 +361,7 @@ impl LocalScheduler {
         local_reserve: Option<u32>,
         sharing_mode: Option<SharingMode>,
         enabled: Option<bool>,
+        kv_budget: Option<u64>,
     ) {
         let map = self.inner.deployments.read().unwrap();
         if let Some(d) = map.get(dep_id) {
@@ -324,6 +378,19 @@ impl LocalScheduler {
             if let Some(e) = enabled {
                 d.limits.enabled.store(e as u32, Ordering::SeqCst);
             }
+            if let Some(b) = kv_budget {
+                d.limits.kv_budget_admin.store(b, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Adapter-measured KV capacity for a deployment (probe result). This is
+    /// the value reported to the server — the admin override stays separate
+    /// so clearing it server-side falls back to exactly this number.
+    pub fn set_kv_capacity(&self, dep_id: &str, budget: u64) {
+        let map = self.inner.deployments.read().unwrap();
+        if let Some(d) = map.get(dep_id) {
+            d.limits.kv_budget.store(budget, Ordering::SeqCst);
         }
     }
 
@@ -335,19 +402,21 @@ impl LocalScheduler {
         *self.inner.sharing_enabled.read().unwrap()
     }
 
-    /// Try to admit a request on a specific deployment.
+    /// Try to admit a request on a specific deployment. `footprint` is the
+    /// server's KV-token reservation for the request (0 = not counted).
     pub fn try_admit(
         &self,
         dep_id: &str,
         class: RequestClass,
         request_id: &str,
+        footprint: u64,
     ) -> Result<AdmitToken, RejectReason> {
         let map = self.inner.deployments.read().unwrap();
         let Some(dep) = map.get(dep_id) else {
             return Err(RejectReason::UnknownDeployment);
         };
         let sharing = *self.inner.sharing_enabled.read().unwrap();
-        dep.admit(class, sharing)?;
+        dep.admit(class, sharing, footprint)?;
         let cancel = CancellationToken::new();
         self.inner
             .request_cancels
@@ -359,6 +428,7 @@ impl LocalScheduler {
             class,
             sched: self.clone(),
             cancel,
+            footprint,
             _priv: (),
         })
     }
@@ -409,10 +479,10 @@ impl LocalScheduler {
             .remove(request_id);
     }
 
-    fn release(&self, dep_id: &str, class: RequestClass) {
+    fn release(&self, dep_id: &str, class: RequestClass, footprint: u64) {
         let map = self.inner.deployments.read().unwrap();
         if let Some(dep) = map.get(dep_id) {
-            dep.release(class);
+            dep.release(class, footprint);
         }
     }
 
@@ -447,6 +517,8 @@ impl LocalScheduler {
                         && d.limits.health_ok.load(Ordering::SeqCst) == 1
                         && d.limits.model_ready.load(Ordering::SeqCst) == 1,
                     pressure_gated: d.limits.tier2_gate_closed.load(Ordering::SeqCst) == 1,
+                    kv_budget_tokens: d.limits.kv_budget.load(Ordering::SeqCst),
+                    kv_used_tokens: d.counters.kv_used.load(Ordering::SeqCst),
                 }
             })
             .collect()
@@ -575,6 +647,10 @@ pub struct DeploymentCapacityInfo {
     pub accepting: bool,
     /// Closed by the system-pressure monitor (cpu/ram over configured limits).
     pub pressure_gated: bool,
+    /// Adapter-measured KV token capacity (0 = unknown/unmeasurable).
+    pub kv_budget_tokens: u64,
+    /// Tier-2 token footprints currently reserved.
+    pub kv_used_tokens: u64,
 }
 
 #[cfg(test)]
@@ -606,7 +682,7 @@ mod tests {
         // defaults: optimistic → accepting + admit ok
         assert!(s.capacity_snapshot()[0].accepting);
         {
-            let _tok = s.try_admit("d1", RequestClass::Tier2, "r0").unwrap();
+            let _tok = s.try_admit("d1", RequestClass::Tier2, "r0", 0).unwrap();
         } // token drop releases the slot
 
         // backend down → admit rejected + not accepting + health reports down
@@ -614,7 +690,7 @@ mod tests {
         let snap = &s.capacity_snapshot()[0];
         assert!(!snap.accepting && !snap.health_ok && snap.health == "down");
         assert!(matches!(
-            s.try_admit("d1", RequestClass::Tier2, "r1"),
+            s.try_admit("d1", RequestClass::Tier2, "r1", 0),
             Err(RejectReason::BackendDown)
         ));
 
@@ -622,7 +698,7 @@ mod tests {
         assert!(s.set_dep_ready("d1", crate::adapters::Health::Healthy, false));
         assert_eq!(s.capacity_snapshot()[0].health, "healthy");
         assert!(matches!(
-            s.try_admit("d1", RequestClass::Tier2, "r2"),
+            s.try_admit("d1", RequestClass::Tier2, "r2", 0),
             Err(RejectReason::BackendDown)
         ));
         assert!(!s.capacity_snapshot()[0].accepting);
@@ -634,7 +710,7 @@ mod tests {
 
         // local requests are never gated by backend health
         assert!(s.set_dep_ready("d1", crate::adapters::Health::Down, false));
-        assert!(s.try_admit("d1", RequestClass::Local, "r3").is_ok());
+        assert!(s.try_admit("d1", RequestClass::Local, "r3", 0).is_ok());
     }
 
     #[test]
@@ -647,7 +723,7 @@ mod tests {
         // gate closes only shared deployments, never private or local class
         assert!(s.apply_pressure_gate(true));
         assert!(matches!(
-            s.try_admit("d1", RequestClass::Tier2, "r1"),
+            s.try_admit("d1", RequestClass::Tier2, "r1", 0),
             Err(RejectReason::AdmissionClosed)
         ));
         let snap = s.capacity_snapshot();
@@ -664,18 +740,18 @@ mod tests {
                 .unwrap()
                 .pressure_gated
         );
-        assert!(s.try_admit("d1", RequestClass::Local, "r2").is_ok());
+        assert!(s.try_admit("d1", RequestClass::Local, "r2", 0).is_ok());
         s.finish_request("r2");
 
         // in-flight local request keeps the deployment off the idle list
-        let _held = s.try_admit("d1", RequestClass::Local, "r3").unwrap();
+        let _held = s.try_admit("d1", RequestClass::Local, "r3", 0).unwrap();
         assert!(!s.idle_deployments().contains(&"d1".to_string()));
         drop(_held);
 
         // no change when state already reached; reopen restores admission
         assert!(!s.apply_pressure_gate(true));
         assert!(s.apply_pressure_gate(false));
-        assert!(s.try_admit("d1", RequestClass::Tier2, "r4").is_ok());
+        assert!(s.try_admit("d1", RequestClass::Tier2, "r4", 0).is_ok());
         let snap = s.capacity_snapshot();
         assert!(
             !snap

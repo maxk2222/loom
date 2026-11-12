@@ -368,7 +368,32 @@ impl ClientRegistry {
             if !cap.health.is_empty() {
                 h.arg("health").arg(&cap.health);
             }
+            // Client-observed backend KV usage — telemetry/drift signal only.
+            // `kv_used` itself stays server-authoritative (lease footprint
+            // sums), otherwise a stale report would corrupt admission.
+            if cap.kv_used_tokens > 0 {
+                h.arg("kv_reported_used").arg(cap.kv_used_tokens);
+            }
             let _: () = h.query_async(&mut c).await?;
+            // Adapter-derived budget feeds the effective budget when no admin
+            // override exists. 0 = client cannot measure → leave stored value.
+            if cap.kv_budget_tokens > 0 {
+                let res: Result<_, _> = sqlx::query(
+                    "UPDATE deployments SET reported_kv_budget_tokens = $2 \
+                     WHERE id = $1::uuid \
+                       AND reported_kv_budget_tokens IS DISTINCT FROM $2",
+                )
+                .bind(&cap.deployment_id)
+                .bind(cap.kv_budget_tokens as i64)
+                .execute(&self.db)
+                .await;
+                // Only repatch the routing snapshot when the stored value
+                // actually changed — the COALESCE read belongs to the
+                // registry so the admin override always wins correctly.
+                if res.map(|r| r.rows_affected() > 0).unwrap_or(false) {
+                    self.models.patch_kv_budget(&cap.deployment_id).await;
+                }
+            }
         }
         // wake the scheduler
         self.rt.publish("ev:capacity", "1").await.ok();
@@ -452,6 +477,7 @@ impl ClientRegistry {
                 .unwrap_or(0),
             client_id: m.get("client_id").cloned().unwrap_or_default(),
             pressure_gated: m.get("pressure_gated").map(|v| v == "1").unwrap_or(false),
+            kv_used: m.get("kv_used").and_then(|v| v.parse().ok()).unwrap_or(0),
         }))
     }
 
@@ -557,6 +583,8 @@ pub struct DepRuntime {
     pub client_id: String,
     /// Closed by the client's local pressure monitor (cpu/ram over limits).
     pub pressure_gated: bool,
+    /// Server-side KV tokens currently reserved by live leases.
+    pub kv_used: i64,
 }
 
 /// pb::Capabilities → the JSON shape stored in deployments.capabilities and

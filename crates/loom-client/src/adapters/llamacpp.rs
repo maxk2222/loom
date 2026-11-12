@@ -53,6 +53,27 @@ impl BackendAdapter for LlamaCppAdapter {
         self.generic.probe_capabilities(model).await
     }
 
+    /// llama.cpp has one shared context pool: `/props` reports the
+    /// server-wide `n_ctx` (default_generation_settings) — the pool itself,
+    /// not per-slot.
+    async fn kv_budget_tokens(&self, _model: &str, _slots: u32) -> u64 {
+        let url = format!("{}/props", self.endpoint());
+        let mut req = self.http.get(&url).timeout(Duration::from_secs(5));
+        if !self.cfg.api_key.is_empty() {
+            req = req.bearer_auth(&self.cfg.api_key);
+        }
+        let Ok(resp) = req.send().await else {
+            return 0;
+        };
+        if !resp.status().is_success() {
+            return 0;
+        }
+        let v: Value = resp.json().await.unwrap_or_default();
+        v["default_generation_settings"]["n_ctx"]
+            .as_u64()
+            .unwrap_or(0)
+    }
+
     async fn health(&self) -> Health {
         // Native /health endpoint is cheap and unauthenticated.
         let req = self

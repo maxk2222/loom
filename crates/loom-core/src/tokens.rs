@@ -108,6 +108,31 @@ pub fn estimate_request_tokens(body: &serde_json::Value) -> u32 {
     0
 }
 
+/// Request KV footprint: the tokens a lease should reserve on a deployment.
+/// `prompt estimate + min(requested output, output_reserve) + margin%`.
+/// `max_tokens`/`max_completion_tokens` cap the output reservation; absent
+/// values fall back to `output_reserve` so under-specified requests still
+/// reserve honest headroom. The margin absorbs estimate error (±20% BPE
+/// drift) — it is intentionally part of the reservation rather than a
+/// separate budget bump so `kv_used` stays the sum of lease footprints.
+pub fn request_footprint(body: &serde_json::Value, output_reserve: u64, margin_pct: u64) -> u64 {
+    let prompt = estimate_request_tokens(body) as u64;
+    let requested = body
+        .get("max_tokens")
+        .or_else(|| body.get("max_completion_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(output_reserve);
+    let out = requested.min(output_reserve);
+    let base = prompt + out;
+    base + (base * margin_pct / 100)
+}
+
+/// Flat footprint for non-text apis (embeddings, images, audio, video):
+/// no KV growth, but the lease still occupies scheduler bookkeeping.
+pub fn flat_footprint() -> u64 {
+    512
+}
+
 /// Estimate tokens for one part of a multimodal `content` array.
 /// Image numbers follow the OpenAI tiling convention (low≈85, high≈765+),
 /// which is also a reasonable proxy for how LM Studio/vLLM account vision

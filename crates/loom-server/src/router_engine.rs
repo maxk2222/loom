@@ -223,6 +223,7 @@ async fn classify(
         return Ok(hit);
     }
     let body = classify_body(router_model, &system, excerpt, cfg);
+    let footprint = sched.footprint(ApiType::Chat, &body);
     let now = crate::client_registry::now_ms();
     let pending = PendingRequest {
         request_id: RequestId::new(),
@@ -236,6 +237,7 @@ async fn classify(
         enqueue_ts: now,
         deadline_ts: now + deadline_ms.min(10_000), // router calls stay cheap
         sticky: String::new(),                      // engine calls never take the affinity slot
+        footprint_tokens: footprint,
     };
     let out = sched.submit(pending).await.map_err(sched_msg)?;
     let mut rx = out.response_rx;

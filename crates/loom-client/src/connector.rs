@@ -1079,6 +1079,7 @@ impl Connector {
                 dd.local_reserve,
                 dd.sharing_mode,
                 dd.enabled,
+                dd.kv_budget_tokens,
             );
         }
         if desired
@@ -1171,10 +1172,12 @@ impl Connector {
                 return;
             }
             // Admission check.
-            let admit =
-                state
-                    .scheduler
-                    .try_admit(&a.deployment_id, RequestClass::Tier2, &request_id);
+            let admit = state.scheduler.try_admit(
+                &a.deployment_id,
+                RequestClass::Tier2,
+                &request_id,
+                a.footprint_tokens,
+            );
 
             match admit {
                 Ok(token) => {
@@ -1203,10 +1206,14 @@ impl Connector {
                     run_request(state.clone(), agent.clone(), a, token, ctrl_tx).await;
                 }
                 Err(r) => {
+                    // Transient rejections let the server retry/defer —
+                    // kv_full sits in the same class as no_capacity: the
+                    // budget frees as running requests finish.
                     let retryable = matches!(
                         r,
                         crate::scheduler::RejectReason::NoCapacity
                             | crate::scheduler::RejectReason::AdmissionClosed
+                            | crate::scheduler::RejectReason::KvFull
                     );
                     let _ = ctrl_tx
                         .send(client_msgs::assign_reject(
@@ -1307,6 +1314,8 @@ fn capacity_to_pb(c: &crate::scheduler::DeploymentCapacityInfo) -> DeploymentCap
         accepting: c.accepting,
         pressure_gated: c.pressure_gated,
         health: c.health.into(),
+        kv_budget_tokens: c.kv_budget_tokens,
+        kv_used_tokens: c.kv_used_tokens,
     }
 }
 
@@ -1412,6 +1421,7 @@ async fn run_request(
         let mut finish_reason = String::new();
         let mut saw_output = false;
         let mut stream = resp.stream;
+        let mut last_usage_sent = 0u64;
 
         // Bridge upstream bytes -> response_chunk frames, until End.
         loop {
@@ -1433,6 +1443,16 @@ async fn run_request(
                     debug!(req = %request_id, n = bytes.len(), "upstream chunk → data stream");
                     // Opportunistically parse usage/finish from SSE tail.
                     inspect_sse_tail(&bytes, &mut usage, &mut finish_reason, &mut saw_output);
+                    // Converge the server's token reservation toward the
+                    // backend's real cumulative usage — long generations
+                    // outgrow the submit-time estimate.
+                    let total = u64::from(usage.prompt_tokens) + u64::from(usage.completion_tokens);
+                    if total > last_usage_sent {
+                        last_usage_sent = total;
+                        let _ = ctrl_tx
+                            .send(client_msgs::lease_usage(&request_id, total))
+                            .await;
+                    }
                     if data_tx
                         .send(frames::response_chunk(bytes.to_vec()))
                         .await

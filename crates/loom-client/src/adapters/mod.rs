@@ -98,6 +98,18 @@ pub trait BackendAdapter: Send + Sync {
     /// Probe capabilities of a specific model on this backend.
     async fn probe_capabilities(&self, model: &str) -> Result<Capabilities, AdapterError>;
 
+    /// KV token capacity this deployment can hold concurrently — the
+    /// sharing budget the server advertises/gates on. `slots` is the
+    /// deployment's max_concurrent: engines that give each request its own
+    /// context window (Ollama, LM Studio, generic OpenAI) scale their
+    /// per-request context by it; engines with one shared KV pool
+    /// (vLLM, llama.cpp) return the pool size directly. 0 = cannot
+    /// measure → budget admission is skipped (slot-only mode).
+    async fn kv_budget_tokens(&self, model: &str, slots: u32) -> u64 {
+        let _ = (model, slots);
+        0
+    }
+
     /// Health check of the backend endpoint.
     async fn health(&self) -> Health;
 

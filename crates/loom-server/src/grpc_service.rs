@@ -233,6 +233,11 @@ pub(crate) fn control_stream(
                             .await;
                     }
                 }
+                client_envelope::Msg::LeaseUsage(l) => {
+                    this.scheduler
+                        .update_lease_fp(&l.request_id, l.tokens_used)
+                        .await;
+                }
                 client_envelope::Msg::Pong(_) => {}
                 client_envelope::Msg::Hello(_) => {}
             }

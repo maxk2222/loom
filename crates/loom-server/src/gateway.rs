@@ -272,6 +272,8 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         serde_json::to_vec(&body).unwrap_or_else(|_| body_bytes.to_vec())
     };
     let now = crate::client_registry::now_ms();
+    let footprint = s.scheduler.footprint(api, &body);
+    crate::metrics::lease_fp(footprint as f64);
     let pending = PendingRequest {
         request_id: RequestId::parse(&request_id).unwrap_or_default(),
         api,
@@ -292,6 +294,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
             .and_then(|u| u.as_str())
             .unwrap_or("")
             .to_string(),
+        footprint_tokens: footprint,
     };
 
     let started = Instant::now();
@@ -572,6 +575,7 @@ fn sched_err(e: SchedErr, rid: &str) -> Response {
         SchedErr::Rejected(_) => "rejected",
         SchedErr::Timeout => "timeout",
         SchedErr::Cancelled => "cancelled",
+        SchedErr::ContextTooLarge => "context_too_large",
         SchedErr::Backend(_) => "backend_error",
     });
     let (code, msg): (ErrorCode, String) = match e {
@@ -583,6 +587,10 @@ fn sched_err(e: SchedErr, rid: &str) -> Response {
         SchedErr::Rejected(r) => (ErrorCode::Unavailable, r),
         SchedErr::Timeout => (ErrorCode::RequestTimeout, "request timeout".into()),
         SchedErr::Cancelled => (ErrorCode::Cancelled, "cancelled".into()),
+        SchedErr::ContextTooLarge => (
+            ErrorCode::InvalidRequest,
+            "request exceeds the context capacity of every deployment".into(),
+        ),
         SchedErr::Backend(m) => (ErrorCode::UpstreamError, m),
     };
     err(code, msg, rid)

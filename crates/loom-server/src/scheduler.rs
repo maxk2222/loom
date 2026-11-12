@@ -41,6 +41,10 @@ pub enum SchedErr {
     Timeout,
     #[error("cancelled")]
     Cancelled,
+    /// Request footprint exceeds every candidate's KV budget — a structural
+    /// "will never fit" verdict that must fail fast instead of queueing.
+    #[error("request footprint exceeds every deployment budget")]
+    ContextTooLarge,
     #[error("backend: {0}")]
     Backend(String),
 }
@@ -62,6 +66,9 @@ pub struct PendingRequest {
     /// KV-cache affinity key (OpenAI `user` field): same key prefers the same
     /// member while the candidate set is stable — a hint, never a guarantee.
     pub sticky: String,
+    /// Reserved KV tokens for budget admission (0 = non-LLM api / unset).
+    /// Computed once in the gateway; travels through queue/requeue unchanged.
+    pub footprint_tokens: u64,
 }
 
 pub struct RequestOutcome {
@@ -113,8 +120,9 @@ struct Inner {
     acks: Mutex<HashMap<String, oneshot::Sender<(bool, String)>>>,
     /// request_id -> RequestEnd channel.
     ends: Mutex<HashMap<String, oneshot::Sender<EndMeta>>>,
-    /// request_id -> owning client + fencing (for cancel routing).
-    active: Mutex<HashMap<String, (String, u64)>>,
+    /// request_id -> (client_id, fencing, lease_id, dep_id) — cancel routing
+    /// plus mid-flight lease footprint updates.
+    active: Mutex<HashMap<String, (String, u64, String, String)>>,
 }
 
 impl Scheduler {
@@ -214,6 +222,41 @@ impl Scheduler {
         self.inner.sessions.drop_expectation(request_id).await;
     }
 
+    /// KV tokens a request of this api/body reserves under the deployment
+    /// budget. Only generative text apis grow KV state; embeddings and
+    /// media get a flat bookkeeping footprint so admission still counts them.
+    pub fn footprint(&self, api: loom_core::capability::ApiType, body: &serde_json::Value) -> u64 {
+        use loom_core::capability::ApiType;
+        match api {
+            ApiType::Chat | ApiType::Completions => loom_core::tokens::request_footprint(
+                body,
+                self.inner.cfg.kv_output_reserve_tokens,
+                self.inner.cfg.kv_margin_pct,
+            ),
+            _ => loom_core::tokens::flat_footprint(),
+        }
+    }
+
+    /// Mid-flight footprint correction: a client's cumulative token usage
+    /// report converges the lease reservation toward real KV consumption —
+    /// the submit-time estimate is replaced by truth so the budget gate
+    /// tracks reality during long decodes. Monotonic on the lease side.
+    pub async fn update_lease_fp(&self, request_id: &str, tokens_used: u64) {
+        let Some((_, fencing, lease_id, dep_id)) =
+            self.inner.active.lock().await.get(request_id).cloned()
+        else {
+            return;
+        };
+        let mut c = self.inner.rt.conn.clone();
+        let _: Result<redis::Value, _> = redis::Script::new(crate::lua::LEASE_FP_UPDATE)
+            .key(self.inner.rt.k(&format!("lease:{lease_id}")))
+            .key(self.inner.rt.k(&format!("dep:{dep_id}")))
+            .arg(fencing)
+            .arg(tokens_used.min(i64::MAX as u64) as i64)
+            .invoke_async(&mut c)
+            .await;
+    }
+
     /// Deliver an incoming client RequestData stream to the waiting dispatcher.
     pub async fn deliver_data(
         &self,
@@ -235,7 +278,8 @@ impl Scheduler {
     /// Admin/caller abort: cancel if active (send CancelRequest to client),
     /// or drop from queue if still waiting.
     pub async fn cancel(&self, request_id: &str) -> bool {
-        if let Some((client_id, fencing)) = self.inner.active.lock().await.get(request_id).cloned()
+        if let Some((client_id, fencing, _, _)) =
+            self.inner.active.lock().await.get(request_id).cloned()
         {
             let _ = self
                 .inner
@@ -438,12 +482,14 @@ impl Scheduler {
             }
         }
         // b) expired reserved leases on all known deployments
-        let dep_ids: Vec<String> =
-            sqlx::query_scalar("SELECT id::text FROM deployments WHERE enabled = true")
-                .fetch_all(&self.inner.registry.db)
-                .await
-                .unwrap_or_default();
-        for dep in dep_ids {
+        let deps: Vec<(String, Option<i64>)> = sqlx::query_as(
+            "SELECT id::text, COALESCE(kv_budget_tokens, reported_kv_budget_tokens) \
+             FROM deployments WHERE enabled = true",
+        )
+        .fetch_all(&self.inner.registry.db)
+        .await
+        .unwrap_or_default();
+        for (dep, kv_budget) in deps {
             let swept: Vec<String> = redis::Script::new(crate::lua::LEASE_SWEEP)
                 .key(self.inner.rt.k(&format!("dep:{dep}")))
                 .key(self.inner.rt.k(&format!("dep:{dep}:leases")))
@@ -455,6 +501,19 @@ impl Scheduler {
                 // reserved lease died → dispatcher retries next candidate
                 self.handle_assign_ack(&rid, false, "lease_expired").await;
             }
+            // KV accounting gauges — exported on the same tick so Grafana
+            // tracks budget consumption next to slot pressure.
+            let kv_used: Option<i64> = redis::cmd("HGET")
+                .arg(self.inner.rt.k(&format!("dep:{dep}")))
+                .arg("kv_used")
+                .query_async(&mut c)
+                .await
+                .unwrap_or(None);
+            crate::metrics::dep_kv(
+                &dep,
+                kv_used.unwrap_or(0) as f64,
+                kv_budget.unwrap_or(0) as f64,
+            );
             // c) active leases past the stream idle timeout → free slot +
             // fail the request (backend hang would otherwise burn the slot).
             let deadline = self.inner.cfg.stream_idle_timeout_secs as i64 * 1000;
@@ -469,7 +528,7 @@ impl Scheduler {
             for rid in timed_out {
                 // Tell the owning client to abort too — the request is dead
                 // server-side but its backend call may still be running.
-                if let Some((client_id, fencing)) =
+                if let Some((client_id, fencing, _, _)) =
                     self.inner.active.lock().await.get(&rid).cloned()
                 {
                     let _ = self
@@ -685,6 +744,17 @@ impl Scheduler {
         if candidates.is_empty() {
             return Err(SchedErr::NoCandidates);
         }
+        // Structural check before routing: when the footprint exceeds every
+        // member's KV budget this request can never dispatch — fail fast
+        // instead of blocking the queue head until its deadline. Members
+        // without a budget (slot-only mode) always "fit".
+        let fits_anywhere = candidates.iter().any(|m| {
+            m.kv_budget
+                .is_none_or(|b| b <= 0 || req.footprint_tokens <= b as u64)
+        });
+        if !fits_anywhere {
+            return Err(SchedErr::ContextTooLarge);
+        }
         let strategy = Strategy::parse(
             &self
                 .inner
@@ -801,6 +871,8 @@ impl Scheduler {
             .arg(self.inner.cfg.lease_ttl_secs as i64 * 1000)
             .arg(crate::client_registry::now_ms())
             .arg(0)
+            .arg(req.footprint_tokens as i64)
+            .arg(member.kv_budget.unwrap_or(0))
             .invoke_async(&mut c)
             .await
             .map_err(|e| SchedErr::Backend(e.to_string()))?;
@@ -809,6 +881,17 @@ impl Scheduler {
                 Some(redis::Value::Int(i)) => *i as u64,
                 _ => 0,
             },
+            // KV_FULL shares the transient-defer path with slot exhaustion —
+            // the budget frees as running requests finish. The distinct
+            // return code exists so debug logs can tell them apart.
+            redis::Value::SimpleString(s) if s == "KV_FULL" => {
+                tracing::debug!(req = %req.request_id, dep = %dep_id, fp = req.footprint_tokens, "member kv budget full");
+                return Err(SchedErr::NoCapacity);
+            }
+            redis::Value::BulkString(b) if b == b"KV_FULL" => {
+                tracing::debug!(req = %req.request_id, dep = %dep_id, fp = req.footprint_tokens, "member kv budget full");
+                return Err(SchedErr::NoCapacity);
+            }
             redis::Value::SimpleString(s) if s == "NO_CAPACITY" => {
                 return Err(SchedErr::NoCapacity)
             }
@@ -851,6 +934,7 @@ impl Scheduler {
             &req.model,
             &dep_id,
             &req.content_type,
+            req.footprint_tokens,
         );
         if self.inner.sessions.send(&client_id, assign).await.is_err() {
             self.cleanup_assign(&rid, &lease_id, fencing, &dep_id).await;
@@ -902,11 +986,10 @@ impl Scheduler {
                 }
             };
 
-        self.inner
-            .active
-            .lock()
-            .await
-            .insert(rid.clone(), (client_id.clone(), fencing));
+        self.inner.active.lock().await.insert(
+            rid.clone(),
+            (client_id.clone(), fencing, lease_id.clone(), dep_id.clone()),
+        );
 
         // Bridge task: send request payload via outbound frames, read
         // response_chunk frames from inbound into resp channel.

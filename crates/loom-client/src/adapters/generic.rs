@@ -199,6 +199,19 @@ impl BackendAdapter for GenericAdapter {
         )
     }
 
+    /// LM Studio's registry reports `max_context_length` per model; each
+    /// request gets its own context window → ctx × slots. Plain
+    /// OpenAI-compatible servers expose no capacity signal → 0.
+    async fn kv_budget_tokens(&self, model: &str, slots: u32) -> u64 {
+        let Ok(Some(info)) = self.lmstudio_model_info(model).await else {
+            return 0;
+        };
+        info["max_context_length"]
+            .as_u64()
+            .map(|ctx| ctx * u64::from(slots.max(1)))
+            .unwrap_or(0)
+    }
+
     async fn health(&self) -> Health {
         let url = format!("{}/v1/models", self.endpoint());
         match common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(5)).await {

@@ -18,3 +18,10 @@ pub fn queue_len(n: f64) {
 pub fn clients_online(n: f64) {
     gauge!("loom_clients_online").set(n);
 }
+pub fn dep_kv(dep: &str, used: f64, budget: f64) {
+    gauge!("loom_deployment_kv_used_tokens", "deployment" => dep.to_string()).set(used);
+    gauge!("loom_deployment_kv_budget_tokens", "deployment" => dep.to_string()).set(budget);
+}
+pub fn lease_fp(n: f64) {
+    histogram!("loom_lease_footprint_tokens").record(n);
+}

@@ -124,7 +124,10 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/notes/{id}", delete(delete_note))
         // deployments
         .route("/api/deployments", get(list_deployments))
-        .route("/api/deployments/{id}", delete(delete_deployment))
+        .route(
+            "/api/deployments/{id}",
+            put(update_deployment).delete(delete_deployment),
+        )
         // virtual models
         .route("/api/models", get(list_vms).post(create_vm))
         .route(
@@ -981,10 +984,13 @@ async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
         bool,
         String,
         Value,
+        Option<i64>,
+        Option<i64>,
     );
     let rows: Vec<DepRow> = sqlx::query_as(
         "SELECT d.id, d.client_id, d.name, d.backend_type, d.model_name, d.enabled,
-                    c.name AS client_name, d.capabilities
+                    c.name AS client_name, d.capabilities,
+                    d.kv_budget_tokens, d.reported_kv_budget_tokens
              FROM deployments d LEFT JOIN clients c ON c.id = d.client_id ORDER BY d.name",
     )
     .fetch_all(&s.db)
@@ -1009,7 +1015,7 @@ async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
             .await
             .unwrap_or_default();
     let mut out = Vec::new();
-    for (id, cid, n, bt, mn, en, cn, caps) in rows {
+    for (id, cid, n, bt, mn, en, cn, caps, kvb, rkvb) in rows {
         let dep_id = id.to_string();
         let rt = s.registry.dep_runtime(&dep_id).await.ok().flatten();
         let mut referenced_by = ref_map.remove(&dep_id).unwrap_or_default();
@@ -1026,7 +1032,9 @@ async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
         }
         out.push(json!({"id":id,"client_id":cid,"client_name":cn,"name":n,"backend_type":bt,"model_name":mn,"enabled":en,
             "capabilities": caps, "referenced_by": referenced_by,
-            "runtime": rt.map(|r| json!({"state":r.state,"tier2_free":r.tier2_free,"tier2_total":r.tier2_total,"pressure_gated":r.pressure_gated}))}));
+            "kv_budget_tokens": kvb, "reported_kv_budget_tokens": rkvb,
+            "kv_budget_effective": kvb.or(rkvb),
+            "runtime": rt.map(|r| json!({"state":r.state,"tier2_free":r.tier2_free,"tier2_total":r.tier2_total,"pressure_gated":r.pressure_gated,"kv_used":r.kv_used}))}));
     }
     Json(json!({"deployments": out}))
 }
@@ -1251,6 +1259,88 @@ async fn delete_deployment(
         "referenced_by": referenced_by,
     }))
     .into_response()
+}
+
+/// Update deployment fields the dashboard owns. Currently the only
+/// server-side knob is the KV token budget override — `kv_budget_tokens`
+/// accepts a positive integer, or null/0 to clear the override and fall
+/// back to the client-reported adapter budget (or slot-only admission).
+async fn update_deployment(
+    State(s): State<AdminState>,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Response {
+    let get = |k: &str| b.get(k).cloned().unwrap_or(Value::Null);
+    // null / 0 / absent -> clear the override; >0 -> set it
+    let budget: Option<i64> = match get("kv_budget_tokens").as_i64() {
+        Some(v) if v > 0 => Some(v),
+        _ => None,
+    };
+    let res = sqlx::query(
+        "UPDATE deployments SET kv_budget_tokens = $2, updated_at = now() \
+         WHERE id = $1::uuid",
+    )
+    .bind(&id)
+    .bind(budget)
+    .execute(&s.db)
+    .await;
+    match res {
+        Ok(r) if r.rows_affected() > 0 => {
+            // The routing snapshot carries the effective budget — reload so
+            // the next dispatch sees the new value immediately.
+            let _ = s.models.reload().await;
+            // Mirror the *effective* budget (override ?? adapter-reported)
+            // into the owning client's desired state — its local admission
+            // backstop must gate on the same number the server does.
+            let row: Option<(String, Option<i64>)> = sqlx::query_as(
+                "SELECT client_id::text, reported_kv_budget_tokens \
+                 FROM deployments WHERE id = $1::uuid",
+            )
+            .bind(&id)
+            .fetch_optional(&s.db)
+            .await
+            .unwrap_or(None);
+            if let Some((cid, reported)) = row {
+                let effective = budget.or(reported).unwrap_or(0);
+                let path = format!("{{deployments,{id}}}");
+                let pushed: Option<(i64, Value)> = sqlx::query_as(
+                    "UPDATE clients SET desired_config = jsonb_set(
+                         jsonb_set(COALESCE(desired_config,'{}'::jsonb), '{deployments}',
+                                   COALESCE(desired_config->'deployments','{}'::jsonb), true),
+                         $2::text[],
+                         COALESCE(desired_config->'deployments'->$3,'{}'::jsonb) || $4::jsonb,
+                         true),
+                         config_version = config_version + 1
+                     WHERE id = $1::uuid RETURNING config_version, desired_config",
+                )
+                .bind(&cid)
+                .bind(&path)
+                .bind(&id)
+                .bind(json!({"kv_budget_tokens": effective}))
+                .fetch_optional(&s.db)
+                .await
+                .unwrap_or(None);
+                if let Some((version, desired)) = pushed {
+                    let payload = serde_json::to_vec(&desired).unwrap_or_else(|_| b"{}".to_vec());
+                    let _ = s
+                        .sessions
+                        .send(
+                            &cid,
+                            loom_protocol::server_msgs::config_push(
+                                version.max(0) as u64,
+                                payload,
+                                false,
+                            ),
+                        )
+                        .await;
+                }
+            }
+            audit(&s.db, "deployment", "update", &id).await;
+            Json(json!({"ok": true, "kv_budget_tokens": budget})).into_response()
+        }
+        Ok(_) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 async fn list_vms(State(s): State<AdminState>) -> Json<Value> {

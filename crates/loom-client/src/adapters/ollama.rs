@@ -94,6 +94,38 @@ impl BackendAdapter for OllamaAdapter {
         Some(models)
     }
 
+    /// Ollama gives every request its own context window — the deployment
+    /// envelope is context_length × parallel slots. `/api/ps` reports the
+    /// *effective* loaded context (env overrides like OLLAMA_CONTEXT_LENGTH
+    /// only show up there); `/api/show` carries the model's default.
+    async fn kv_budget_tokens(&self, model: &str, slots: u32) -> u64 {
+        let mut ctx = 0u64;
+        let url = format!("{}/api/ps", self.endpoint());
+        if let Ok(v) =
+            common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(5)).await
+        {
+            ctx = v["models"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|m| m["name"].as_str() == Some(model) || m["model"].as_str() == Some(model))
+                .and_then(|m| m["context_length"].as_u64())
+                .unwrap_or(0);
+        }
+        if ctx == 0 {
+            if let Some(info) = self.show(model).await {
+                if let Some(mi) = info.get("model_info").and_then(|v| v.as_object()) {
+                    ctx = mi
+                        .iter()
+                        .find(|(k, _)| k.ends_with("context_length"))
+                        .and_then(|(_, v)| v.as_u64())
+                        .unwrap_or(0);
+                }
+            }
+        }
+        ctx * u64::from(slots.max(1))
+    }
+
     async fn probe_capabilities(&self, model: &str) -> Result<Capabilities, AdapterError> {
         let mut caps = Capabilities {
             chat: true,

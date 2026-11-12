@@ -59,7 +59,10 @@ export interface DeploymentRow {
   model_name: string;
   enabled: boolean;
   capabilities?: Record<string, unknown> | null;
-  runtime?: { state: string; tier2_free: number; tier2_total: number; pressure_gated?: boolean } | null;
+  kv_budget_tokens?: number | null;
+  reported_kv_budget_tokens?: number | null;
+  kv_budget_effective?: number | null;
+  runtime?: { state: string; tier2_free: number; tier2_total: number; pressure_gated?: boolean; kv_used?: number } | null;
 }
 
 export interface VirtualModel {

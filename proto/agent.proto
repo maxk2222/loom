@@ -27,6 +27,7 @@ message ClientEnvelope {
     RequestEnd request_end = 7;
     ErrorReport error_report = 8;
     Pong pong = 9;
+    LeaseUsage lease_usage = 10;
   }
 }
 
@@ -146,6 +147,13 @@ message DeploymentCapacity {
   // fail fast) — stale inventory otherwise leaves health="unknown" while
   // state="draining" keeps requests queued forever.
   string health = 9;
+  // Adapter-derived KV capacity in tokens (vLLM GPU blocks, Ollama
+  // ctx×parallel, ...). 0 = unknown/not measured. The server uses it as the
+  // deployment's effective token budget unless an admin override is set.
+  uint64 kv_budget_tokens = 10;
+  // Backend-reported KV tokens currently in use (0 = unknown). Drift
+  // signal against the server's reservation-based accounting.
+  uint64 kv_used_tokens = 11;
 }
 
 message InventoryReport {
@@ -234,6 +242,7 @@ message AssignRequest {
   string virtual_model = 8;
   string deployment_id = 9;          // the leased deployment the client must use
   string content_type = 10;          // request body media type; empty = application/json
+  uint64 footprint_tokens = 11;      // server-estimated KV tokens this request reserves
 }
 
 message RequiredCaps {
@@ -279,6 +288,14 @@ message ErrorReport {
   string request_id = 1;             // may be empty for non-request errors
   string code = 2;
   string message = 3;
+}
+
+// Mid-flight real token usage: the client forwards cumulative
+// prompt+completion tokens observed in upstream usage chunks so the server
+// can converge the lease's token reservation from estimate to actual.
+message LeaseUsage {
+  string request_id = 1;
+  uint64 tokens_used = 2;            // cumulative prompt + completion tokens
 }
 
 // ---------------------------------------------------------------------------
