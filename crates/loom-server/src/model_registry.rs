@@ -42,6 +42,10 @@ pub struct Member {
     /// Effective KV budget in tokens: admin override falling back to the
     /// client-reported adapter capacity. None = slot-only admission.
     pub kv_budget: Option<i64>,
+    /// How concurrency is bounded: "auto" (token gate when budget exists),
+    /// "slots" (concurrency-only, budget ignored), "tokens" (token gate
+    /// required — no budget = admits nothing).
+    pub admission_mode: String,
 }
 
 impl Member {
@@ -94,6 +98,7 @@ impl ModelRegistry {
             member_enabled: bool,
             dep_enabled: bool,
             kv_budget: Option<i64>,
+            admission_mode: String,
         }
 
         let vms: Vec<VmRow> = sqlx::query_as(
@@ -108,7 +113,8 @@ impl ModelRegistry {
             "SELECT m.virtual_model_id, m.deployment_id, d.client_id, d.model_name,
                     d.capabilities, m.priority, m.weight, m.manual_pinned,
                     m.enabled AS member_enabled, d.enabled AS dep_enabled,
-                    COALESCE(d.kv_budget_tokens, d.reported_kv_budget_tokens) AS kv_budget
+                    COALESCE(d.kv_budget_tokens, d.reported_kv_budget_tokens) AS kv_budget,
+                    COALESCE(d.admission_mode, 'auto') AS admission_mode
              FROM virtual_model_members m
              JOIN deployments d ON d.id = m.deployment_id
              ORDER BY m.priority",
@@ -133,6 +139,7 @@ impl ModelRegistry {
                     member_enabled: m.member_enabled,
                     dep_enabled: m.dep_enabled,
                     kv_budget: m.kv_budget,
+                    admission_mode: m.admission_mode,
                 });
         }
 

@@ -74,8 +74,10 @@ export default function OverviewPage() {
     queryFn: () => api.get<{ models: BreakdownRow[]; clients: BreakdownRow[]; keys: BreakdownRow[]; projects: BreakdownRow[] }>(`/api/stats/breakdown?window=${win}`),
     refetchInterval: 15000,
   });
-  const depCap = useQuery({ queryKey: ["deps"], queryFn: () => api.get<{ deployments: any[] }>("/api/deployments") });
-  const vms = useQuery({ queryKey: ["ov-vms"], queryFn: () => api.get<{ models: VirtualModel[] }>("/api/models") });
+  // Keys must match the owning pages ("deployments"/"vms") — a divergent
+  // key forks the cache and leaves this view permanently stale.
+  const depCap = useQuery({ queryKey: ["deployments"], queryFn: () => api.get<{ deployments: any[] }>("/api/deployments"), refetchInterval: 5000 });
+  const vms = useQuery({ queryKey: ["vms"], queryFn: () => api.get<{ models: VirtualModel[] }>("/api/models"), refetchInterval: 15000 });
 
   // Tick formatter per window: HH:mm for a day, "MM-DD HH:mm" for week/month,
   // "YYYY-MM-DD" beyond that.

@@ -62,6 +62,7 @@ export interface DeploymentRow {
   kv_budget_tokens?: number | null;
   reported_kv_budget_tokens?: number | null;
   kv_budget_effective?: number | null;
+  admission_mode?: "auto" | "slots" | "tokens";
   runtime?: { state: string; tier2_free: number; tier2_total: number; pressure_gated?: boolean; kv_used?: number } | null;
 }
 

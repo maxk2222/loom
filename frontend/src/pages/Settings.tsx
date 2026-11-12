@@ -56,6 +56,7 @@ export default function SettingsPage() {
     await api.put("/api/settings/scheduler", { value: s });
     setSaved("scheduler");
     setTimeout(() => setSaved(""), 2000);
+    qc.invalidateQueries({ queryKey: ["set-sched"] });
   };
 
   const saveHints = async (e: FormEvent) => {

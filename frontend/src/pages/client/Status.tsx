@@ -355,7 +355,7 @@ const WIN_MS: Record<string, number> = { "1h": 3.6e6, "6h": 21.6e6, "24h": 86.4e
 
 function ClientCharts() {
   const q = useQuery({ queryKey: ["client-hist"], queryFn: () => api.get<{ history: any[] }>("/local/api/history"), refetchInterval: 8000 });
-  const bk = useQuery({ queryKey: ["chart-backends"], queryFn: () => api.get<{ backends: LocalBackend[] }>("/local/api/backends"), refetchInterval: 30000 });
+  const bk = useQuery({ queryKey: ["client-backends"], queryFn: () => api.get<{ backends: LocalBackend[] }>("/local/api/backends"), refetchInterval: 30000 });
   const [win, setWin] = useState("24h");
   // History is a ~300-entry ring — filter client-side by the picked window.
   const rows = (q.data?.history ?? []).filter(r => Date.now() - r.ended_unix_ms <= WIN_MS[win]);

@@ -16,6 +16,7 @@ export default function DeploymentsPage() {
   const [pending, setPending] = useState<DeploymentRow | null>(null);
   const [editing, setEditing] = useState<DeploymentRow | null>(null);
   const [budgetInput, setBudgetInput] = useState("");
+  const [modeInput, setModeInput] = useState<"auto" | "slots" | "tokens">("auto");
   const [busy, setBusy] = useState(false);
   const q = useQuery({
     queryKey: ["deployments"],
@@ -26,6 +27,7 @@ export default function DeploymentsPage() {
   const openEdit = (d: DeploymentRow) => {
     setEditing(d);
     setBudgetInput(d.kv_budget_tokens ? String(d.kv_budget_tokens) : "");
+    setModeInput(d.admission_mode ?? "auto");
   };
 
   const saveBudget = async () => {
@@ -35,6 +37,7 @@ export default function DeploymentsPage() {
       const n = Number(budgetInput);
       await api.put(`/api/deployments/${editing.id}`, {
         kv_budget_tokens: Number.isFinite(n) && n > 0 ? Math.floor(n) : null,
+        admission_mode: modeInput,
       });
       qc.invalidateQueries({ queryKey: ["deployments"] });
       setEditing(null);
@@ -110,11 +113,15 @@ export default function DeploymentsPage() {
                           : "Not measured — click to set a budget"}
                       onClick={() => openEdit(d)}
                     >
-                      {d.kv_budget_effective ? (
+                      {d.admission_mode === "slots" ? (
+                        <span className="font-mono text-xs text-muted">slots</span>
+                      ) : d.kv_budget_effective ? (
                         <span className="font-mono text-xs">
                           {fmtTokens(d.runtime?.kv_used)}/{fmtTokens(d.kv_budget_effective)}
                           {d.kv_budget_tokens ? <span className="text-accent">*</span> : null}
                         </span>
+                      ) : d.admission_mode === "tokens" ? (
+                        <span className="font-mono text-xs text-warn">tokens — no budget</span>
                       ) : <span className="text-muted">—</span>}
                     </button>
                   </td>
@@ -138,6 +145,20 @@ export default function DeploymentsPage() {
             Concurrency scales with the budget and live request footprints — no
             backend-side context compression.
           </p>
+          <Field
+            label="Admission mode"
+            hint="auto = token gate when a budget exists · slots = concurrency only · tokens = budget required"
+          >
+            <select
+              className="input"
+              value={modeInput}
+              onChange={(e) => setModeInput(e.target.value as typeof modeInput)}
+            >
+              <option value="auto">auto — token gate when budgeted</option>
+              <option value="slots">slots — concurrency only</option>
+              <option value="tokens">tokens — budget required</option>
+            </select>
+          </Field>
           <Field
             label="Budget (tokens)"
             hint={`Leave empty to ${editing?.reported_kv_budget_tokens

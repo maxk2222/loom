@@ -749,8 +749,22 @@ impl Scheduler {
         // instead of blocking the queue head until its deadline. Members
         // without a budget (slot-only mode) always "fit".
         let fits_anywhere = candidates.iter().any(|m| {
-            m.kv_budget
-                .is_none_or(|b| b <= 0 || req.footprint_tokens <= b as u64)
+            match m.admission_mode.as_str() {
+                // Concurrency-only: the token gate is off entirely.
+                "slots" => true,
+                // Token gate REQUIRED: a member without a budget cannot
+                // honestly admit anything (budget may still arrive via a
+                // capacity report or admin override — count it as unfit
+                // here so it neither blocks nor falsely "fits").
+                "tokens" => m
+                    .kv_budget
+                    .is_some_and(|b| b > 0 && req.footprint_tokens <= b as u64),
+                // auto: token gate when a positive budget exists, slot-only
+                // otherwise.
+                _ => m
+                    .kv_budget
+                    .is_none_or(|b| b <= 0 || req.footprint_tokens <= b as u64),
+            }
         });
         if !fits_anywhere {
             return Err(SchedErr::ContextTooLarge);
@@ -858,6 +872,17 @@ impl Scheduler {
         let lease_id = LeaseId::new().to_string();
         let dep_id = member.deployment_id.clone();
         let client_id = member.client_id.clone();
+        // Resolve the effective budget by admission mode: "slots" disables
+        // the token gate (budget=0 → slot-only path in the script), "tokens"
+        // requires a positive budget — without one the member defers until
+        // a report/override lands.
+        let budget = match member.admission_mode.as_str() {
+            "slots" => 0,
+            _ => member.kv_budget.unwrap_or(0),
+        };
+        if member.admission_mode == "tokens" && budget <= 0 {
+            return Err(SchedErr::NoCapacity);
+        }
         let mut c = self.inner.rt.conn.clone();
 
         let res: redis::Value = redis::Script::new(crate::lua::LEASE_ACQUIRE)
@@ -872,7 +897,7 @@ impl Scheduler {
             .arg(crate::client_registry::now_ms())
             .arg(0)
             .arg(req.footprint_tokens as i64)
-            .arg(member.kv_budget.unwrap_or(0))
+            .arg(budget)
             .invoke_async(&mut c)
             .await
             .map_err(|e| SchedErr::Backend(e.to_string()))?;

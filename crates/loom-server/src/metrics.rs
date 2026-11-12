@@ -25,3 +25,8 @@ pub fn dep_kv(dep: &str, used: f64, budget: f64) {
 pub fn lease_fp(n: f64) {
     histogram!("loom_lease_footprint_tokens").record(n);
 }
+/// Actual total tokens (prompt + completion) per finished request — the
+/// heatmap source for "tokens per request over time".
+pub fn req_tokens(n: f64) {
+    histogram!("loom_request_tokens_total").record(n);
+}

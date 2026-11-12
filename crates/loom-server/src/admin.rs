@@ -986,11 +986,13 @@ async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
         Value,
         Option<i64>,
         Option<i64>,
+        String,
     );
     let rows: Vec<DepRow> = sqlx::query_as(
         "SELECT d.id, d.client_id, d.name, d.backend_type, d.model_name, d.enabled,
                     c.name AS client_name, d.capabilities,
-                    d.kv_budget_tokens, d.reported_kv_budget_tokens
+                    d.kv_budget_tokens, d.reported_kv_budget_tokens,
+                    d.admission_mode
              FROM deployments d LEFT JOIN clients c ON c.id = d.client_id ORDER BY d.name",
     )
     .fetch_all(&s.db)
@@ -1015,7 +1017,7 @@ async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
             .await
             .unwrap_or_default();
     let mut out = Vec::new();
-    for (id, cid, n, bt, mn, en, cn, caps, kvb, rkvb) in rows {
+    for (id, cid, n, bt, mn, en, cn, caps, kvb, rkvb, amode) in rows {
         let dep_id = id.to_string();
         let rt = s.registry.dep_runtime(&dep_id).await.ok().flatten();
         let mut referenced_by = ref_map.remove(&dep_id).unwrap_or_default();
@@ -1033,7 +1035,7 @@ async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
         out.push(json!({"id":id,"client_id":cid,"client_name":cn,"name":n,"backend_type":bt,"model_name":mn,"enabled":en,
             "capabilities": caps, "referenced_by": referenced_by,
             "kv_budget_tokens": kvb, "reported_kv_budget_tokens": rkvb,
-            "kv_budget_effective": kvb.or(rkvb),
+            "kv_budget_effective": kvb.or(rkvb), "admission_mode": amode,
             "runtime": rt.map(|r| json!({"state":r.state,"tier2_free":r.tier2_free,"tier2_total":r.tier2_total,"pressure_gated":r.pressure_gated,"kv_used":r.kv_used}))}));
     }
     Json(json!({"deployments": out}))
@@ -1276,12 +1278,19 @@ async fn update_deployment(
         Some(v) if v > 0 => Some(v),
         _ => None,
     };
+    // admission_mode: "auto" | "slots" | "tokens" (absent/invalid -> auto)
+    let mode: String = match get("admission_mode").as_str() {
+        Some("slots") => "slots".into(),
+        Some("tokens") => "tokens".into(),
+        _ => "auto".into(),
+    };
     let res = sqlx::query(
-        "UPDATE deployments SET kv_budget_tokens = $2, updated_at = now() \
-         WHERE id = $1::uuid",
+        "UPDATE deployments SET kv_budget_tokens = $2, admission_mode = $3, \
+         updated_at = now() WHERE id = $1::uuid",
     )
     .bind(&id)
     .bind(budget)
+    .bind(&mode)
     .execute(&s.db)
     .await;
     match res {
@@ -1316,7 +1325,7 @@ async fn update_deployment(
                 .bind(&cid)
                 .bind(&path)
                 .bind(&id)
-                .bind(json!({"kv_budget_tokens": effective}))
+                .bind(json!({"kv_budget_tokens": effective, "admission_mode": mode}))
                 .fetch_optional(&s.db)
                 .await
                 .unwrap_or(None);
@@ -1336,7 +1345,8 @@ async fn update_deployment(
                 }
             }
             audit(&s.db, "deployment", "update", &id).await;
-            Json(json!({"ok": true, "kv_budget_tokens": budget})).into_response()
+            Json(json!({"ok": true, "kv_budget_tokens": budget, "admission_mode": mode}))
+                .into_response()
         }
         Ok(_) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

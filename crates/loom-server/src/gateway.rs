@@ -365,6 +365,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
             crate::metrics::req(&status);
             crate::metrics::queue_wait(queue_wait_ms as f64 / 1000.0);
             crate::metrics::duration(started2.elapsed().as_secs_f64());
+            crate::metrics::req_tokens((prompt_tokens + completion_tokens) as f64);
             usage
                 .record(crate::usage::UsageRecord {
                     request_id: rid_f.clone(),

@@ -84,7 +84,7 @@ function UpdateChip() {
 function StatusBar() {
   const isClient = APP_VARIANT === "client";
   const q = useQuery({
-    queryKey: ["statusbar"],
+    queryKey: [isClient ? "client-status" : "overview"],
     queryFn: () =>
       api.get<any>(isClient ? "/local/api/status" : "/api/overview"),
     refetchInterval: 8000,

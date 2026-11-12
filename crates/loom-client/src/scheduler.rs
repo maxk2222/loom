@@ -89,6 +89,8 @@ struct DeploymentLimits {
     /// adapter-measured value for admission; never reported back up —
     /// the server already owns that number.
     kv_budget_admin: std::sync::atomic::AtomicU64,
+    /// Admission mode pushed by desired state: 0=auto, 1=slots, 2=tokens.
+    admission_mode: AtomicU32,
 }
 
 impl DeploymentLimits {
@@ -108,6 +110,7 @@ impl DeploymentLimits {
             model_ready: AtomicU32::new(1),
             kv_budget: std::sync::atomic::AtomicU64::new(0),
             kv_budget_admin: std::sync::atomic::AtomicU64::new(0),
+            admission_mode: AtomicU32::new(0),
         }
     }
 
@@ -188,20 +191,29 @@ impl DeploymentSlots {
                 // oversized assignment is still refused. Admin override
                 // (desired state) wins over the adapter-measured budget;
                 // 0/unknown → slot-only admission.
-                let budget = {
-                    let admin = self.limits.kv_budget_admin.load(Ordering::SeqCst);
-                    if admin > 0 {
-                        admin
-                    } else {
-                        self.limits.kv_budget.load(Ordering::SeqCst)
+                let mode = self.limits.admission_mode.load(Ordering::SeqCst);
+                if mode != 1 {
+                    let budget = {
+                        let admin = self.limits.kv_budget_admin.load(Ordering::SeqCst);
+                        if admin > 0 {
+                            admin
+                        } else {
+                            self.limits.kv_budget.load(Ordering::SeqCst)
+                        }
+                    };
+                    // 'tokens' mode requires a budget — none configured or
+                    // measured means the deployment admits nothing until
+                    // one arrives (retryable: desired push may land later).
+                    if mode == 2 && budget == 0 {
+                        return Err(RejectReason::AdmissionClosed);
                     }
-                };
-                if budget > 0 && footprint > 0 {
-                    let used = self.counters.kv_used.load(Ordering::SeqCst);
-                    if used + footprint > budget {
-                        return Err(RejectReason::KvFull);
+                    if budget > 0 && footprint > 0 {
+                        let used = self.counters.kv_used.load(Ordering::SeqCst);
+                        if used + footprint > budget {
+                            return Err(RejectReason::KvFull);
+                        }
+                        self.counters.kv_used.fetch_add(footprint, Ordering::SeqCst);
                     }
-                    self.counters.kv_used.fetch_add(footprint, Ordering::SeqCst);
                 }
                 self.counters.tier2_active.fetch_add(1, Ordering::SeqCst);
             }
@@ -354,32 +366,32 @@ impl LocalScheduler {
     }
 
     /// Update a single deployment's limits (desired-state application).
-    pub fn update_limits(
-        &self,
-        dep_id: &str,
-        tier2_max: Option<u32>,
-        local_reserve: Option<u32>,
-        sharing_mode: Option<SharingMode>,
-        enabled: Option<bool>,
-        kv_budget: Option<u64>,
-    ) {
+    pub fn update_limits(&self, dep_id: &str, dd: &loom_core::config::DesiredDeployment) {
         let map = self.inner.deployments.read().unwrap();
         if let Some(d) = map.get(dep_id) {
-            if let Some(v) = local_reserve {
+            if let Some(v) = dd.local_reserve {
                 d.limits.local_reserve.store(v, Ordering::SeqCst);
             }
-            if let Some(v) = tier2_max {
+            if let Some(v) = dd.tier2_max {
                 d.limits.tier2_max.store(v, Ordering::SeqCst);
             }
             d.limits.clamp_tier2();
-            if let Some(m) = sharing_mode {
+            if let Some(m) = dd.sharing_mode {
                 *d.limits.sharing_mode.write().unwrap() = m;
             }
-            if let Some(e) = enabled {
+            if let Some(e) = dd.enabled {
                 d.limits.enabled.store(e as u32, Ordering::SeqCst);
             }
-            if let Some(b) = kv_budget {
+            if let Some(b) = dd.kv_budget_tokens {
                 d.limits.kv_budget_admin.store(b, Ordering::SeqCst);
+            }
+            if let Some(m) = &dd.admission_mode {
+                let v = match m.as_str() {
+                    "slots" => 1,
+                    "tokens" => 2,
+                    _ => 0,
+                };
+                d.limits.admission_mode.store(v, Ordering::SeqCst);
             }
         }
     }

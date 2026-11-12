@@ -489,6 +489,11 @@ pub struct DesiredDeployment {
     /// backstop (0/None = fall back to the adapter-measured budget).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_budget_tokens: Option<u64>,
+    /// Admission mode mirror: "auto" | "slots" | "tokens". "slots" turns
+    /// the token backstop off entirely; "tokens" requires a positive
+    /// budget (admin or adapter) or the deployment admits nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

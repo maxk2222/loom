@@ -1073,14 +1073,7 @@ impl Connector {
             if dd.removed == Some(true) {
                 continue;
             }
-            self.state.scheduler.update_limits(
-                dep_id,
-                dd.tier2_max,
-                dd.local_reserve,
-                dd.sharing_mode,
-                dd.enabled,
-                dd.kv_budget_tokens,
-            );
+            self.state.scheduler.update_limits(dep_id, dd);
         }
         if desired
             .deployments
