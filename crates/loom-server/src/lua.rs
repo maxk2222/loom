@@ -106,9 +106,11 @@ redis.call('HSET', KEYS[1], 'state', 'active', 'activated_at', ARGV[2])
 return 'OK'
 "#;
 
-/// active_lease_sweep: fail active leases older than the request deadline —
-/// a client that accepts work and then hangs forever (backend stuck, stream
-/// never ends) would otherwise burn the tier-2 slot indefinitely.
+/// active_lease_sweep: fail active leases whose stream has been silent longer
+/// than the idle deadline — `activated_at` is refreshed by the server on each
+/// inbound data chunk, so this only kills genuinely stalled requests. A
+/// client that accepts work and then hangs forever (backend stuck, stream
+/// never yields) would otherwise burn the tier-2 slot indefinitely.
 /// KEYS=[dep:{id}:leases, dep:{id}] ARGV=[now_ms, deadline_ms]
 /// -> {request_ids freed}  (frees the slot atomically inside the script)
 pub const ACTIVE_LEASE_SWEEP: &str = r#"

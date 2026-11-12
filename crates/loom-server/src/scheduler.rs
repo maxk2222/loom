@@ -441,9 +441,9 @@ impl Scheduler {
                 // reserved lease died → dispatcher retries next candidate
                 self.handle_assign_ack(&rid, false, "lease_expired").await;
             }
-            // c) active leases past the request deadline → free slot + fail
-            // the request (backend hang would otherwise burn the slot).
-            let deadline = self.inner.cfg.request_deadline_secs as i64 * 1000;
+            // c) active leases past the stream idle timeout → free slot +
+            // fail the request (backend hang would otherwise burn the slot).
+            let deadline = self.inner.cfg.stream_idle_timeout_secs as i64 * 1000;
             let timed_out: Vec<String> = redis::Script::new(crate::lua::ACTIVE_LEASE_SWEEP)
                 .key(self.inner.rt.k(&format!("dep:{dep}:leases")))
                 .key(self.inner.rt.k(&format!("dep:{dep}")))
@@ -910,6 +910,11 @@ impl Scheduler {
             let rid_for_release = rid.clone();
             tokio::spawn(async move {
                 use futures_util::StreamExt;
+                // Stream liveness: the lease's `activated_at` is what the
+                // watchdog sweep compares against `stream_idle_timeout_secs`.
+                // Refreshing it on data turns that hard deadline into a pure
+                // stall timeout — a generating request is never killed.
+                let mut last_liveness = std::time::Instant::now();
                 // 1) deliver payload to client (chunked)
                 for chunk in body.chunks(256 * 1024) {
                     if outbound
@@ -935,6 +940,17 @@ impl Scheduler {
                         Some(Ok(loom_protocol::pb::DataFrame {
                             frame: Some(loom_protocol::pb::data_frame::Frame::ResponseChunk(b)),
                         })) => {
+                            if last_liveness.elapsed() > Duration::from_secs(10) {
+                                last_liveness = std::time::Instant::now();
+                                let mut conn = rt.conn.clone();
+                                let _: () = redis::cmd("HSET")
+                                    .arg(rt.k(&format!("lease:{lease2}")))
+                                    .arg("activated_at")
+                                    .arg(crate::client_registry::now_ms())
+                                    .query_async(&mut conn)
+                                    .await
+                                    .unwrap_or(());
+                            }
                             tracing::debug!(req = %rid_for_release, n = b.len(), "response_chunk");
                             if resp_tx.send(Ok(b.into())).await.is_err() {
                                 // Caller gone: tell the client to abort backend

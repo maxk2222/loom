@@ -270,6 +270,81 @@ async fn client_offline_splits_reserved_and_active() {
 }
 
 #[tokio::test]
+async fn active_sweep_kills_only_idle_leases() {
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let dep = format!("{p}dep:d1");
+    let leases = format!("{p}dep:d1:leases");
+    let fencing_key = format!("{p}cap:fencing");
+    let deadline = 600_000i64; // 10min idle window
+
+    // two active leases, both activated long past the deadline
+    for (name, req) in [("s1", "req-stale"), ("l1", "req-live")] {
+        let v: redis::Value = redis::Script::new(lua::LEASE_ACQUIRE)
+            .key(&dep)
+            .key(&leases)
+            .key(format!("{p}lease:{name}"))
+            .key(&fencing_key)
+            .arg(req)
+            .arg("client-1")
+            .arg("d1")
+            .arg(60_000i64)
+            .arg(now_ms())
+            .arg(0)
+            .invoke_async(&mut c)
+            .await
+            .unwrap();
+        let f = fencing_from(v);
+        let _: String = redis::Script::new(lua::LEASE_ACTIVATE)
+            .key(format!("{p}lease:{name}"))
+            .arg(f)
+            .arg(now_ms() - 700_000) // activated 700s ago
+            .invoke_async(&mut c)
+            .await
+            .unwrap();
+    }
+
+    // simulate the bridge's liveness refresh: data still flowing on req-live
+    let _: () = redis::cmd("HSET")
+        .arg(format!("{p}lease:l1"))
+        .arg("activated_at")
+        .arg(now_ms() - 100_000)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+
+    let timed_out: Vec<String> = redis::Script::new(lua::ACTIVE_LEASE_SWEEP)
+        .key(&leases)
+        .key(&dep)
+        .arg(now_ms())
+        .arg(deadline)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(
+        timed_out,
+        vec!["req-stale".to_string()],
+        "only the silent lease must be killed"
+    );
+
+    // live lease still exists, dep got exactly one slot back
+    let exists: i64 = redis::cmd("EXISTS")
+        .arg(format!("{p}lease:l1"))
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(exists, 1);
+    let free: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("tier2_free")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(free, 1);
+}
+
+#[tokio::test]
 async fn lease_sweep_expires_reserved_only() {
     let Some((mut c, p)) = conn().await else {
         return;

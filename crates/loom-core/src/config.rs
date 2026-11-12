@@ -636,9 +636,11 @@ pub struct SchedulerConfig {
     /// Number of priority classes in the global queue.
     #[serde(default = "default_classes")]
     pub priority_classes: u32,
-    /// Request deadline default (server-side hard cap).
-    #[serde(default = "default_request_deadline")]
-    pub request_deadline_secs: u64,
+    /// Stream idle timeout (server-side): an active request dies only when
+    /// no data chunk arrives for this many seconds — running streams are
+    /// never killed mid-generation.
+    #[serde(default = "default_request_deadline", alias = "request_deadline_secs")]
+    pub stream_idle_timeout_secs: u64,
 }
 
 fn default_max_queue() -> usize {
@@ -672,7 +674,7 @@ impl Default for SchedulerConfig {
             assign_ack_timeout_ms: default_ack_timeout(),
             max_attempts: default_attempts(),
             priority_classes: default_classes(),
-            request_deadline_secs: default_request_deadline(),
+            stream_idle_timeout_secs: default_request_deadline(),
         }
     }
 }

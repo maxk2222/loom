@@ -266,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
         scheduler: sched.clone(),
         models: models.clone(),
         usage: usage.clone(),
-        request_deadline_ms: cfg.scheduler.request_deadline_secs as i64 * 1000,
+        request_deadline_ms: cfg.scheduler.stream_idle_timeout_secs as i64 * 1000,
     });
     let adm = admin::router(admin::AdminState {
         db: pool.clone(),
@@ -401,7 +401,11 @@ async fn main() -> anyhow::Result<()> {
         .layer(tower::limit::ConcurrencyLimitLayer::new(1024))
         .layer(tower_http::timeout::TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
-            std::time::Duration::from_secs(600),
+            // Never tighter than the scheduler's patience: queue wait plus
+            // stream idle timeout plus dispatch slack.
+            std::time::Duration::from_secs(
+                cfg.scheduler.stream_idle_timeout_secs + cfg.scheduler.queue_timeout_secs + 30,
+            ),
         ));
 
     let http_addr: SocketAddr = cfg.http_bind.parse()?;
