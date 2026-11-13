@@ -60,6 +60,35 @@ impl GenericAdapter {
             })
             .cloned())
     }
+
+    /// LM Studio ≥0.4: `POST /api/v1/models/load {model}` — deterministic,
+    /// synchronous load that does not depend on the server's JIT toggle.
+    /// Large weights can take minutes to mmap, so allow a generous timeout.
+    async fn lmstudio_load(&self, info: &serde_json::Value) -> Result<(), AdapterError> {
+        let key = info["key"].as_str().unwrap_or_default();
+        if key.is_empty() {
+            return Err(AdapterError::Protocol(
+                "lmstudio registry entry has no model key".into(),
+            ));
+        }
+        let url = format!("{}/api/v1/models/load", self.endpoint());
+        let mut req = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({"model": key}))
+            .timeout(Duration::from_secs(300));
+        if !self.cfg.api_key.is_empty() {
+            req = req.bearer_auth(&self.cfg.api_key);
+        }
+        match req.send().await {
+            Ok(r) if r.status().is_success() => Ok(()),
+            Ok(r) => Err(AdapterError::Upstream {
+                status: r.status().as_u16(),
+                message: format!("lmstudio load failed: {}", r.status()),
+            }),
+            Err(e) => Err(AdapterError::Connect(e.to_string())),
+        }
+    }
 }
 
 #[async_trait]
@@ -225,28 +254,32 @@ impl BackendAdapter for GenericAdapter {
     /// endpoint must match the model type — a chat request against an
     /// embedding-only model is rejected and never loads it (observed on
     /// LM Studio: endless warm loop, deployment stuck draining).
+    /// LM Studio gets an explicit `/api/v1/models/load` call instead: the
+    /// chat probe only loads when the server's JIT toggle is on — with it
+    /// off, the request is served by whatever model happens to be resident
+    /// (or 4xx'd on an empty server) while the target model stays cold.
     async fn warm_up(&self, model: &str) -> Result<(), AdapterError> {
-        let kind = self
-            .lmstudio_model_info(model)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|i| i["type"].as_str().map(String::from));
-        let (path, body) = match kind.as_deref() {
-            Some("embedding") | Some("embeddings") => (
-                "/v1/embeddings",
-                serde_json::json!({"model": model, "input": "warmup"}),
-            ),
-            _ => (
-                "/v1/chat/completions",
-                serde_json::json!({
-                    "model": model,
-                    "messages": [{"role":"user","content":"hi"}],
-                    "max_tokens": 1,
-                    "stream": false
-                }),
-            ),
-        };
+        let info = self.lmstudio_model_info(model).await?;
+        if let Some(info) = info.as_ref() {
+            let loaded = info["loaded_instances"]
+                .as_array()
+                .is_some_and(|li| !li.is_empty());
+            if !loaded {
+                self.lmstudio_load(info).await?;
+            }
+            return Ok(());
+        }
+        // No LM Studio registry — a plain OpenAI-compatible server where a
+        // minimal chat request is the only warm signal available.
+        let (path, body) = (
+            "/v1/chat/completions",
+            serde_json::json!({
+                "model": model,
+                "messages": [{"role":"user","content":"hi"}],
+                "max_tokens": 1,
+                "stream": false
+            }),
+        );
         let url = format!("{}{}", self.endpoint(), path);
         let mut req = self
             .http
@@ -579,23 +612,22 @@ mod tests {
         assert_eq!(loaded, vec!["m-vlm".to_string()]);
     }
 
-    /// warm_up must hit the endpoint matching the model type: an
-    /// embedding-type model warmed via /v1/chat/completions is rejected by
-    /// LM Studio and never loads (endless re-warm loop).
+    /// On LM Studio, warm_up loads an absent model explicitly via
+    /// /api/v1/models/load — independent of the server's JIT toggle and of
+    /// the model's endpoint type (chat request shapes used to decide this
+    /// and got embedding models stuck forever).
     #[tokio::test]
-    async fn warm_up_uses_embeddings_endpoint_for_embed_models() {
+    async fn warm_up_loads_unloaded_lmstudio_model_explicitly() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         let hits = Arc::new(AtomicUsize::new(0));
         let h = hits.clone();
-        let embed_hits = {
+        let load = move |Json(b): Json<serde_json::Value>| {
             let h = h.clone();
-            move |_: Json<serde_json::Value>| {
-                let h = h.clone();
-                async move {
-                    h.fetch_add(1, Ordering::SeqCst);
-                    Json(json!({"data":[{"embedding":[0.1]}]}))
-                }
+            async move {
+                assert_eq!(b["model"], "m-emb");
+                h.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"instance_id": "m-emb"}))
             }
         };
         let chat_hits = {
@@ -610,19 +642,13 @@ mod tests {
         };
         let app = Router::new()
             .route(
-                "/v1/models",
-                get(|| async {
-                    Json(json!({"object":"list","data":[{"id":"m-emb","object":"model"}]}))
-                }),
-            )
-            .route(
                 "/api/v1/models",
                 get(|| async {
                     Json(json!({"models":[{"key":"m-emb","type":"embeddings",
                         "capabilities":{},"loaded_instances":[]}]}))
                 }),
             )
-            .route("/v1/embeddings", post(embed_hits))
+            .route("/api/v1/models/load", post(load))
             .route("/v1/chat/completions", post(chat_hits));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -634,7 +660,69 @@ mod tests {
         assert_eq!(
             hits.load(Ordering::SeqCst),
             1,
-            "expected exactly one warm call"
+            "expected exactly one explicit load call, no chat probe"
         );
+    }
+
+    /// A model with a loaded instance needs no load call at all.
+    #[tokio::test]
+    async fn warm_up_skips_load_when_instance_resident() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let load = move |_: Json<serde_json::Value>| {
+            let h = h.clone();
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"instance_id": "m"}))
+            }
+        };
+        let app = Router::new()
+            .route(
+                "/api/v1/models",
+                get(|| async {
+                    Json(
+                        json!({"models":[{"key":"m","type":"llm","loaded_instances":[{"id":"m"}]}]}),
+                    )
+                }),
+            )
+            .route("/api/v1/models/load", post(load));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let a = GenericAdapter::new(cfg(format!("http://{addr}")), reqwest::Client::new());
+        a.warm_up("m").await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    /// Plain OpenAI-compatible servers (no /api/v1/models) keep the
+    /// JIT-style chat probe.
+    #[tokio::test]
+    async fn warm_up_jit_probe_when_no_lmstudio_registry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let chat = move |_: Json<serde_json::Value>| {
+            let h = h.clone();
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"choices":[{"message":{"content":"ok"}}]}))
+            }
+        };
+        let app = Router::new()
+            .route("/api/v1/models", get(|| async { StatusCode::NOT_FOUND }))
+            .route("/v1/chat/completions", post(chat));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let a = GenericAdapter::new(cfg(format!("http://{addr}")), reqwest::Client::new());
+        a.warm_up("m").await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 }
