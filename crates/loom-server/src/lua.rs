@@ -264,10 +264,6 @@ end
 return 'OK'
 "#;
 
-/// client_offline: KEYS=[client:{id}] + ARGV=[dep keys json array not needed]
-/// Instead: caller passes all dep keys + lease lists explicitly.
-/// KEYS=[dep1, dep1:leases, dep2, dep2:leases, ...]
-/// -> {reserved_request_ids..., active_request_ids...} flattened as array
 /// client_offline: mark deployments offline + reap their leases.
 /// KEYS=[client:{cid}, dep:{id}, dep:{id}:leases, dep:{id2}, dep2:leases, ...]
 /// ARGV=[expected_session_id] -> {reserved_rids, active_rids} | "STALE"

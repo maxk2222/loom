@@ -27,9 +27,13 @@ impl Rt {
 
     /// Boot reconciliation: wipe all runtime keys under the prefix.
     /// Called once at server start — no persistent data lives in Redis.
+    /// `instance:owner` is deliberately preserved: the owner lock is acquired
+    /// BEFORE this wipe, and deleting it here would hand ownership to any
+    /// racing peer.
     pub async fn reset_runtime(&self) -> Result<()> {
         let mut conn = self.conn.clone();
         let pattern = format!("{}*", self.prefix);
+        let owner_key = self.k("instance:owner");
         let mut cursor: u64 = 0;
         loop {
             let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
@@ -40,6 +44,7 @@ impl Rt {
                 .arg(500)
                 .query_async(&mut conn)
                 .await?;
+            let keys: Vec<String> = keys.into_iter().filter(|k| k != &owner_key).collect();
             if !keys.is_empty() {
                 let _: () = redis::pipe()
                     .cmd("DEL")

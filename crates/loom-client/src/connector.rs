@@ -1166,27 +1166,6 @@ impl Connector {
                     .await;
                 return;
             }
-            // Duplicate assign for an already-running request_id: accepting
-            // would overwrite the live entry (its cancel handle is lost and
-            // bookkeeping double-finishes). Reject retryable — the server
-            // can route it elsewhere or drop it.
-            if state
-                .active_requests
-                .read()
-                .unwrap()
-                .contains_key(&request_id)
-            {
-                let _ = ctrl_tx
-                    .send(client_msgs::assign_reject(
-                        &request_id,
-                        &a.lease_id,
-                        a.fencing_token,
-                        "duplicate_assign",
-                        true,
-                    ))
-                    .await;
-                return;
-            }
             // Admission check.
             let admit = state.scheduler.try_admit(
                 &a.deployment_id,
@@ -1198,23 +1177,52 @@ impl Connector {
             match admit {
                 Ok(token) => {
                     let cancel = token.cancel_token();
-                    state.active_requests.write().unwrap().insert(
-                        request_id.clone(),
-                        ActiveRequest {
-                            fencing: a.fencing_token,
-                            cancel: cancel.clone(),
-                        },
-                    );
-                    if ctrl_tx
-                        .send(client_msgs::assign_accept(
+                    // Duplicate assign check must share the write lock with
+                    // the insert — a read-then-write window would let two
+                    // concurrent assigns for the same request_id both pass.
+                    // The guard cannot live across an await, so scope it.
+                    let is_dup = {
+                        let mut active = state.active_requests.write().unwrap();
+                        if active.contains_key(&request_id) {
+                            true
+                        } else {
+                            active.insert(
+                                request_id.clone(),
+                                ActiveRequest {
+                                    fencing: a.fencing_token,
+                                    cancel: cancel.clone(),
+                                },
+                            );
+                            false
+                        }
+                    };
+                    if is_dup {
+                        drop(token); // return the just-admitted slot
+                        let _ = ctrl_tx
+                            .send(client_msgs::assign_reject(
+                                &request_id,
+                                &a.lease_id,
+                                a.fencing_token,
+                                "duplicate_assign",
+                                true,
+                            ))
+                            .await;
+                        return;
+                    }
+                    if tokio::time::timeout(
+                        Duration::from_secs(5),
+                        ctrl_tx.send(client_msgs::assign_accept(
                             &request_id,
                             &a.lease_id,
                             a.fencing_token,
-                        ))
-                        .await
-                        .is_err()
+                        )),
+                    )
+                    .await
+                    .map(|r| r.is_err())
+                    .unwrap_or(true)
                     {
                         state.scheduler.finish_request(&request_id);
+                        state.active_requests.write().unwrap().remove(&request_id);
                         return;
                     }
                     state.notify_capacity_now();
@@ -1231,15 +1239,17 @@ impl Connector {
                             | crate::scheduler::RejectReason::AdmissionClosed
                             | crate::scheduler::RejectReason::KvFull
                     );
-                    let _ = ctrl_tx
-                        .send(client_msgs::assign_reject(
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        ctrl_tx.send(client_msgs::assign_reject(
                             &request_id,
                             &a.lease_id,
                             a.fencing_token,
                             r.as_str(),
                             retryable,
-                        ))
-                        .await;
+                        )),
+                    )
+                    .await;
                 }
             }
         });
@@ -1465,9 +1475,10 @@ async fn run_request(
                     let total = u64::from(usage.prompt_tokens) + u64::from(usage.completion_tokens);
                     if total > last_usage_sent {
                         last_usage_sent = total;
+                        // Telemetry only — lossy is fine; a full control
+                        // channel must never wedge the stream loop.
                         let _ = ctrl_tx
-                            .send(client_msgs::lease_usage(&request_id, total))
-                            .await;
+                            .try_send(client_msgs::lease_usage(&request_id, total));
                     }
                     // A send blocked on a full channel must not wedge the task:
                     // when the server stops draining, cancellation still wins

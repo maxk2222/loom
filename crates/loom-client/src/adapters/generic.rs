@@ -272,17 +272,15 @@ impl BackendAdapter for GenericAdapter {
                     .json()
                     .await
                     .map_err(|e| AdapterError::Protocol(e.to_string()))?;
+                // A real completion always has ≥1 choice (reasoning models
+                // may legitimately return empty `content` with only
+                // `reasoning_content` filled — don't introspect the text).
+                // The failure mode is a 200 with an empty/missing choices
+                // array during JIT load transitions.
                 let produced = v
                     .get("choices")
                     .and_then(|c| c.as_array())
-                    .map(|c| {
-                        c.iter().any(|ch| {
-                            ch["message"]["content"]
-                                .as_str()
-                                .is_some_and(|s| !s.trim().is_empty())
-                                || ch["text"].as_str().is_some_and(|s| !s.trim().is_empty())
-                        })
-                    })
+                    .map(|c| !c.is_empty())
                     .unwrap_or_else(|| {
                         // Embeddings path: `data` non-empty = real output.
                         v.get("data")

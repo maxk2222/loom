@@ -1207,16 +1207,6 @@ impl Scheduler {
             let lease2 = lease_id.clone();
             let dep2 = dep_id.clone();
             let rid_for_release = rid.clone();
-            // Caller-abort is detected the moment the receiver drops — do not
-            // wait for the next upstream chunk to notice.
-            {
-                let resp_closed = resp_tx.clone();
-                let cancel3 = cancel2.clone();
-                tokio::spawn(async move {
-                    resp_closed.closed().await;
-                    cancel3.cancel();
-                });
-            }
             tokio::spawn(async move {
                 use futures_util::StreamExt;
                 // Stream liveness: the lease's `activated_at` is what the
@@ -1247,6 +1237,25 @@ impl Scheduler {
                     loop {
                         let next = tokio::select! {
                             _ = cancel2.cancelled() => { end_status = "cancelled"; break },
+                            // Caller dropped the response receiver — abort
+                            // immediately instead of waiting for the next
+                            // upstream chunk to notice the dead channel.
+                            // resp_tx is the bridge's own sender (no clone),
+                            // so channel lifetime is unchanged.
+                            _ = resp_tx.closed() => {
+                                let _ = sessions2
+                                    .send(
+                                        &client2,
+                                        server_msgs::cancel(
+                                            &rid_for_release,
+                                            fencing,
+                                            "caller_disconnected",
+                                        ),
+                                    )
+                                    .await;
+                                end_status = "cancelled";
+                                break;
+                            }
                             v = inbound.next() => v,
                         };
                         tracing::debug!(req = %rid_for_release, frame = ?next.as_ref().map(|r| r.as_ref().map(|f| std::mem::discriminant(&f.frame))), "bridge inbound");
@@ -1351,6 +1360,7 @@ impl Scheduler {
                         ..Default::default()
                     });
                     inner2.active.lock().await.remove(&rid_for_release);
+                    inner2.wake.notify_one();
                 }
             });
         }
