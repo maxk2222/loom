@@ -1355,6 +1355,8 @@ fn capacity_to_pb(c: &crate::scheduler::DeploymentCapacityInfo) -> DeploymentCap
         health: c.health.into(),
         kv_budget_tokens: c.kv_budget_tokens,
         kv_used_tokens: c.kv_used_tokens,
+        max_concurrent: c.max_concurrent,
+        local_reserve: c.local_reserve,
     }
 }
 

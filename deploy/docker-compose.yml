@@ -1,6 +1,13 @@
 # LOOM — deployment stack.
 # Dev: docker compose up -d postgres redis
 # Prod: docker compose --profile full up -d
+#
+# Explicit project name: without it compose derives the project from the
+# directory ("deploy"), and running this file on a prod host would spawn a
+# parallel deploy-* stack next to the real one. Production uses
+# deploy/setup-server.sh (--project loom) and never reads this name.
+
+name: loom-dev
 
 services:
   postgres:

@@ -380,6 +380,34 @@ impl ClientRegistry {
                 .arg(cap.tier2_free)
                 .invoke_async(&mut c)
                 .await?;
+            // Reported config lands in Postgres — the columns are a mirror of
+            // what the client last reported (0 while private/disabled), not
+            // admin intent (that lives in clients.desired_config). NULLIF(0)
+            // on max_concurrent/local_reserve keeps old clients that do not
+            // send the fields from clobbering stored values; the
+            // IS DISTINCT FROM guard avoids write churn at heartbeat cadence.
+            let _ = sqlx::query(
+                "UPDATE deployments
+                 SET tier2_max = $2,
+                     sharing_mode = COALESCE(NULLIF($3,''), sharing_mode),
+                     max_concurrent = COALESCE(NULLIF($4,0), max_concurrent),
+                     local_reserve = COALESCE(NULLIF($5,0), local_reserve),
+                     updated_at = now()
+                 WHERE id = $1::uuid
+                   AND (tier2_max, sharing_mode, max_concurrent, local_reserve)
+                       IS DISTINCT FROM (
+                           $2,
+                           COALESCE(NULLIF($3,''), sharing_mode),
+                           COALESCE(NULLIF($4,0), max_concurrent),
+                           COALESCE(NULLIF($5,0), local_reserve))",
+            )
+            .bind(&cap.deployment_id)
+            .bind(cap.tier2_total as i32)
+            .bind(&cap.sharing_mode)
+            .bind(cap.max_concurrent as i32)
+            .bind(cap.local_reserve as i32)
+            .execute(&self.db)
+            .await;
             // Adapter-derived budget feeds the effective budget when no admin
             // override exists. 0 = client cannot measure → leave stored value.
             if cap.kv_budget_tokens > 0 {
@@ -715,6 +743,102 @@ pub fn sanitize_addrs(addrs: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Capacity reports must persist the client's reported config into
+    /// `deployments` — and fields older clients do not send (0) must not
+    /// clobber stored values. Env-gated: needs LOOM_TEST_DATABASE_URL +
+    /// LOOM_TEST_REDIS_URL (see AGENTS.md).
+    #[tokio::test]
+    async fn capacity_report_persists_reported_config() {
+        let (Some(db_url), Some(redis_url)) = (
+            loom_testkit::harness::test_database_url(),
+            loom_testkit::harness::test_redis_url(),
+        ) else {
+            return;
+        };
+        let db = PgPool::connect(&db_url).await.unwrap();
+        crate::db::migrate(&db).await.unwrap();
+        let rt = Rt::connect(&redis_url, &format!("loom:test:{}:", uuid::Uuid::new_v4()))
+            .await
+            .unwrap();
+        let reg = ClientRegistry {
+            db: db.clone(),
+            rt,
+            models: crate::model_registry::ModelRegistry::new(db.clone()),
+        };
+        let client_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO clients (id, name, credential_hash, status) VALUES ($1::uuid, $2, 'h', 'active')")
+            .bind(&client_id)
+            .bind(format!("t-{}", &client_id[..8]))
+            .execute(&db)
+            .await
+            .unwrap();
+        let dep_id = uuid::Uuid::new_v4().to_string();
+        upsert_deployment(
+            &db,
+            &client_id,
+            &loom_protocol::pb::DeploymentReport {
+                deployment_id: dep_id.clone(),
+                name: "d".into(),
+                backend_type: "vllm".into(),
+                endpoint_url: "http://x".into(),
+                model_name: "m".into(),
+                capabilities: None,
+                enabled: true,
+                health: "healthy".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let cap = |t2: u32, mc: u32, lr: u32| loom_protocol::pb::DeploymentCapacity {
+            deployment_id: dep_id.clone(),
+            tier2_total: t2,
+            tier2_free: t2,
+            sharing_mode: "shared".into(),
+            accepting: true,
+            health: "healthy".into(),
+            max_concurrent: mc,
+            local_reserve: lr,
+            ..Default::default()
+        };
+        // New client reports full config → all columns mirror the report.
+        reg.apply_capacity(&client_id, &[cap(8, 20, 1)], None)
+            .await
+            .unwrap();
+        let row: (i32, String, i32, i32) = sqlx::query_as(
+            "SELECT tier2_max, sharing_mode, max_concurrent, local_reserve FROM deployments WHERE id=$1::uuid",
+        )
+        .bind(&dep_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(row, (8, "shared".to_string(), 20, 1));
+        // Old client omits max_concurrent/local_reserve (0) → those
+        // columns keep their stored values while the rest still syncs.
+        reg.apply_capacity(&client_id, &[cap(5, 0, 0)], None)
+            .await
+            .unwrap();
+        let row: (i32, String, i32, i32) = sqlx::query_as(
+            "SELECT tier2_max, sharing_mode, max_concurrent, local_reserve FROM deployments WHERE id=$1::uuid",
+        )
+        .bind(&dep_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(row, (5, "shared".to_string(), 20, 1));
+        // A later report with changed config lands in full.
+        reg.apply_capacity(&client_id, &[cap(6, 30, 2)], None)
+            .await
+            .unwrap();
+        let row: (i32, String, i32, i32) = sqlx::query_as(
+            "SELECT tier2_max, sharing_mode, max_concurrent, local_reserve FROM deployments WHERE id=$1::uuid",
+        )
+        .bind(&dep_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(row, (6, "shared".to_string(), 30, 2));
+    }
 
     /// The JSON written to deployments.capabilities / Redis must round-trip
     /// into loom_core::Capabilities — the scheduler filters on that shape.

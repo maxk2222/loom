@@ -560,6 +560,8 @@ impl LocalScheduler {
                     pressure_gated: d.limits.tier2_gate_closed.load(Ordering::SeqCst) == 1,
                     kv_budget_tokens: d.limits.kv_budget.load(Ordering::SeqCst),
                     kv_used_tokens: d.counters.kv_used.load(Ordering::SeqCst),
+                    max_concurrent: d.limits.max_concurrent.load(Ordering::SeqCst),
+                    local_reserve: d.limits.local_reserve.load(Ordering::SeqCst),
                 }
             })
             .collect()
@@ -692,6 +694,10 @@ pub struct DeploymentCapacityInfo {
     pub kv_budget_tokens: u64,
     /// Tier-2 token footprints currently reserved.
     pub kv_used_tokens: u64,
+    /// Configured admission limits — reported so the server can persist
+    /// the deployment's real config instead of insert-time defaults.
+    pub max_concurrent: u32,
+    pub local_reserve: u32,
 }
 
 #[cfg(test)]

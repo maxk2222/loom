@@ -154,6 +154,12 @@ message DeploymentCapacity {
   // Backend-reported KV tokens currently in use (0 = unknown). Drift
   // signal against the server's reservation-based accounting.
   uint64 kv_used_tokens = 11;
+  // Configured admission limits from the client config — persisted
+  // server-side so the deployments row reflects reported truth instead
+  // of stale defaults. 0 = field absent (older client) and the server
+  // must not overwrite stored values.
+  uint32 max_concurrent = 12;
+  uint32 local_reserve = 13;
 }
 
 message InventoryReport {
