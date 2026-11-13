@@ -540,6 +540,7 @@ async fn openai_inference_raw(
             let mut usage = loom_core::openai::Usage::default();
             let mut finish_reason = String::new();
             let mut saw_output = false;
+            let mut tail = crate::connector::StreamTail::default();
             let mut outcome = "done";
             let mut ttft_ms: i64 = 0;
             loop {
@@ -552,12 +553,7 @@ async fn openai_inference_raw(
                         if ttft_ms == 0 {
                             ttft_ms = started.elapsed().as_millis() as i64;
                         }
-                        crate::connector::inspect_sse_tail(
-                            &b,
-                            &mut usage,
-                            &mut finish_reason,
-                            &mut saw_output,
-                        );
+                        tail.inspect(&b, &mut usage, &mut finish_reason, &mut saw_output);
                         // A send stalled on a full channel must still honour
                         // cancellation — the select at loop top never runs
                         // while send is pending, so admin/API cancels would

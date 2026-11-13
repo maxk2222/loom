@@ -1459,6 +1459,7 @@ async fn run_request(
         let mut upstream_err: Option<String> = None;
         let mut finish_reason = String::new();
         let mut saw_output = false;
+        let mut tail = StreamTail::default();
         let mut stream = resp.stream;
         let mut last_usage_sent = 0u64;
 
@@ -1480,8 +1481,8 @@ async fn run_request(
                         telemetry::ttft(started.elapsed().as_secs_f64());
                     }
                     debug!(req = %request_id, n = bytes.len(), "upstream chunk → data stream");
-                    // Opportunistically parse usage/finish from SSE tail.
-                    inspect_sse_tail(&bytes, &mut usage, &mut finish_reason, &mut saw_output);
+                    // Opportunistically parse usage/finish from the tail.
+                    tail.inspect(&bytes, &mut usage, &mut finish_reason, &mut saw_output);
                     // Converge the server's token reservation toward the
                     // backend's real cumulative usage — long generations
                     // outgrow the submit-time estimate.
@@ -1638,6 +1639,100 @@ async fn run_request(
     drop(token);
 }
 
+/// Upper bound for an accumulated non-SSE JSON body. Batch embedding
+/// responses reach multiple MB; beyond the cap real bytes are clearly
+/// flowing, so the stream cannot be a zero-token zombie anyway.
+const JSON_BODY_CAP: usize = 8 * 1024 * 1024;
+
+/// Per-stream response-tail inspector. Non-SSE upstreams reply with a
+/// single JSON document that upstream chunking can split anywhere —
+/// parsing each fragment separately always fails, which left `saw_output`
+/// and `usage` empty and misclassified healthy responses (embeddings
+/// above ~10KB) as wedged "empty generation". The first bytes decide the
+/// framing: `{` ⇒ bare JSON — additionally accumulated and re-parsed as
+/// one whole document while per-chunk inspection still covers
+/// single-chunk bodies and NDJSON-style multi-doc streams; anything else
+/// ⇒ SSE, inspected per chunk.
+#[derive(Default)]
+pub(crate) struct StreamTail {
+    buf: Vec<u8>,
+    json: Option<bool>,
+}
+
+impl StreamTail {
+    pub(crate) fn inspect(
+        &mut self,
+        bytes: &bytes::Bytes,
+        usage: &mut loom_core::openai::Usage,
+        finish_reason: &mut String,
+        saw_output: &mut bool,
+    ) {
+        // Lock the framing on the first non-whitespace byte — an
+        // all-whitespace prefix decides nothing and must not pin SSE.
+        let json = match self.json {
+            Some(j) => j,
+            None => {
+                let Some(first) = bytes.iter().find(|b| !b.is_ascii_whitespace()) else {
+                    return;
+                };
+                let j = *first == b'{';
+                self.json = Some(j);
+                j
+            }
+        };
+        if !json {
+            inspect_sse_tail(bytes, usage, finish_reason, saw_output);
+            return;
+        }
+        // Per-chunk inspection keeps single-chunk documents, NDJSON-style
+        // multi-doc streams and stray SSE frames working exactly as before.
+        inspect_sse_tail(bytes, usage, finish_reason, saw_output);
+        if self.buf.len() + bytes.len() > JSON_BODY_CAP {
+            // Megabytes of real payload flowed — not a zombie. Stop
+            // buffering; usage keeps its estimate.
+            *saw_output = true;
+            return;
+        }
+        self.buf.extend_from_slice(bytes);
+        // Object documents end on `}` — skip the whole-buffer parse while
+        // it is provably still incomplete (cheap O(n²) guard for backends
+        // that chunk heavily).
+        if self.buf.iter().rfind(|b| !b.is_ascii_whitespace()) == Some(&b'}') {
+            inspect_json_body(&self.buf, usage, finish_reason, saw_output);
+        }
+    }
+}
+
+/// Parse one complete non-SSE JSON body for usage + finish_reason +
+/// output presence. Incomplete documents parse-fail and leave all
+/// out-params untouched so the caller can retry once more bytes arrive.
+fn inspect_json_body(
+    body: &[u8],
+    usage: &mut loom_core::openai::Usage,
+    finish_reason: &mut String,
+    saw_output: &mut bool,
+) {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return;
+    };
+    if let Some(u) = v.get("usage") {
+        if let Ok(parsed) = serde_json::from_value::<loom_core::openai::Usage>(u.clone()) {
+            *usage = parsed;
+        }
+    }
+    if let Some(fr) = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|f| f.as_str())
+    {
+        *finish_reason = fr.to_string();
+    }
+    if json_has_output(&v) {
+        *saw_output = true;
+    }
+}
+
 /// Parse trailing SSE data for usage + finish_reason (best effort).
 /// `saw_output` is set once any parsed payload carries generated content —
 /// used to detect zombie backends that answer 200 with zero tokens.
@@ -1653,24 +1748,7 @@ pub(crate) fn inspect_sse_tail(
     // Non-streaming responses arrive as one raw JSON object — parse it whole.
     let trimmed = text.trim();
     if trimmed.starts_with('{') && !trimmed.contains("\ndata:") {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(u) = v.get("usage") {
-                if let Ok(parsed) = serde_json::from_value::<loom_core::openai::Usage>(u.clone()) {
-                    *usage = parsed;
-                }
-            }
-            if let Some(fr) = v
-                .get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("finish_reason"))
-                .and_then(|f| f.as_str())
-            {
-                *finish_reason = fr.to_string();
-            }
-            if json_has_output(&v) {
-                *saw_output = true;
-            }
-        }
+        inspect_json_body(trimmed.as_bytes(), usage, finish_reason, saw_output);
         return;
     }
     for line in text.split("\n\n") {
@@ -1999,6 +2077,119 @@ mod tls_policy_tests {
         assert!(!super::json_has_output(&json!({"data":[]})));
         assert!(super::json_has_output(&json!({"text":"transcribed"})));
         assert!(super::json_has_output(&json!({"response":"ollama native"})));
+    }
+
+    #[test]
+    fn stream_tail_parses_json_body_across_chunks() {
+        // The live bug: an embeddings response split at arbitrary byte
+        // offsets — every fragment parse-fails, `saw_output` stays false
+        // and a healthy response is reported as "empty generation".
+        let body = br#"{"object":"list","data":[{"object":"embedding","embedding":[0.5,0.25]}],"model":"m","usage":{"prompt_tokens":7,"total_tokens":7}}"#;
+        let mut tail = super::StreamTail::default();
+        let mut usage = loom_core::openai::Usage::default();
+        let mut finish = String::new();
+        let mut saw = false;
+        for chunk in body.chunks(13) {
+            tail.inspect(
+                &bytes::Bytes::copy_from_slice(chunk),
+                &mut usage,
+                &mut finish,
+                &mut saw,
+            );
+        }
+        assert!(saw, "accumulated embedding body must count as output");
+        assert_eq!(usage.prompt_tokens, 7);
+        assert!(super::empty_generation_failure(true, 200, saw, &usage).is_none());
+    }
+
+    #[test]
+    fn stream_tail_flags_genuinely_empty_json_body() {
+        // The zombie case must still fire: `{"data":[]}` parses cleanly
+        // but carries no output.
+        let body = br#"{"object":"list","data":[],"model":"m"}"#;
+        let mut tail = super::StreamTail::default();
+        let mut usage = loom_core::openai::Usage::default();
+        let mut finish = String::new();
+        let mut saw = false;
+        for chunk in body.chunks(5) {
+            tail.inspect(
+                &bytes::Bytes::copy_from_slice(chunk),
+                &mut usage,
+                &mut finish,
+                &mut saw,
+            );
+        }
+        assert!(!saw);
+        assert!(super::empty_generation_failure(true, 200, saw, &usage).is_some());
+    }
+
+    #[test]
+    fn stream_tail_sse_passthrough_unchanged() {
+        let chunks = [
+            &b"data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n"[..],
+            &b"data: [DONE]\n\n"[..],
+        ];
+        let mut tail = super::StreamTail::default();
+        let mut usage = loom_core::openai::Usage::default();
+        let mut finish = String::new();
+        let mut saw = false;
+        for c in chunks {
+            tail.inspect(
+                &bytes::Bytes::copy_from_slice(c),
+                &mut usage,
+                &mut finish,
+                &mut saw,
+            );
+        }
+        assert!(saw);
+        assert!(super::empty_generation_failure(true, 200, saw, &usage).is_none());
+    }
+
+    #[test]
+    fn stream_tail_ndjson_lines_still_parse_per_chunk() {
+        // Multi-doc streams (one JSON object per chunk, ollama-native
+        // style): the accumulated buffer never parses, per-chunk
+        // inspection must still extract usage + output.
+        let chunks = [
+            &b"{\"data\":[{\"embedding\":[0.1]}]}\n"[..],
+            &b"{\"data\":[{\"embedding\":[0.2]}],\"usage\":{\"prompt_tokens\":9}}"[..],
+        ];
+        let mut tail = super::StreamTail::default();
+        let mut usage = loom_core::openai::Usage::default();
+        let mut finish = String::new();
+        let mut saw = false;
+        for c in chunks {
+            tail.inspect(
+                &bytes::Bytes::copy_from_slice(c),
+                &mut usage,
+                &mut finish,
+                &mut saw,
+            );
+        }
+        assert!(saw);
+        assert_eq!(usage.prompt_tokens, 9);
+        assert!(super::empty_generation_failure(true, 200, saw, &usage).is_none());
+    }
+
+    #[test]
+    fn stream_tail_truncated_json_stays_a_failure() {
+        // `{` then the stream dies mid-document: never parseable → still
+        // classified as a dead generation.
+        let chunks: [&[u8]; 2] = [b"{\"data\":[{\"embedding\":[0.1", b"0.2"];
+        let mut tail = super::StreamTail::default();
+        let mut usage = loom_core::openai::Usage::default();
+        let mut finish = String::new();
+        let mut saw = false;
+        for c in chunks {
+            tail.inspect(
+                &bytes::Bytes::copy_from_slice(c),
+                &mut usage,
+                &mut finish,
+                &mut saw,
+            );
+        }
+        assert!(!saw);
+        assert!(super::empty_generation_failure(true, 200, saw, &usage).is_some());
     }
 
     #[test]
