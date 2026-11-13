@@ -331,10 +331,13 @@ impl OllamaAdapter {
             r = req => r.map_err(|e| AdapterError::Connect(e.to_string()))?,
         };
         let status = resp.status().as_u16();
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| AdapterError::Protocol(e.to_string()))?;
+        // The body read is a second await — a large embedding response on a
+        // slow socket would otherwise ignore cancellation until the body
+        // completes.
+        let v: Value = tokio::select! {
+            _ = cancel.cancelled() => return Err(AdapterError::Cancelled),
+            r = resp.json() => r.map_err(|e| AdapterError::Protocol(e.to_string()))?,
+        };
         if status != 200 {
             return Err(AdapterError::Upstream {
                 status,

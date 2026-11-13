@@ -78,16 +78,20 @@ impl ClientRegistry {
             return Ok(None);
         }
 
-        // Enrollment: token must exist, be unexpired, have uses left.
+        // Enrollment: spend a use atomically — check + increment in one
+        // statement or two concurrent enrolls with the same token both pass
+        // `used < max_uses` and over-admit.
         let tok: Option<(uuid::Uuid,)> = sqlx::query_as(
-            "SELECT id FROM enroll_tokens WHERE token_hash = $1 AND used < max_uses AND expires_at > now()",
+            "UPDATE enroll_tokens SET used = used + 1
+             WHERE token_hash = $1 AND used < max_uses AND expires_at > now()
+             RETURNING id",
         )
         .bind(&hash)
         .fetch_optional(&self.db)
         .await?;
-        let Some((tok_id,)) = tok else {
+        if tok.is_none() {
             return Ok(None);
-        };
+        }
 
         let device_cred = format!("dev_{}", loom_core::ids::opaque_token(32));
         let cred_hash = sha256_hex(&device_cred);
@@ -107,10 +111,6 @@ impl ClientRegistry {
         .bind(platform)
         .fetch_one(&self.db)
         .await?;
-        sqlx::query("UPDATE enroll_tokens SET used = used + 1 WHERE id = $1")
-            .bind(tok_id)
-            .execute(&self.db)
-            .await?;
         Ok(Some((row_id.0.to_string(), device_cred)))
     }
 
@@ -333,8 +333,22 @@ impl ClientRegistry {
                 .query_async(&mut c)
                 .await?;
         }
+        // A capacity report must never resurrect a disabled deployment: the
+        // routing snapshot excludes it, but `state=available` on the runtime
+        // hash would still paint a stale member healthy until the next
+        // reconcile — and a stale session (pre-kick) could otherwise keep it
+        // dispatchable.
+        let disabled_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id::text FROM deployments WHERE client_id=$1::uuid AND enabled=false",
+        )
+        .bind(client_id)
+        .fetch_all(&self.db)
+        .await
+        .unwrap_or_default();
         for cap in caps {
-            if removed_ids.iter().any(|r| r == &cap.deployment_id) {
+            if removed_ids.iter().any(|r| r == &cap.deployment_id)
+                || disabled_ids.iter().any(|r| r == &cap.deployment_id)
+            {
                 continue;
             }
             let key = self.rt.k(&format!("dep:{}", cap.deployment_id));
@@ -419,26 +433,38 @@ impl ClientRegistry {
                 .fetch_all(&self.db)
                 .await
                 .unwrap_or_default();
-        let _: () = redis::cmd("HSET")
-            .arg(self.rt.k(&format!("client:{client_id}")))
-            .arg("online")
-            .arg("0")
-            .query_async(&mut c)
-            .await?;
         if dep_ids.is_empty() {
+            // No deployments to reap — still mark the client offline, but only
+            // if the session check still holds.
+            let _: String = redis::Script::new(
+                "if redis.call('HGET', KEYS[1], 'session_id') == ARGV[1] \
+                 then redis.call('HSET', KEYS[1], 'online', '0') return 'OK' \
+                 else return 'STALE' end",
+            )
+            .key(self.rt.k(&format!("client:{client_id}")))
+            .arg(session_id)
+            .invoke_async(&mut c)
+            .await
+            .unwrap_or_default();
             return Ok((vec![], vec![]));
         }
         let mut keys = Vec::new();
+        // client hash first: the script re-checks session ownership
+        // atomically so a stale disconnect can never reap a newer session's
+        // leases.
+        keys.push(self.rt.k(&format!("client:{client_id}")));
         for d in &dep_ids {
             keys.push(self.rt.k(&format!("dep:{d}")));
             keys.push(self.rt.k(&format!("dep:{d}:leases")));
         }
         let script = redis::Script::new(crate::lua::CLIENT_OFFLINE);
-        let res: Vec<Vec<String>> = script
+        let res: redis::Value = script
             .key(keys)
+            .arg(session_id)
             .invoke_async(&mut c)
             .await
-            .unwrap_or_default();
+            .unwrap_or(redis::Value::Nil);
+        let res: Vec<Vec<String>> = redis::from_redis_value(&res).unwrap_or_default();
         let reserved = res.first().cloned().unwrap_or_default();
         let active = res.get(1).cloned().unwrap_or_default();
         Ok((reserved, active))

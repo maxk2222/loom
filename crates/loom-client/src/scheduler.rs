@@ -141,12 +141,15 @@ pub struct DeploymentSlots {
 }
 
 impl DeploymentSlots {
+    /// Returns Ok(kv_charged) — whether this admission added `footprint` to
+    /// `kv_used`. The AdmitToken stores it so Drop releases exactly what was
+    /// reserved (mode/budget may change between admit and release).
     fn admit(
         &self,
         class: RequestClass,
         sharing_enabled: bool,
         footprint: u64,
-    ) -> Result<(), RejectReason> {
+    ) -> Result<bool, RejectReason> {
         let max_c = self.limits.max_concurrent.load(Ordering::SeqCst);
         let reserve = self.limits.local_reserve.load(Ordering::SeqCst);
         let t2_max = self.limits.tier2_max.load(Ordering::SeqCst);
@@ -170,6 +173,7 @@ impl DeploymentSlots {
                 if footprint > 0 {
                     self.counters.kv_used.fetch_add(footprint, Ordering::SeqCst);
                 }
+                Ok(footprint > 0)
             }
             RequestClass::Tier2 => {
                 if !sharing_enabled {
@@ -199,6 +203,7 @@ impl DeploymentSlots {
                 // (desired state) wins over the adapter-measured budget;
                 // 0/unknown → slot-only admission.
                 let mode = self.limits.admission_mode.load(Ordering::SeqCst);
+                let mut kv_charged = false;
                 if mode != 1 {
                     let budget = {
                         let admin = self.limits.kv_budget_admin.load(Ordering::SeqCst);
@@ -220,17 +225,18 @@ impl DeploymentSlots {
                             return Err(RejectReason::KvFull);
                         }
                         self.counters.kv_used.fetch_add(footprint, Ordering::SeqCst);
+                        kv_charged = true;
                     }
                 }
                 self.counters.tier2_active.fetch_add(1, Ordering::SeqCst);
+                Ok(kv_charged)
             }
         }
-        Ok(())
     }
 
-    fn release(&self, class: RequestClass, footprint: u64) {
+    fn release(&self, class: RequestClass, footprint: u64, kv_charged: bool) {
         let dec_kv = |fp: u64| {
-            if fp > 0 {
+            if fp > 0 && kv_charged {
                 // Saturating release — a stale/duplicate drop must never
                 // underflow the counter.
                 self.counters
@@ -283,6 +289,9 @@ pub struct AdmitToken {
     cancel: CancellationToken,
     /// KV tokens this admission reserved — returned to the counter on drop.
     footprint: u64,
+    /// Whether `footprint` was actually charged to `kv_used` at admit time —
+    /// release must only give back what was taken.
+    kv_charged: bool,
     _priv: (),
 }
 
@@ -301,7 +310,8 @@ impl AdmitToken {
 
 impl Drop for AdmitToken {
     fn drop(&mut self) {
-        self.sched.release(&self.dep, self.class, self.footprint);
+        self.sched
+            .release(&self.dep, self.class, self.footprint, self.kv_charged);
     }
 }
 
@@ -441,7 +451,7 @@ impl LocalScheduler {
             return Err(RejectReason::UnknownDeployment);
         };
         let sharing = *self.inner.sharing_enabled.read().unwrap();
-        dep.admit(class, sharing, footprint)?;
+        let kv_charged = dep.admit(class, sharing, footprint)?;
         let cancel = CancellationToken::new();
         self.inner
             .request_cancels
@@ -454,6 +464,7 @@ impl LocalScheduler {
             sched: self.clone(),
             cancel,
             footprint,
+            kv_charged,
             _priv: (),
         })
     }
@@ -504,10 +515,10 @@ impl LocalScheduler {
             .remove(request_id);
     }
 
-    fn release(&self, dep_id: &str, class: RequestClass, footprint: u64) {
+    fn release(&self, dep_id: &str, class: RequestClass, footprint: u64, kv_charged: bool) {
         let map = self.inner.deployments.read().unwrap();
         if let Some(dep) = map.get(dep_id) {
-            dep.release(class, footprint);
+            dep.release(class, footprint, kv_charged);
         }
     }
 

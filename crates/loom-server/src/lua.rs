@@ -22,6 +22,9 @@ redis.call('HSET', rkey,
   'prio', ARGV[6],
   'enqueued_at', ARGV[2],
   'deadline', ARGV[7])
+-- owner: which server instance holds the in-process waiter. Optional —
+-- absent on callers that do not stamp (single-instance deployments).
+if ARGV[8] then redis.call('HSET', rkey, 'owner', ARGV[8]) end
 -- attempts must survive requeue (HSETNX) or max_attempts can never fire
 redis.call('HSETNX', rkey, 'attempts', '0')
 redis.call('EXPIRE', rkey, 7200)
@@ -44,10 +47,20 @@ return 0
 /// ARGV=[now_ms]
 /// -> request_id | nil ; sets req state queued->leased via separate call
 /// NOTE: pops only, state transition by caller for clarity.
+/// Pop the lowest-score member across the priority-class queues (highest
+/// class first) and atomically maintain `queue:count` + the watchdog set.
+/// Doing the bookkeeping inside the script removes the window where a
+/// popped-but-uncounted entry leaves `queue:count` permanently inflated
+/// (Redis error / process crash between pop and the follow-up pipeline).
+/// KEYS=[queue:{c0}..queue:{cN}, queue:count, req:watchdog] -> member | nil
 pub const QUEUE_POP: &str = r#"
-for i=1,#KEYS do
+for i=1,#KEYS-2 do
   local v = redis.call('ZPOPMIN', KEYS[i], 1)
-  if v[1] then return v[1] end
+  if v[1] then
+    redis.call('DECR', KEYS[#KEYS-1])
+    redis.call('ZREM', KEYS[#KEYS], v[1])
+    return v[1]
+  end
 end
 return nil
 "#;
@@ -255,10 +268,18 @@ return 'OK'
 /// Instead: caller passes all dep keys + lease lists explicitly.
 /// KEYS=[dep1, dep1:leases, dep2, dep2:leases, ...]
 /// -> {reserved_request_ids..., active_request_ids...} flattened as array
+/// client_offline: mark deployments offline + reap their leases.
+/// KEYS=[client:{cid}, dep:{id}, dep:{id}:leases, dep:{id2}, dep2:leases, ...]
+/// ARGV=[expected_session_id] -> {reserved_rids, active_rids} | "STALE"
+/// The session check runs inside the script: a stale disconnect from an
+/// older session must never reap leases owned by the newer live session.
 pub const CLIENT_OFFLINE: &str = r#"
+local sid = redis.call('HGET', KEYS[1], 'session_id')
+if sid ~= ARGV[1] then return 'STALE' end
+redis.call('HSET', KEYS[1], 'online', '0')
 local reserved = {}
 local active = {}
-for i=1,#KEYS,2 do
+for i=2,#KEYS,2 do
   local dep = KEYS[i]
   local lset = KEYS[i+1]
   redis.call('HSET', dep, 'state', 'offline', 'tier2_free', 0)
@@ -374,9 +395,45 @@ redis.call('EXPIRE', KEYS[2], 7200)
 return 'OK'
 "#;
 
+/// rl_admit: rate-limit check AND admission commit in one atomic step.
+/// Merging check+commit closes the window where two concurrent requests both
+/// pass `RL_CHECK` against the same counter state and over-admit.
+/// KEYS=[rl:key:{id}:rpm, inflight:key:{id}, rl:key:{id}:tpm]
+/// ARGV=[now_ms, window_ms, rpm_limit, max_concurrent, tpm_limit, request_id]
+/// -> "OK" | "RPM" | "CONCURRENCY" | "TPM"
+pub const RL_ADMIT: &str = r#"
+local now = tonumber(ARGV[1])
+local win = tonumber(ARGV[2])
+local rpm = tonumber(ARGV[3])
+local conc = tonumber(ARGV[4])
+local inflight = tonumber(redis.call('GET', KEYS[2]) or '0')
+if conc > 0 and inflight >= conc then return 'CONCURRENCY' end
+if rpm > 0 then
+  redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, now - win)
+  local c = redis.call('ZCARD', KEYS[1])
+  if c >= rpm then return 'RPM' end
+end
+local tpm = tonumber(ARGV[5]) or 0
+if tpm > 0 then
+  redis.call('ZREMRANGEBYSCORE', KEYS[3], 0, now - win)
+  local members = redis.call('ZRANGE', KEYS[3], 0, -1)
+  local sum = 0
+  for _,m in ipairs(members) do
+    local t = m:match(':(%d+)$')
+    if t then sum = sum + tonumber(t) end
+  end
+  if sum >= tpm then return 'TPM' end
+end
+redis.call('ZADD', KEYS[1], now, ARGV[6])
+redis.call('EXPIRE', KEYS[1], math.ceil(win / 1000) + 10)
+redis.call('INCR', KEYS[2])
+redis.call('EXPIRE', KEYS[2], 7200)
+return 'OK'
+"#;
+
 /// inflight_dec: decrement inflight counter for key/project.
 pub const INFLIGHT_DEC: &str = r#"
 local v = redis.call('DECR', KEYS[1])
-if v < 0 then redis.call('SET', KEYS[1], 0) return 0 end
+if v < 0 then redis.call('SET', KEYS[1], 0, 'KEEPTTL') return 0 end
 return v
 "#;

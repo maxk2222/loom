@@ -33,6 +33,45 @@ pub struct GatewayState {
     pub request_deadline_ms: i64,
 }
 
+/// Releases the API key's inflight concurrency slot on drop unless already
+/// released explicitly. Axum drops the handler future when the caller
+/// disconnects — without this guard a disconnect between the rate-limit
+/// commit and the finalizer spawn leaks the inflight counter forever and the
+/// key eventually wedges at `max_concurrent`.
+struct InflightGuard {
+    auth: Arc<Auth>,
+    key_id: String,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl InflightGuard {
+    fn new(auth: Arc<Auth>, key_id: String) -> Self {
+        Self {
+            auth,
+            key_id,
+            armed: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    async fn release(&self) {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.auth.rl_release(&self.key_id).await;
+        }
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let auth = self.auth.clone();
+            let key_id = self.key_id.clone();
+            tokio::spawn(async move {
+                auth.rl_release(&key_id).await;
+            });
+        }
+    }
+}
+
 pub fn router(state: GatewayState) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
@@ -203,6 +242,9 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         }
         return resp;
     }
+    // RAII slot release: any handler drop from here on (caller disconnect at
+    // an await, handler panic) still returns the inflight slot.
+    let inflight = InflightGuard::new(s.auth.clone(), c.api_key_id.clone());
 
     // Auto-router: when the requested model is a `kind='router'` VM, classify
     // the request with the configured router model and dispatch to the chosen
@@ -240,7 +282,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                     m
                 }
                 Err(e) => {
-                    s.auth.rl_release(&c.api_key_id).await;
+                    inflight.release().await;
                     return err(ErrorCode::Unavailable, format!("router: {e}"), &request_id);
                 }
             }
@@ -260,6 +302,12 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
             .and_then(|o| o.get("include_usage"))
             .is_none();
         if needs {
+            // `stream_options` may legitimately be a non-object (caller sent
+            // e.g. a string) — index_mut on a non-object panics, so normalize
+            // to an object first.
+            if !b["stream_options"].is_object() {
+                b["stream_options"] = Value::Object(Default::default());
+            }
             b["stream_options"]["include_usage"] = Value::Bool(true);
         }
         b
@@ -301,7 +349,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
     let outcome = match s.scheduler.submit(pending).await {
         Ok(o) => o,
         Err(e) => {
-            s.auth.rl_release(&c.api_key_id).await;
+            inflight.release().await;
             return sched_err(e, &request_id);
         }
     };
@@ -345,7 +393,20 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
         let rid_f = rid.clone();
         let cancel_f = cancel.clone();
         tokio::spawn(async move {
-            let meta = end_rx.await.unwrap_or_default();
+            // The bridge resolves `ends` within ~15s of stream end; the 24h
+            // bound below is a last-resort catch for a bridge task that died
+            // without running its tail — bounds the leak, never hits real
+            // requests.
+            let meta = tokio::time::timeout(
+                std::time::Duration::from_secs(24 * 3600),
+                end_rx,
+            )
+            .await
+            .map(|r| r.unwrap_or_default())
+            .unwrap_or_else(|_| {
+                tracing::warn!(req = %rid_f, "finalizer end_rx timed out — resolving synthetically");
+                EndMeta::default()
+            });
             let prompt_tokens = if meta.prompt_tokens > 0 {
                 meta.prompt_tokens
             } else {
@@ -387,7 +448,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
             auth2
                 .rl_charge_tpm(&key_id, &rid_f, (prompt_tokens + completion_tokens) as u64)
                 .await;
-            auth2.rl_release(&key_id).await;
+            inflight.release().await;
             let _ = cancel_f;
         });
     }

@@ -263,6 +263,41 @@ impl BackendAdapter for GenericAdapter {
                 status: r.status().as_u16(),
                 message: format!("warm_up failed: {}", r.status()),
             }),
+            Ok(r) if r.status().is_success() => {
+                // A wedged backend can answer 200 with an empty body or empty
+                // choices mid load-transition — that is NOT warm. Verify the
+                // response carries a real completion before reporting ready.
+                let status = r.status().as_u16();
+                let v: Value = r
+                    .json()
+                    .await
+                    .map_err(|e| AdapterError::Protocol(e.to_string()))?;
+                let produced = v
+                    .get("choices")
+                    .and_then(|c| c.as_array())
+                    .map(|c| {
+                        c.iter().any(|ch| {
+                            ch["message"]["content"]
+                                .as_str()
+                                .is_some_and(|s| !s.trim().is_empty())
+                                || ch["text"].as_str().is_some_and(|s| !s.trim().is_empty())
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        // Embeddings path: `data` non-empty = real output.
+                        v.get("data")
+                            .and_then(|d| d.as_array())
+                            .is_some_and(|d| !d.is_empty())
+                    });
+                if produced {
+                    Ok(())
+                } else {
+                    Err(AdapterError::Upstream {
+                        status,
+                        message: "warm_up: empty completion — model still loading".into(),
+                    })
+                }
+            }
             Ok(_) => Ok(()),
             Err(e) => Err(AdapterError::Connect(e.to_string())),
         }

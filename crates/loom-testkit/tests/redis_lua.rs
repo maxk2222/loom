@@ -239,10 +239,40 @@ async fn client_offline_splits_reserved_and_active() {
         .unwrap();
     assert!(f1 > 0 && f2 > 0);
 
-    // client_offline → reserved requeued, active failed
-    let res: Vec<Vec<String>> = redis::Script::new(lua::CLIENT_OFFLINE)
+    // stale session → script refuses, nothing reaped
+    let client = format!("{p}client:c1");
+    redis::cmd("HSET")
+        .arg(&client)
+        .arg("session_id")
+        .arg("sid-new")
+        .query_async::<()>(&mut c)
+        .await
+        .unwrap();
+    let stale: String = redis::Script::new(lua::CLIENT_OFFLINE)
+        .key(&client)
         .key(&dep)
         .key(&leases)
+        .arg("sid-old")
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(stale, "STALE");
+    let n: i64 = redis::cmd("ZCARD")
+        .arg(&leases)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(
+        n, 2,
+        "stale disconnect must not reap a newer session's leases"
+    );
+
+    // client_offline → reserved requeued, active failed
+    let res: Vec<Vec<String>> = redis::Script::new(lua::CLIENT_OFFLINE)
+        .key(&client)
+        .key(&dep)
+        .key(&leases)
+        .arg("sid-new")
         .invoke_async(&mut c)
         .await
         .unwrap();
@@ -254,7 +284,7 @@ async fn client_offline_splits_reserved_and_active() {
     );
     assert_eq!(res[1], vec!["req-a1".to_string()], "active should fail");
 
-    // dep marked offline, leases gone
+    // dep marked offline, leases gone, client marked offline
     let state: String = redis::cmd("HGET")
         .arg(&dep)
         .arg("state")
@@ -268,6 +298,13 @@ async fn client_offline_splits_reserved_and_active() {
         .await
         .unwrap();
     assert_eq!(n, 0);
+    let online: String = redis::cmd("HGET")
+        .arg(&client)
+        .arg("online")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(online, "0");
 }
 
 #[tokio::test]
@@ -608,19 +645,51 @@ async fn queue_fifo_and_pop_order() {
         .unwrap();
     assert_eq!(r, "OK");
 
-    async fn pop(c: &mut ConnectionManager, q0: &str, q1: &str) -> Option<String> {
+    async fn pop(
+        c: &mut ConnectionManager,
+        q0: &str,
+        q1: &str,
+        count: &str,
+        wd: &str,
+    ) -> Option<String> {
         redis::Script::new(lua::QUEUE_POP)
             .key(q0)
             .key(q1)
+            .key(count)
+            .key(wd)
             .invoke_async::<Option<String>>(c)
             .await
             .unwrap()
     }
     // class 0 first (priority), then FIFO inside class 1 (a before b)
-    assert_eq!(pop(&mut c, &q0, &q1).await.as_deref(), Some("req-c"));
-    assert_eq!(pop(&mut c, &q0, &q1).await.as_deref(), Some("req-a"));
-    assert_eq!(pop(&mut c, &q0, &q1).await.as_deref(), Some("req-b"));
-    assert_eq!(pop(&mut c, &q0, &q1).await, None);
+    assert_eq!(
+        pop(&mut c, &q0, &q1, &count, &wd).await.as_deref(),
+        Some("req-c")
+    );
+    assert_eq!(
+        pop(&mut c, &q0, &q1, &count, &wd).await.as_deref(),
+        Some("req-a")
+    );
+    assert_eq!(
+        pop(&mut c, &q0, &q1, &count, &wd).await.as_deref(),
+        Some("req-b")
+    );
+    assert_eq!(pop(&mut c, &q0, &q1, &count, &wd).await, None);
+    // queue:count + watchdog tracked the pops atomically
+    let n: i64 = redis::cmd("GET")
+        .arg(&count)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    let w: Vec<String> = redis::cmd("ZRANGE")
+        .arg(&wd)
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert!(w.is_empty());
 }
 
 #[tokio::test]
@@ -998,9 +1067,19 @@ async fn kv_used_returned_by_sweep_and_client_offline() {
         .invoke_async(&mut c)
         .await
         .unwrap();
+    let client = format!("{p}client:c1");
+    redis::cmd("HSET")
+        .arg(&client)
+        .arg("session_id")
+        .arg("sid-1")
+        .query_async::<()>(&mut c)
+        .await
+        .unwrap();
     let res: Vec<Vec<String>> = redis::Script::new(lua::CLIENT_OFFLINE)
+        .key(&client)
         .key(&dep)
         .key(&leases)
+        .arg("sid-1")
         .invoke_async(&mut c)
         .await
         .unwrap();

@@ -26,7 +26,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Instant;
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 #[derive(Clone)]
@@ -491,7 +490,9 @@ async fn openai_inference_raw(
     );
 
     let started = Instant::now();
-    let cancel = CancellationToken::new();
+    // The admission token's own token — a fresh CancellationToken here would
+    // never observe admin/API cancels, so local requests could not be aborted.
+    let cancel = token.cancel_token();
     let resp = match &ib {
         InBody::Json(b) => {
             s.backends

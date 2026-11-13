@@ -406,7 +406,9 @@ impl Connector {
         let mut ep = Endpoint::from_shared(url)?;
         ep = ep
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(3600))
+            // No per-RPC wall-clock timeout: the control + request-data
+            // streams are long-lived by design, and a fixed cap would kill
+            // active streams carrying multi-hour generations mid-flight.
             .tcp_keepalive(Some(Duration::from_secs(30)))
             .http2_keep_alive_interval(Duration::from_secs(20))
             .keep_alive_while_idle(true);
@@ -1164,6 +1166,27 @@ impl Connector {
                     .await;
                 return;
             }
+            // Duplicate assign for an already-running request_id: accepting
+            // would overwrite the live entry (its cancel handle is lost and
+            // bookkeeping double-finishes). Reject retryable — the server
+            // can route it elsewhere or drop it.
+            if state
+                .active_requests
+                .read()
+                .unwrap()
+                .contains_key(&request_id)
+            {
+                let _ = ctrl_tx
+                    .send(client_msgs::assign_reject(
+                        &request_id,
+                        &a.lease_id,
+                        a.fencing_token,
+                        "duplicate_assign",
+                        true,
+                    ))
+                    .await;
+                return;
+            }
             // Admission check.
             let admit = state.scheduler.try_admit(
                 &a.deployment_id,
@@ -1420,9 +1443,9 @@ async fn run_request(
         loop {
             let next = tokio::select! {
                 _ = cancel.cancelled() => {
-                    let _ = data_tx
-                        .send(frames::end(true, "cancelled", upstream_status))
-                        .await;
+                    // Terminal frame: fire-and-forget. A stopped server must
+                    // never wedge the send — cleanup below has to run.
+                    let _ = data_tx.try_send(frames::end(true, "cancelled", upstream_status));
                     return Err("cancelled".to_string());
                 }
                 v = stream.next() => v,
@@ -1446,11 +1469,19 @@ async fn run_request(
                             .send(client_msgs::lease_usage(&request_id, total))
                             .await;
                     }
-                    if data_tx
-                        .send(frames::response_chunk(bytes.to_vec()))
-                        .await
-                        .is_err()
-                    {
+                    // A send blocked on a full channel must not wedge the task:
+                    // when the server stops draining, cancellation still wins
+                    // and the cleanup tail (slot + KV release) always runs.
+                    let send = data_tx.send(frames::response_chunk(bytes.to_vec()));
+                    tokio::pin!(send);
+                    let sent = tokio::select! {
+                        _ = cancel.cancelled() => {
+                            let _ = data_tx.try_send(frames::end(true, "cancelled", upstream_status));
+                            return Err("cancelled".to_string());
+                        }
+                        r = &mut send => r,
+                    };
+                    if sent.is_err() {
                         return Err("data stream closed".to_string());
                     }
                 }
@@ -1496,13 +1527,13 @@ async fn run_request(
         if status == "done" {
             state.backends.record_success(&a.deployment_id);
         }
-        let _ = data_tx
-            .send(frames::end(
-                status == "cancelled",
-                &finish_reason,
-                upstream_status,
-            ))
-            .await;
+        // Terminal frame — fire-and-forget; the cleanup tail must never block
+        // on a channel the server stopped draining.
+        let _ = data_tx.try_send(frames::end(
+            status == "cancelled",
+            &finish_reason,
+            upstream_status,
+        ));
         Ok::<_, String>((status.to_string(), upstream_err, usage, ttft_ms))
     }
     .await;
@@ -1512,9 +1543,7 @@ async fn run_request(
         Err(e) => {
             if e != "cancelled" {
                 warn!(req = %request_id, error = %e, "tier2 request failed");
-                let _ = data_tx
-                    .send(frames::error("upstream_error", &e, false))
-                    .await;
+                let _ = data_tx.try_send(frames::error("upstream_error", &e, false));
             }
             (
                 if e == "cancelled" {
@@ -1543,8 +1572,10 @@ async fn run_request(
         .await;
     }
 
-    let _ = ctrl_tx
-        .send(client_msgs::request_end(
+    // Bounded: a wedged control channel must not block slot/KV release below.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(10),
+        ctrl_tx.send(client_msgs::request_end(
             &request_id,
             &lease_id,
             &status,
@@ -1553,8 +1584,9 @@ async fn run_request(
             usage.completion_tokens,
             ttft_ms,
             started.elapsed().as_millis() as i64,
-        ))
-        .await;
+        )),
+    )
+    .await;
 
     telemetry::req_finished(&status);
     telemetry::req_duration(started.elapsed().as_secs_f64(), "tier2");

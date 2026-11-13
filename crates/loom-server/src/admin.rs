@@ -1284,8 +1284,42 @@ async fn delete_deployment(
             .bind(&id)
             .execute(&s.db)
             .await;
-        // Runtime keys have no FK — clean them explicitly.
+        // Runtime keys have no FK — reap in-flight lease members first so
+        // their requests finalize (usage + inflight release) instead of
+        // hanging until the watchdog reconciler notices the dead leases.
         let mut c = s.registry.rt.conn.clone();
+        let members: Vec<String> = redis::cmd("ZRANGE")
+            .arg(s.registry.rt.k(&format!("dep:{id}:leases")))
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut c)
+            .await
+            .unwrap_or_default();
+        for lkey in members {
+            let rq: Option<String> = redis::cmd("HGET")
+                .arg(&lkey)
+                .arg("request_id")
+                .query_async(&mut c)
+                .await
+                .unwrap_or(None);
+            if let Some(rid) = rq {
+                s.scheduler
+                    .complete_end(
+                        &rid,
+                        crate::scheduler::EndMeta {
+                            status: "failed".into(),
+                            error_code: "deployment_deleted".into(),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+            }
+            let _: () = redis::cmd("DEL")
+                .arg(&lkey)
+                .query_async(&mut c)
+                .await
+                .unwrap_or(());
+        }
         let _: () = redis::cmd("DEL")
             .arg(s.registry.rt.k(&format!("dep:{id}")))
             .arg(s.registry.rt.k(&format!("dep:{id}:leases")))

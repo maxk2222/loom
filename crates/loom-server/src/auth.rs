@@ -197,35 +197,25 @@ impl Auth {
         Ok(n > 0)
     }
 
-    /// Rate limit + concurrency check via Lua; commit on success.
+    /// Rate limit + concurrency check via Lua; admission commits atomically
+    /// inside the same script (no check/commit race window).
     pub async fn rl_check(&self, ctx: &ApiKeyCtx, request_id: &str) -> Result<(), &'static str> {
         let mut c = self.rt.conn.clone();
-        let now = now_ms();
-        let res: String = redis::Script::new(crate::lua::RL_CHECK)
+        let res: String = redis::Script::new(crate::lua::RL_ADMIT)
             .key(self.rt.k(&format!("rl:key:{}:rpm", ctx.api_key_id)))
             .key(self.rt.k(&format!("inflight:key:{}", ctx.api_key_id)))
             .key(self.rt.k(&format!("rl:key:{}:tpm", ctx.api_key_id)))
-            .arg(now)
+            .arg(now_ms())
             .arg(60_000)
             .arg(ctx.rpm_limit)
             .arg(ctx.max_concurrent)
             .arg(ctx.tpm_limit)
+            .arg(request_id)
             .invoke_async(&mut c)
             .await
             .map_err(|_| "redis")?;
         match res.as_str() {
-            "OK" => {
-                let _: String = redis::Script::new(crate::lua::RL_COMMIT)
-                    .key(self.rt.k(&format!("rl:key:{}:rpm", ctx.api_key_id)))
-                    .key(self.rt.k(&format!("inflight:key:{}", ctx.api_key_id)))
-                    .arg(now)
-                    .arg(request_id)
-                    .arg(60_000)
-                    .invoke_async(&mut c)
-                    .await
-                    .unwrap_or_default();
-                Ok(())
-            }
+            "OK" => Ok(()),
             "RPM" => Err("rate_limited"),
             "TPM" => Err("tpm_limited"),
             "CONCURRENCY" => Err("concurrency_exceeded"),

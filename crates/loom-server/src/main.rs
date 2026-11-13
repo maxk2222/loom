@@ -30,8 +30,59 @@ async fn main() -> anyhow::Result<()> {
     info!("postgres connected + migrated");
 
     let rt = redisx::Rt::connect(&cfg.redis_url, &cfg.redis_prefix).await?;
-    rt.reset_runtime().await?; // boot reconciliation: no stale slots
-    info!("redis connected, runtime state reset");
+    // Single-owner guard: a second loom-server on the same Redis namespace
+    // must not wipe the live instance's runtime state mid-flight. Acquire a
+    // short-lived owner lock; only the owner may reset, and it keeps the
+    // lease renewed while it runs.
+    let instance_lock = rt.k("instance:owner");
+    let instance_token = loom_core::ids::opaque_token(16);
+    {
+        let mut c = rt.conn.clone();
+        let got: Option<String> = redis::cmd("SET")
+            .arg(&instance_lock)
+            .arg(&instance_token)
+            .arg("PX")
+            .arg(30_000)
+            .arg("NX")
+            .query_async(&mut c)
+            .await
+            .unwrap_or(None);
+        if got.is_some() {
+            rt.reset_runtime().await?; // boot reconciliation: no stale slots
+            info!("redis connected, runtime state reset (instance owner)");
+            // Renew while running so a stale lock cannot let a peer reset
+            // underneath us; CAS on the token so only the owner extends.
+            let rt2 = rt.clone();
+            let lock_key = instance_lock.clone();
+            let token = instance_token.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+                loop {
+                    tick.tick().await;
+                    let mut c = rt2.conn.clone();
+                    let _: i64 = redis::Script::new(
+                        "if redis.call('GET', KEYS[1]) == ARGV[1] \
+                         then return redis.call('PEXPIRE', KEYS[1], 30000) \
+                         else return 0 end",
+                    )
+                    .key(&lock_key)
+                    .arg(&token)
+                    .invoke_async(&mut c)
+                    .await
+                    .unwrap_or(0);
+                }
+            });
+        } else {
+            // Another live server owns this Redis namespace. Serve anyway —
+            // after the ownership-aware queue/dispatch changes, multi-instance
+            // degrades gracefully instead of corrupting — but warn loudly.
+            tracing::warn!(
+                "another loom-server owns this Redis namespace — starting without \
+                 runtime reset (multi-instance: shared queue, per-instance waiters)"
+            );
+            info!("redis connected (peer instance already owns runtime state)");
+        }
+    }
 
     let sessions = session::SessionManager::new();
     let models = model_registry::ModelRegistry::new(pool.clone());
@@ -96,6 +147,11 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                         sess.unregister(&cid, &sid).await;
+                        // Kill the stale control task itself: without a kick
+                        // it keeps running, keeps sending capacity reports,
+                        // and can mark deployments available again while no
+                        // longer registered — split-brain routing.
+                        sess.kick(&cid).await;
                         sch.wake();
                     }
                 }
@@ -394,6 +450,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .layer(axum::middleware::from_fn(sec_headers_mw))
         .layer(tower_http::trace::TraceLayer::new_for_http())
+        // A handler panic must surface as a 500, not an aborted connection
+        // that leaves the caller hanging and bookkeeping half-done.
+        .layer(tower_http::catch_panic::CatchPanicLayer::new())
         // Slow-loris / slot-exhaustion bounds: bounded overall concurrency
         // plus a wall-clock ceiling per request (LLM requests legitimately
         // take minutes — the scheduler deadline still bounds the work,

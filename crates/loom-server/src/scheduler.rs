@@ -123,6 +123,11 @@ struct Inner {
     /// request_id -> (client_id, fencing, lease_id, dep_id) — cancel routing
     /// plus mid-flight lease footprint updates.
     active: Mutex<HashMap<String, (String, u64, String, String)>>,
+    /// This server instance's identity — stamped on queued entries so a
+    /// second server sharing the Redis namespace can tell "orphaned entry"
+    /// (owner dead/unknown) from "entry owned by a live peer" (requeue it
+    /// back instead of dropping the caller's request).
+    instance_id: String,
 }
 
 impl Scheduler {
@@ -146,6 +151,7 @@ impl Scheduler {
                 acks: Mutex::new(HashMap::new()),
                 ends: Mutex::new(HashMap::new()),
                 active: Mutex::new(HashMap::new()),
+                instance_id: loom_core::ids::opaque_token(12),
             }),
         }
     }
@@ -381,7 +387,9 @@ impl Scheduler {
         // DB-derived key/project classes and router-internal submits alike.
         req.prio = clamp_class(req.prio, self.priority_classes());
         if self.higher_or_equal_empty(req.prio).await {
-            match self.try_dispatch(&req).await {
+            let deadline = std::time::Instant::now()
+                + Duration::from_millis(self.inner.cfg.assign_ack_timeout_ms.max(5000) + 30_000);
+            match self.try_dispatch(&req, deadline).await {
                 Ok(o) => return Ok(o),
                 // AllUnavailable also queues: right after server restarts or
                 // client reconnects the dep hash still reads `draining` until
@@ -434,7 +442,7 @@ impl Scheduler {
             .await
             .insert(rid.clone(), PendingEntry { req, done_tx });
         let mut c = self.inner.rt.conn.clone();
-        let res: String = redis::Script::new(crate::lua::QUEUE_ENQUEUE)
+        let res: Result<String, _> = redis::Script::new(crate::lua::QUEUE_ENQUEUE)
             .key(self.inner.rt.k(&format!("queue:{prio}")))
             .key(self.inner.rt.k(&format!("req:{rid}")))
             .key(self.inner.rt.k("queue:count"))
@@ -446,9 +454,19 @@ impl Scheduler {
             .arg(&model)
             .arg(prio)
             .arg(dl)
+            .arg(&self.inner.instance_id)
             .invoke_async(&mut c)
-            .await
-            .map_err(|e| SchedErr::Backend(e.to_string()))?;
+            .await;
+        let res = match res {
+            Ok(res) => res,
+            Err(e) => {
+                // A script error leaves no queue member to trigger the
+                // dead-waiter cleanup — drop the pending entry (which holds
+                // the whole request body) ourselves.
+                self.inner.pending.lock().await.remove(&rid);
+                return Err(SchedErr::Backend(e.to_string()));
+            }
+        };
         if res != "OK" {
             self.inner.pending.lock().await.remove(&rid);
             return Err(SchedErr::QueueFull);
@@ -520,10 +538,42 @@ impl Scheduler {
                 let _ = self.finish_pending(&rid, Err(SchedErr::Timeout)).await;
             }
         }
-        // b) expired reserved leases on all known deployments
+        // a2) `queue:count` is maintained inside the queue scripts, but any
+        // missed decrement (legacy data, script error) re-arms QueueFull
+        // forever — periodically clamp it to the sum of the class zsets.
+        {
+            let mut n: i64 = 0;
+            for p in 0..self.inner.cfg.priority_classes.max(1) {
+                let z: i64 = redis::cmd("ZCARD")
+                    .arg(self.inner.rt.k(&format!("queue:{p}")))
+                    .query_async(&mut c)
+                    .await
+                    .unwrap_or(0);
+                n += z;
+            }
+            let cur: i64 = redis::cmd("GET")
+                .arg(self.inner.rt.k("queue:count"))
+                .query_async::<Option<String>>(&mut c)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            if cur != n {
+                tracing::warn!(stored = cur, actual = n, "queue:count drift corrected");
+                let _: () = redis::cmd("SET")
+                    .arg(self.inner.rt.k("queue:count"))
+                    .arg(n)
+                    .query_async(&mut c)
+                    .await
+                    .unwrap_or(());
+            }
+        }
+        // b) expired reserved leases on ALL deployments — a disabled dep keeps
+        // its lease set, and skipping it would leak the slots it still holds.
         let deps: Vec<(String, Option<i64>)> = sqlx::query_as(
             "SELECT id::text, COALESCE(kv_budget_tokens, reported_kv_budget_tokens) \
-             FROM deployments WHERE enabled = true",
+             FROM deployments",
         )
         .fetch_all(&self.inner.registry.db)
         .await
@@ -590,6 +640,32 @@ impl Scheduler {
                 .await;
             }
         }
+        // d) Reconcile the in-process maps: an `active`/`ends` entry whose
+        // lease no longer exists in Redis is post-mortem (the bridge's grace
+        // end should have fired, but a panicked task or a stale process must
+        // not leave the finalizer hanging and the inflight slot held).
+        {
+            let act = self.inner.active.lock().await.clone();
+            for (rid, (_cid, _f, lease_id, _d)) in act {
+                let exists: bool = redis::cmd("EXISTS")
+                    .arg(self.inner.rt.k(&format!("lease:{lease_id}")))
+                    .query_async(&mut c)
+                    .await
+                    .unwrap_or(true);
+                if !exists {
+                    tracing::warn!(req = %rid, lease = %lease_id, "active entry with dead lease — reconciling");
+                    self.complete_end(
+                        &rid,
+                        EndMeta {
+                            status: "failed".into(),
+                            error_code: "lease_lost".into(),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
     }
 
     async fn dispatch_pending(&self) {
@@ -600,9 +676,13 @@ impl Scheduler {
         let mut deferred: Vec<(PendingEntry, String, bool)> = Vec::new();
         for _ in 0..128 {
             let mut c = self.inner.rt.conn.clone();
-            let keys: Vec<String> = (0..self.inner.cfg.priority_classes.max(1))
+            let mut keys: Vec<String> = (0..self.inner.cfg.priority_classes.max(1))
                 .map(|p| self.inner.rt.k(&format!("queue:{p}")))
                 .collect();
+            // Trailing bookkeeping keys: the script decrements queue:count and
+            // removes the watchdog member atomically with the pop.
+            keys.push(self.inner.rt.k("queue:count"));
+            keys.push(self.inner.rt.k("req:watchdog"));
             let popped: Result<Option<String>, _> = redis::Script::new(crate::lua::QUEUE_POP)
                 .key(keys)
                 .invoke_async(&mut c)
@@ -612,22 +692,56 @@ impl Scheduler {
                 Ok(v) => tracing::debug!(popped=?v, "queue_pop result"),
             }
             let Ok(Some(rid)) = popped else { break };
-            let _: () = redis::pipe()
-                .cmd("DECR")
-                .arg(self.inner.rt.k("queue:count"))
-                .ignore()
-                .cmd("ZREM")
-                .arg(self.inner.rt.k("req:watchdog"))
-                .arg(&rid)
-                .ignore()
-                .query_async(&mut c)
-                .await
-                .unwrap_or(());
             let entry = self.inner.pending.lock().await.remove(&rid);
             let Some(e) = entry else {
-                // Orphaned queue entry (e.g. pending map lost on restart):
-                // drop the tracking hash so it does not linger until TTL.
-                let mut c = self.inner.rt.conn.clone();
+                // Orphaned queue entry — decide whose it is. With a shared
+                // Redis namespace a peer server may own the in-process waiter:
+                // dropping the tracking hash would hang the caller on the
+                // other instance until deadline. Requeue it back (FIFO score
+                // preserved) so its owner pops it next pass. Only entries
+                // with no owner stamp — or our own — are true orphans.
+                let h: std::collections::HashMap<String, String> = redis::cmd("HGETALL")
+                    .arg(self.inner.rt.k(&format!("req:{rid}")))
+                    .query_async(&mut c)
+                    .await
+                    .unwrap_or_default();
+                let foreign = h
+                    .get("owner")
+                    .is_some_and(|o| !o.is_empty() && o != &self.inner.instance_id);
+                if foreign {
+                    let prio: u32 = h.get("prio").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let ets: i64 = h
+                        .get("enqueued_at")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(crate::client_registry::now_ms);
+                    let dl: i64 = h
+                        .get("deadline")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(i64::MAX);
+                    let proj = h.get("project_id").cloned().unwrap_or_default();
+                    let model = h.get("vm_id").cloned().unwrap_or_default();
+                    let owner = h.get("owner").cloned().unwrap_or_default();
+                    let res: String = redis::Script::new(crate::lua::QUEUE_ENQUEUE)
+                        .key(self.inner.rt.k(&format!("queue:{prio}")))
+                        .key(self.inner.rt.k(&format!("req:{rid}")))
+                        .key(self.inner.rt.k("queue:count"))
+                        .key(self.inner.rt.k("req:watchdog"))
+                        .arg(&rid)
+                        .arg(ets)
+                        .arg(self.inner.cfg.max_queue as i64)
+                        .arg(&proj)
+                        .arg(&model)
+                        .arg(prio)
+                        .arg(dl)
+                        .arg(&owner)
+                        .invoke_async(&mut c)
+                        .await
+                        .unwrap_or_else(|_| "ERR".into());
+                    if res == "OK" {
+                        continue;
+                    }
+                    // queue full or script error — fall through to drop.
+                }
                 let _: () = redis::cmd("DEL")
                     .arg(self.inner.rt.k(&format!("req:{rid}")))
                     .query_async(&mut c)
@@ -647,13 +761,9 @@ impl Scheduler {
                     .unwrap_or(());
                 continue;
             }
-            let outcome = tokio::time::timeout(
-                Duration::from_millis(self.inner.cfg.assign_ack_timeout_ms.max(5000) + 30_000),
-                self.try_dispatch(&e.req),
-            )
-            .await
-            .map_err(|_| SchedErr::Timeout)
-            .and_then(|r| r);
+            let deadline = std::time::Instant::now()
+                + Duration::from_millis(self.inner.cfg.assign_ack_timeout_ms.max(5000) + 30_000);
+            let outcome = self.try_dispatch(&e.req, deadline).await;
             match outcome {
                 Ok(outcome) => {
                     // Dispatched: the lease now tracks inflight state — the
@@ -747,6 +857,7 @@ impl Scheduler {
             .arg(&model)
             .arg(prio)
             .arg(dl)
+            .arg(&self.inner.instance_id)
             .invoke_async(&mut c)
             .await
             .unwrap_or_else(|_| "ERR".into());
@@ -760,7 +871,11 @@ impl Scheduler {
         true
     }
 
-    async fn try_dispatch(&self, req: &PendingRequest) -> Result<RequestOutcome, SchedErr> {
+    async fn try_dispatch(
+        &self,
+        req: &PendingRequest,
+        deadline: std::time::Instant,
+    ) -> Result<RequestOutcome, SchedErr> {
         let Some(vm) = self.inner.models.resolve(&req.model).await else {
             return Err(SchedErr::NoCandidates);
         };
@@ -857,6 +972,14 @@ impl Scheduler {
                 .any(|(_, st, _)| st == "available" || st == "draining");
         let mut saw_transient = false;
         for member in ranked {
+            // The dispatch pass is time-budgeted, but a deadline is only
+            // checked BETWEEN candidates — an in-flight lease_and_assign runs
+            // its own bounded awaits to completion. Dropping it mid-await
+            // would leave an acquired lease nobody owns.
+            if std::time::Instant::now() >= deadline {
+                tracing::debug!(req = %req.request_id, "dispatch budget exhausted mid-pass");
+                return Err(SchedErr::NoCapacity);
+            }
             match self.lease_and_assign(req, &member).await {
                 Ok(outcome) => {
                     trace["deployment_id"] = json!(member.deployment_id);
@@ -1026,23 +1149,33 @@ impl Scheduler {
             }
         }
 
-        // Confirm lease → then await client data stream.
-        let _: String = redis::Script::new(crate::lua::LEASE_CONFIRM)
+        // Confirm lease → then await client data stream. A vanished lease
+        // (swept between acquire and confirm) must abort the assign —
+        // proceeding would stream a request that holds no slot.
+        let conf: String = redis::Script::new(crate::lua::LEASE_CONFIRM)
             .key(self.inner.rt.k(&format!("lease:{lease_id}")))
             .key(self.inner.rt.k(&format!("dep:{dep_id}")))
             .arg(fencing)
             .invoke_async(&mut c)
             .await
             .unwrap_or_default();
+        if conf != "OK" {
+            self.cleanup_assign(&rid, &lease_id, fencing, &dep_id).await;
+            return Err(SchedErr::ClientOffline);
+        }
 
         // activate lease state
-        let _: String = redis::Script::new(crate::lua::LEASE_ACTIVATE)
+        let act: String = redis::Script::new(crate::lua::LEASE_ACTIVATE)
             .key(self.inner.rt.k(&format!("lease:{lease_id}")))
             .arg(fencing)
             .arg(crate::client_registry::now_ms())
             .invoke_async(&mut c)
             .await
             .unwrap_or_default();
+        if act != "OK" {
+            self.cleanup_assign(&rid, &lease_id, fencing, &dep_id).await;
+            return Err(SchedErr::ClientOffline);
+        }
 
         let (mut inbound, outbound) =
             match tokio::time::timeout(Duration::from_secs(10), data_rx).await {
@@ -1068,11 +1201,22 @@ impl Scheduler {
             let up_status = upstream_status.clone();
             let cancel2 = cancel.clone();
             let rt = self.inner.rt.clone();
+            let inner2 = self.inner.clone();
             let sessions2 = self.inner.sessions.clone();
             let client2 = client_id.clone();
             let lease2 = lease_id.clone();
             let dep2 = dep_id.clone();
             let rid_for_release = rid.clone();
+            // Caller-abort is detected the moment the receiver drops — do not
+            // wait for the next upstream chunk to notice.
+            {
+                let resp_closed = resp_tx.clone();
+                let cancel3 = cancel2.clone();
+                tokio::spawn(async move {
+                    resp_closed.closed().await;
+                    cancel3.cancel();
+                });
+            }
             tokio::spawn(async move {
                 use futures_util::StreamExt;
                 // Stream liveness: the lease's `activated_at` is what the
@@ -1080,86 +1224,106 @@ impl Scheduler {
                 // Refreshing it on data turns that hard deadline into a pure
                 // stall timeout — a generating request is never killed.
                 let mut last_liveness = std::time::Instant::now();
-                // 1) deliver payload to client (chunked)
-                for chunk in body.chunks(256 * 1024) {
-                    if outbound
-                        .send(frames::request_json(chunk.to_vec()))
-                        .await
-                        .is_err()
-                    {
-                        let _ = resp_tx
-                            .send(Err(SchedErr::Backend("data stream closed".into())))
-                            .await;
-                        return;
+                let mut end_status = "done";
+                let mut end_error = String::new();
+                'work: {
+                    // 1) deliver payload to client (chunked)
+                    for chunk in body.chunks(256 * 1024) {
+                        if outbound
+                            .send(frames::request_json(chunk.to_vec()))
+                            .await
+                            .is_err()
+                        {
+                            let _ = resp_tx
+                                .send(Err(SchedErr::Backend("data stream closed".into())))
+                                .await;
+                            end_status = "failed";
+                            end_error = "data_stream_closed".into();
+                            break 'work;
+                        }
                     }
-                }
-                // 2) forward client response chunks until End/Error/cancel
-                tracing::debug!(req = %rid_for_release, "bridge: payload sent, reading inbound");
-                loop {
-                    let next = tokio::select! {
-                        _ = cancel2.cancelled() => break,
-                        v = inbound.next() => v,
-                    };
-                    tracing::debug!(req = %rid_for_release, frame = ?next.as_ref().map(|r| r.as_ref().map(|f| std::mem::discriminant(&f.frame))), "bridge inbound");
-                    match next {
-                        Some(Ok(loom_protocol::pb::DataFrame {
-                            frame: Some(loom_protocol::pb::data_frame::Frame::ResponseChunk(b)),
-                        })) => {
-                            if last_liveness.elapsed() > Duration::from_secs(10) {
-                                last_liveness = std::time::Instant::now();
-                                let mut conn = rt.conn.clone();
-                                // EXISTS guard: a plain HSET on a vanished lease
-                                // would recreate a partial hash (activated_at
-                                // only) that no sweep can attribute to a state.
-                                let _: () = redis::Script::new(
-                                    "if redis.call('EXISTS', KEYS[1]) == 1 then \
-                                     redis.call('HSET', KEYS[1], 'activated_at', ARGV[1]) end",
-                                )
-                                .key(rt.k(&format!("lease:{lease2}")))
-                                .arg(crate::client_registry::now_ms())
-                                .invoke_async(&mut conn)
-                                .await
-                                .unwrap_or(());
-                            }
-                            tracing::debug!(req = %rid_for_release, n = b.len(), "response_chunk");
-                            if resp_tx.send(Ok(b.into())).await.is_err() {
-                                // Caller gone: tell the client to abort backend
-                                // generation — merely stop reading would leave
-                                // the model burning a tier-2 slot until natural
-                                // completion.
-                                let _ = sessions2
-                                    .send(
-                                        &client2,
-                                        server_msgs::cancel(
-                                            &rid_for_release,
-                                            fencing,
-                                            "caller_disconnected",
-                                        ),
+                    // 2) forward client response chunks until End/Error/cancel
+                    tracing::debug!(req = %rid_for_release, "bridge: payload sent, reading inbound");
+                    loop {
+                        let next = tokio::select! {
+                            _ = cancel2.cancelled() => { end_status = "cancelled"; break },
+                            v = inbound.next() => v,
+                        };
+                        tracing::debug!(req = %rid_for_release, frame = ?next.as_ref().map(|r| r.as_ref().map(|f| std::mem::discriminant(&f.frame))), "bridge inbound");
+                        match next {
+                            Some(Ok(loom_protocol::pb::DataFrame {
+                                frame: Some(loom_protocol::pb::data_frame::Frame::ResponseChunk(b)),
+                            })) => {
+                                if last_liveness.elapsed() > Duration::from_secs(10) {
+                                    last_liveness = std::time::Instant::now();
+                                    let mut conn = rt.conn.clone();
+                                    // EXISTS guard: a plain HSET on a vanished lease
+                                    // would recreate a partial hash (activated_at
+                                    // only) that no sweep can attribute to a state.
+                                    let _: () = redis::Script::new(
+                                        "if redis.call('EXISTS', KEYS[1]) == 1 then \
+                                         redis.call('HSET', KEYS[1], 'activated_at', ARGV[1]) end",
                                     )
+                                    .key(rt.k(&format!("lease:{lease2}")))
+                                    .arg(crate::client_registry::now_ms())
+                                    .invoke_async(&mut conn)
+                                    .await
+                                    .unwrap_or(());
+                                }
+                                tracing::debug!(req = %rid_for_release, n = b.len(), "response_chunk");
+                                if resp_tx.send(Ok(b.into())).await.is_err() {
+                                    // Caller gone: tell the client to abort backend
+                                    // generation — merely stop reading would leave
+                                    // the model burning a tier-2 slot until natural
+                                    // completion.
+                                    let _ = sessions2
+                                        .send(
+                                            &client2,
+                                            server_msgs::cancel(
+                                                &rid_for_release,
+                                                fencing,
+                                                "caller_disconnected",
+                                            ),
+                                        )
+                                        .await;
+                                    end_status = "cancelled";
+                                    break;
+                                }
+                            }
+                            Some(Ok(loom_protocol::pb::DataFrame {
+                                frame: Some(loom_protocol::pb::data_frame::Frame::Error(e)),
+                            })) => {
+                                let _ = resp_tx
+                                    .send(Err(SchedErr::Backend(e.message.clone())))
                                     .await;
+                                end_status = "failed";
+                                end_error = "backend".into();
+                                break;
+                            }
+                            Some(Ok(loom_protocol::pb::DataFrame {
+                                frame: Some(loom_protocol::pb::data_frame::Frame::End(e)),
+                            })) => {
+                                up_status
+                                    .store(e.upstream_status, std::sync::atomic::Ordering::Relaxed);
+                                if e.cancelled {
+                                    end_status = "cancelled";
+                                }
+                                tracing::debug!(req = %rid_for_release, "end frame");
+                                break;
+                            }
+                            Some(Ok(_)) => continue,
+                            Some(Err(e)) => {
+                                let _ = resp_tx.send(Err(SchedErr::Backend(e.to_string()))).await;
+                                end_status = "failed";
+                                end_error = "data_stream".into();
+                                break;
+                            }
+                            None => {
+                                end_status = "aborted";
+                                end_error = "data_stream_closed".into();
                                 break;
                             }
                         }
-                        Some(Ok(loom_protocol::pb::DataFrame {
-                            frame: Some(loom_protocol::pb::data_frame::Frame::Error(e)),
-                        })) => {
-                            let _ = resp_tx.send(Err(SchedErr::Backend(e.message))).await;
-                            break;
-                        }
-                        Some(Ok(loom_protocol::pb::DataFrame {
-                            frame: Some(loom_protocol::pb::data_frame::Frame::End(e)),
-                        })) => {
-                            up_status
-                                .store(e.upstream_status, std::sync::atomic::Ordering::Relaxed);
-                            tracing::debug!(req = %rid_for_release, "end frame");
-                            break;
-                        }
-                        Some(Ok(_)) => continue,
-                        Some(Err(e)) => {
-                            let _ = resp_tx.send(Err(SchedErr::Backend(e.to_string()))).await;
-                            break;
-                        }
-                        None => break,
                     }
                 }
                 // Release the lease — slot freed exactly once, idempotent.
@@ -1173,6 +1337,21 @@ impl Scheduler {
                     .invoke_async(&mut c)
                     .await
                     .unwrap_or_default();
+                // Safety net for a missing RequestEnd: the client normally
+                // reports usage/end on the control stream within ms, but if
+                // it died mid-teardown (or is non-conforming) `ends`/`active`
+                // and the gateway finalizer would hang forever — leaking the
+                // inflight counter and the usage record. Give the real
+                // RequestEnd a short grace window, then resolve synthetically.
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                if let Some(tx) = inner2.ends.lock().await.remove(&rid_for_release) {
+                    let _ = tx.send(EndMeta {
+                        status: end_status.into(),
+                        error_code: end_error,
+                        ..Default::default()
+                    });
+                    inner2.active.lock().await.remove(&rid_for_release);
+                }
             });
         }
         Ok(RequestOutcome {

@@ -70,7 +70,7 @@ impl UsageWriter {
 
 async fn flush(db: &PgPool, buf: &mut Vec<UsageRecord>) {
     for r in buf.drain(..) {
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO requests_history
              (id, api_key_id, project_id, virtual_model_id, deployment_id, client_id,
               status, queue_wait_ms, ttft_ms, duration_ms, prompt_tokens,
@@ -93,10 +93,14 @@ async fn flush(db: &PgPool, buf: &mut Vec<UsageRecord>) {
         .bind(&r.error_code)
         .bind(&r.routing_trace)
         .execute(db)
-        .await;
+        .await
+        {
+            // A dropped record is metering data loss — never silent.
+            tracing::warn!(req = %r.request_id, error = %e, "requests_history insert failed");
+        }
         // hourly counters
         if !r.project_id.is_empty() && !r.api_key_id.is_empty() && !r.virtual_model_id.is_empty() {
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 "INSERT INTO usage_counters (bucket, project_id, api_key_id, virtual_model_id, requests, prompt_tokens, completion_tokens)
                  VALUES (date_trunc('hour', now()), $1::uuid, $2::uuid, $3::uuid, 1, $4, $5)
                  ON CONFLICT (bucket, project_id, api_key_id, virtual_model_id)
@@ -110,7 +114,10 @@ async fn flush(db: &PgPool, buf: &mut Vec<UsageRecord>) {
             .bind(r.prompt_tokens as i64)
             .bind(r.completion_tokens as i64)
             .execute(db)
-            .await;
+            .await
+            {
+                tracing::warn!(req = %r.request_id, error = %e, "usage_counters upsert failed");
+            }
         }
     }
 }
