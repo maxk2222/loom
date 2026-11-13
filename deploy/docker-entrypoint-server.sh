@@ -27,11 +27,16 @@ done
 # volume stamp predates build stamping and counts as older.
 BIN=/data/bin/loom-server
 SEED_BIN=/usr/local/bin/loom-server
+OKF="$BIN.boot-ok"
+ATF="$BIN.boot-attempt"
 ver() { "$1" --version 2>/dev/null | awk '{print $NF}'; }
 IMG_ID="$(cat /etc/loom-build-id 2>/dev/null || echo 0)"
 # Swap via rename, not in-place cp: overwriting the file a still-running
 # process executes fails with ETXTBSY and would silently keep the stale bin.
-seed() { cp "$SEED_BIN" "$BIN.new" && mv -f "$BIN.new" "$BIN" && echo "$IMG_ID" > "$BIN.build-id"; }
+# A re-seed resets provenance: the image is the new baseline, and stale
+# .prev/.boot-ok/.boot-attempt from self-update days must never outrank it.
+seed() { cp "$SEED_BIN" "$BIN.new" && mv -f "$BIN.new" "$BIN" && echo "$IMG_ID" > "$BIN.build-id" \
+    && rm -f "$BIN.prev" "$OKF" "$ATF"; }
 # Intentional downgrades: the version guard below protects self-updated
 # binaries from older images — LOOM_FORCE_RESEED=1 is the documented escape
 # hatch to pin the image's version back onto the volume.
@@ -58,8 +63,39 @@ elif [ -x "$BIN" ]; then
     fi
 else
     mkdir -p /data/bin
-    seed
+    # Crash between the self-update's two renames (exe→prev, new→exe) leaves
+    # a staged .new with no BIN — completing the swap is strictly better than
+    # falling back to the image: the staged binary was already sig-verified.
+    if [ -x "$BIN.new" ]; then
+        mv -f "$BIN.new" "$BIN" \
+            && echo "loom-server: completed interrupted self-update swap to v$(ver "$BIN")" >&2
+    else
+        seed
+    fi
 fi
 chown -R "$LOOM_UID:$LOOM_GID" /data/bin 2>/dev/null || true
+
+# Auto-rollback: .boot-ok names the version that last reached a healthy
+# startup (the running server writes it after all listeners bind);
+# .boot-attempt tracks "<version>:<unproven boots>" — incremented only
+# while the marker disagrees, so a binary that proved itself once keeps
+# normal restart retries forever. Roll back when the current binary failed
+# to prove itself twice AND .prev IS the proven one — a crashing
+# self-update self-heals instead of crash-looping, while a transient boot
+# failure still gets a retry. Two unproven binaries never ping-pong:
+# rollback requires prev == marker.
+CUR_V="$(ver "$BIN")"; PROVEN="$(cat "$OKF" 2>/dev/null || true)"
+ATT="$(cat "$ATF" 2>/dev/null || true)"; ATT_V="${ATT%%:*}"; ATT_N="${ATT##*:}"
+case "$ATT_N" in ''|*[!0-9]*) ATT_N=0 ;; esac
+if [ "$ATT_V" = "$CUR_V" ]; then ATT_N=$((ATT_N + 1)); else ATT_N=1; fi
+if [ -x "$BIN.prev" ] && [ -n "$PROVEN" ] && [ "$CUR_V" != "$PROVEN" ] \
+    && [ "$(ver "$BIN.prev")" = "$PROVEN" ] && [ "$ATT_N" -ge 3 ]; then
+    echo "loom-server: rolled back unproven v$CUR_V -> proven v$PROVEN" >&2
+    mv -f "$BIN.prev" "$BIN"; CUR_V="$PROVEN"; ATT_N=1
+fi
+echo "$CUR_V:$ATT_N" > "$ATF" 2>/dev/null || true
+# A lingering .new while BIN is intact is leftover staging from an aborted
+# update — never adoptable.
+rm -f "$BIN.new"
 
 exec runuser -u loom -- "$BIN" "$@"

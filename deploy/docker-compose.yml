@@ -41,15 +41,18 @@ services:
 
   server:
     profiles: ["full"]
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.server
-    # Release image instead of a local source build — bit-identical to the
-    # release binaries (same signed artifact). The volume-binary entrypoint
-    # still applies: self-updates newer than this tag win, an image bump to
-    # a newer tag re-seeds. LOOM_FORCE_RESEED=1 forces the image's version
-    # onto the volume (documented downgrade path).
-    # image: ghcr.io/maxk2222/loom-server:${LOOM_IMAGE_TAG:-latest}
+    # Release image — bit-identical to the signed release binaries (built
+    # from the same artifact by the release workflow). Pin LOOM_IMAGE_TAG to
+    # a version for controlled movement; `compose pull && up -d` then applies
+    # it. The volume-binary entrypoint still applies: self-updates newer than
+    # this tag win, an image bump to a newer tag re-seeds, and an unproven
+    # binary auto-rolls back to the proven .prev on restart.
+    # LOOM_FORCE_RESEED=1 forces the image's version onto the volume.
+    image: ghcr.io/maxk2222/loom-server:${LOOM_IMAGE_TAG:-latest}
+    # Dev path (local build instead of the release image):
+    # build:
+    #   context: ..
+    #   dockerfile: deploy/Dockerfile.server
     restart: unless-stopped
     depends_on:
       postgres:

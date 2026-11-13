@@ -56,28 +56,57 @@ const CLIENT_NAV: NavItem[] = [
 function UpdateChip() {
   const [res, setRes] = useState<any>(null);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
   const isClient = APP_VARIANT === "client";
   const check = async () =>
     setRes(await api.get<any>(isClient ? "/local/api/update-check" : "/api/update-check").catch(() => null));
   const apply = async () => {
     setBusy(true);
-    await api.post(isClient ? "/local/api/update" : "/api/server/update").catch(() => null);
+    setErr(null);
+    const r = await api
+      .post<any>(isClient ? "/local/api/update" : "/api/server/update")
+      .catch(() => null);
+    if (!r || r.ok === false) {
+      setErr(String(r?.error || "update failed"));
+      setBusy(false);
+      return;
+    }
+    // Server path: `restarting:true` means the process exits now — poll the
+    // status endpoint until it answers again, then drop the busy state.
+    if (!isClient && r?.restarting) {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((res) => setTimeout(res, 2000));
+        const st = await api.get<any>("/api/server/update-status").catch(() => null);
+        if (st?.version) {
+          setBusy(false);
+          setRes(null);
+          return;
+        }
+      }
+      setErr("server did not come back — check logs");
+    }
+    setBusy(false);
   };
   if (!res)
     return <button className="btn-ghost px-2 py-0.5 text-[11px]" onClick={check}>check update</button>;
   const newer = res.latest && res.latest.replace(/^v/, "") !== res.current;
-  return newer ? (
+  return (
     <span className="inline-flex items-center gap-1.5">
-      <a className="badge bg-warn/12 text-warn" href={res.url} target="_blank" rel="noreferrer">
-        ⬆ {res.latest}
-      </a>
-      <button className="btn-ghost px-1.5 py-0.5 text-[10px]" disabled={busy} onClick={apply}
-        title="Apply update now (downloads, verifies and restarts)">
-        {busy ? "…" : "apply"}
-      </button>
+      {newer ? (
+        <>
+          <a className="badge bg-warn/12 text-warn" href={res.url} target="_blank" rel="noreferrer">
+            ⬆ {res.latest}
+          </a>
+          <button className="btn-ghost px-1.5 py-0.5 text-[10px]" disabled={busy} onClick={apply}
+            title="Apply update now (downloads, verifies and restarts)">
+            {busy ? "…" : "apply"}
+          </button>
+        </>
+      ) : (
+        <Badge tone="ok">up to date</Badge>
+      )}
+      {err && <span className="text-[10px] text-err" title={err}>failed</span>}
     </span>
-  ) : (
-    <Badge tone="ok">up to date</Badge>
   );
 }
 

@@ -471,6 +471,20 @@ async fn main() -> anyhow::Result<()> {
     let http_addr: SocketAddr = cfg.http_bind.parse()?;
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
     info!(%http_addr, "HTTP listening (v1 + api + ui)");
+    // Boot proven: migrations + redis + every listener are up AND stayed up
+    // for a few seconds — a listener task that dies on its first ticks must
+    // not earn the marker. Written next to the executable, it names this
+    // version as healthy so the container entrypoint rolls an unproven
+    // self-update back to the proven `.prev`.
+    if let Ok(exe) = std::env::current_exe() {
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let marker = exe.with_extension("boot-ok");
+            if let Err(e) = std::fs::write(&marker, env!("CARGO_PKG_VERSION")) {
+                tracing::warn!(error = %e, "boot-ok marker not written (self-update rollback disabled)");
+            }
+        });
+    }
     let http = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

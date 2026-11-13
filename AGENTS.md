@@ -67,9 +67,9 @@ Update matrix — pick by component:
 
 | Component | Canonical update path |
 |---|---|
-| Server (docker) | `POST /api/server/update` (admin session) — downloads the signed binary, swaps it into `/data/bin`, exits; restart policy brings it up |
+| Server (docker) | `POST /api/server/update` (admin session) — downloads the signed binary, swaps it into `/data/bin`, exits; restart policy brings it up. `{"version":"x.y.z"}` pins a release (downgrade); `GET /api/server/update-status` reports the outcome after restart |
 | Client (any)   | Dashboard → Clients → Update, or `POST /api/clients/<id>/update`, or client-local `POST :8391/local/api/update` |
-| Compose stack  | Pin `image: ghcr.io/<owner>/loom-server:X.Y.Z` and `docker compose pull && up -d` — for rebuilds/fresh installs, not rolling updates |
+| Compose stack  | Pin `LOOM_IMAGE_TAG=X.Y.Z` (image `ghcr.io/<owner>/loom-server`) and `docker compose pull && up -d` — for rebuilds/fresh installs, not rolling updates |
 
 Why both work: container entrypoints seed the binary into the state volume
 (`/data/bin`, `/etc/loom-client/bin`) and exec it from there. On each start
@@ -86,9 +86,11 @@ curl -X POST http://127.0.0.1:8391/local/api/update
 ```
 
 Rollback runbook:
-- **Crash after self-update**: the updater keeps `<binary>.prev` next to the
-  live binary on the volume — `cp loom-server.prev loom-server && docker
-  restart loom-server-1`.
+- **Crash after self-update**: automatic — the server writes
+  `<binary>.boot-ok` naming its version once all listeners bind; the
+  entrypoint restores `.prev` when the running binary never proved itself
+  but `.prev` IS the proven one. Manual fallback unchanged:
+  `cp loom-server.prev loom-server && docker restart loom-server-1`.
 - **Intentional downgrade** (pinning an older image tag alone does NOT
   downgrade — the version guard protects the volume binary): set
   `LOOM_FORCE_RESEED=1` on the service, pin the older image tag, `docker

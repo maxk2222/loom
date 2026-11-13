@@ -118,6 +118,7 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/clients/{id}/status", post(client_status))
         .route("/api/clients/{id}/update", post(push_client_update))
         .route("/api/server/update", post(server_update))
+        .route("/api/server/update-status", get(server_update_status))
         .route("/api/enroll-tokens", post(issue_enroll_token))
         // client notices (notes/briefings pushed to client dashboards)
         .route("/api/notes", get(list_notes).post(create_note))
@@ -2619,10 +2620,20 @@ async fn release_manifest(
     let kind = q.get("kind").cloned().unwrap_or_else(|| "client".into());
     let channel = q.get("channel").cloned().unwrap_or_else(|| "stable".into());
     let arch = q.get("arch").cloned().unwrap_or_default();
-    if !matches!(kind.as_str(), "client" | "server") || arch.is_empty() {
+    let pin = q
+        .get("version")
+        .map(|v| v.trim().trim_start_matches('v').to_string())
+        .filter(|v| !v.is_empty());
+    if !matches!(kind.as_str(), "client" | "server")
+        || arch.is_empty()
+        || pin.as_deref().is_some_and(|v| {
+            !v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        })
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let cache_key = format!("{kind}|{channel}|{arch}");
+    let cache_key = format!("{kind}|{channel}|{arch}|{}", pin.as_deref().unwrap_or(""));
     if let Some((at, v)) = s.release_cache.lock().unwrap().get(&cache_key) {
         if at.elapsed() < std::time::Duration::from_secs(600) {
             return Ok(Json(v.clone()));
@@ -2634,7 +2645,7 @@ async fn release_manifest(
         .user_agent("loom-server")
         .build()
         .unwrap_or_default();
-    let release = fetch_release(&http, &repo, &channel)
+    let release = fetch_release(&http, &repo, &channel, pin.as_deref())
         .await
         .ok_or(StatusCode::NOT_FOUND)?;
     let version = release["tag_name"]
@@ -2677,7 +2688,27 @@ async fn release_manifest(
     Ok(Json(out))
 }
 
-async fn fetch_release(http: &reqwest::Client, repo: &str, channel: &str) -> Option<Value> {
+async fn fetch_release(
+    http: &reqwest::Client,
+    repo: &str,
+    channel: &str,
+    version: Option<&str>,
+) -> Option<Value> {
+    // An explicit version pins the lookup to that tag — the documented
+    // downgrade path for the server self-update.
+    if let Some(v) = version {
+        return http
+            .get(format!(
+                "https://api.github.com/repos/{repo}/releases/tags/v{v}"
+            ))
+            .send()
+            .await
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()
+            .filter(|v| v["tag_name"].is_string());
+    }
     if channel == "stable" {
         return http
             .get(format!(
@@ -2767,18 +2798,79 @@ async fn push_client_update(
     Ok(Json(json!({ "ok": true, "live": live })))
 }
 
+/// One self-update at a time — two concurrent swaps would interleave the
+/// .prev/.new renames and could strand a half-written binary.
+#[cfg(not(windows))]
+static SERVER_UPDATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(not(windows))]
+struct ServerUpdateGuard;
+#[cfg(not(windows))]
+impl Drop for ServerUpdateGuard {
+    fn drop(&mut self) {
+        SERVER_UPDATING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Persist update progress next to the executable so the state survives the
+/// restart the update triggers — `update_status` reads it back.
+#[cfg(not(windows))]
+fn record_update_status(exe: &std::path::Path, v: Value) {
+    let f = exe.with_extension("update-status");
+    if let Err(e) = std::fs::write(&f, serde_json::to_string(&v).unwrap_or_default()) {
+        tracing::warn!(error = %e, "update status not written");
+    }
+}
+
+/// `GET /api/server/update-status` — what the dashboard polls after the
+/// update endpoint returned `restarting:true` and the process came back.
+async fn server_update_status() -> Json<Value> {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let last: Value = std::fs::read_to_string(exe.with_extension("update-status"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "has_prev": exe.with_extension("prev").is_file(),
+        "last_update": last,
+    }))
+}
+
 /// Server self-update: download + verify + stage the `loom-server` release for
 /// this platform, then exit — the supervisor (systemd/launchd/docker restart
-/// policy) brings the new binary up. Cannot update while running on Windows.
-async fn server_update(State(s): State<AdminState>) -> Json<Value> {
+/// policy) brings the new binary up. Optional body `{"version":"x.y.z"}` pins
+/// a specific release (the documented downgrade path). Cannot update while
+/// running on Windows.
+async fn server_update(State(s): State<AdminState>, body: Option<Json<Value>>) -> Json<Value> {
     #[cfg(windows)]
     return Json(json!({ "ok": false, "error": "self-update unsupported on windows" }));
     #[cfg(not(windows))]
     {
+        use std::sync::atomic::Ordering;
+        if SERVER_UPDATING.swap(true, Ordering::SeqCst) {
+            return Json(json!({ "ok": false, "error": "update in progress" }));
+        }
+        let _guard = ServerUpdateGuard;
+        let pin = body
+            .as_ref()
+            .and_then(|b| b["version"].as_str())
+            .map(|v| v.trim().trim_start_matches('v').to_string())
+            .filter(|v| !v.is_empty());
+        if pin.as_deref().is_some_and(|v| {
+            !v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        }) {
+            return Json(json!({ "ok": false, "error": "invalid version" }));
+        }
         let base = public_base(&s).await;
         let channel = "stable";
         let arch = server_arch();
-        let url = format!("{base}/api/releases/manifest?kind=server&channel={channel}&arch={arch}");
+        let mut url =
+            format!("{base}/api/releases/manifest?kind=server&channel={channel}&arch={arch}");
+        if let Some(v) = &pin {
+            url.push_str(&format!("&version={v}"));
+        }
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .user_agent("loom-server")
@@ -2791,12 +2883,35 @@ async fn server_update(State(s): State<AdminState>) -> Json<Value> {
         let Some(bin_url) = mf["url"].as_str().map(String::from) else {
             return Json(json!({ "ok": false, "error": "manifest missing url" }));
         };
+        // Skip pointless restarts: unpinned updates target `latest` — if that
+        // is what we already run, report instead of swapping the same bytes.
+        // A pinned version always proceeds (explicit downgrade/rollback).
+        let target = mf["version"].as_str().unwrap_or_default().to_string();
+        let current = env!("CARGO_PKG_VERSION");
+        if pin.is_none() && target == current {
+            return Json(json!({ "ok": true, "already_latest": true, "version": target }));
+        }
         let key = std::env::var("LOOM_UPDATE_PUBKEY").unwrap_or_default();
         if key.is_empty() {
             return Json(
                 json!({ "ok": false, "error": "set LOOM_UPDATE_PUBKEY to the release signing key" }),
             );
         }
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => return Json(json!({ "ok": false, "error": e.to_string() })),
+        };
+        let mut status = json!({
+            "state": "downloading",
+            "from": current,
+            "to": target,
+            "pinned": pin.is_some(),
+            "ts": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
+        record_update_status(&exe, status.clone());
         let bytes = match http
             .get(&bin_url)
             .timeout(std::time::Duration::from_secs(300))
@@ -2804,14 +2919,25 @@ async fn server_update(State(s): State<AdminState>) -> Json<Value> {
             .await
         {
             Ok(r) => r.bytes().await.unwrap_or_default(),
-            Err(_) => return Json(json!({ "ok": false, "error": "download failed" })),
+            Err(_) => {
+                status["state"] = json!("failed");
+                status["error"] = json!("download failed");
+                record_update_status(&exe, status);
+                return Json(json!({ "ok": false, "error": "download failed" }));
+            }
         };
         if bytes.is_empty() {
+            status["state"] = json!("failed");
+            status["error"] = json!("download failed");
+            record_update_status(&exe, status);
             return Json(json!({ "ok": false, "error": "download failed" }));
         }
         let want = mf["sha256"].as_str().unwrap_or_default();
         let got = hex::encode(sha2::Sha256::digest(&bytes));
         if !got.eq_ignore_ascii_case(want) {
+            status["state"] = json!("failed");
+            status["error"] = json!("sha256 mismatch");
+            record_update_status(&exe, status);
             return Json(json!({ "ok": false, "error": "sha256 mismatch" }));
         }
         let sig_str = mf["signature"].as_str().unwrap_or_default();
@@ -2825,16 +2951,18 @@ async fn server_update(State(s): State<AdminState>) -> Json<Value> {
                 .map_err(|e| anyhow::anyhow!("{e}"))
         })();
         if let Err(e) = ok_sig {
+            status["state"] = json!("failed");
+            status["error"] = json!(format!("signature: {e}"));
+            record_update_status(&exe, status);
             return Json(json!({ "ok": false, "error": format!("signature: {e}") }));
         }
         // Swap: current_exe → .prev, staged → current_exe, then exit(0).
-        let exe = match std::env::current_exe() {
-            Ok(e) => e,
-            Err(e) => return Json(json!({ "ok": false, "error": e.to_string() })),
-        };
         let staged = exe.with_extension("new");
         let prev = exe.with_extension("prev");
         if let Err(e) = std::fs::write(&staged, &bytes) {
+            status["state"] = json!("failed");
+            status["error"] = json!(e.to_string());
+            record_update_status(&exe, status);
             return Json(json!({ "ok": false, "error": e.to_string() }));
         }
         #[cfg(unix)]
@@ -2843,17 +2971,33 @@ async fn server_update(State(s): State<AdminState>) -> Json<Value> {
             let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
         }
         if let Err(e) = std::fs::rename(&exe, &prev) {
+            status["state"] = json!("failed");
+            status["error"] = json!(e.to_string());
+            record_update_status(&exe, status);
             return Json(json!({ "ok": false, "error": e.to_string() }));
         }
         if let Err(e) = std::fs::rename(&staged, &exe) {
             let _ = std::fs::rename(&prev, &exe);
+            status["state"] = json!("failed");
+            status["error"] = json!(e.to_string());
+            record_update_status(&exe, status);
             return Json(json!({ "ok": false, "error": e.to_string() }));
         }
+        status["state"] = json!("restarting");
+        record_update_status(&exe, status);
+        let _ = sqlx::query(
+            "INSERT INTO config_versions (entity, entity_id, change, actor) VALUES ($1,$2,$3,'admin')",
+        )
+        .bind("server")
+        .bind(current)
+        .bind(json!({"self_update": {"to": target, "pinned": pin.is_some()}}))
+        .execute(&s.db)
+        .await;
         tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             std::process::exit(0);
         });
-        Json(json!({ "ok": true, "restarting": true }))
+        Json(json!({ "ok": true, "restarting": true, "version": target }))
     }
 }
 
