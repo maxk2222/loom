@@ -1217,13 +1217,18 @@ impl Scheduler {
                 let mut end_status = "done";
                 let mut end_error = String::new();
                 'work: {
-                    // 1) deliver payload to client (chunked)
+                    // 1) deliver payload to client (chunked). A caller
+                    // disconnect during a slow send must abort here too —
+                    // the receive loop's select arms only run afterwards.
                     for chunk in body.chunks(256 * 1024) {
-                        if outbound
-                            .send(frames::request_json(chunk.to_vec()))
-                            .await
-                            .is_err()
-                        {
+                        let send = outbound.send(frames::request_json(chunk.to_vec()));
+                        tokio::pin!(send);
+                        let sent = tokio::select! {
+                            _ = cancel2.cancelled() => { end_status = "cancelled"; break 'work },
+                            _ = resp_tx.closed() => { end_status = "cancelled"; break 'work },
+                            r = &mut send => r,
+                        };
+                        if sent.is_err() {
                             let _ = resp_tx
                                 .send(Err(SchedErr::Backend("data stream closed".into())))
                                 .await;
