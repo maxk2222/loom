@@ -1340,6 +1340,12 @@ impl Scheduler {
                         }
                     }
                 }
+                // Close the caller-visible response stream immediately: all
+                // response bytes were already sent inside 'work, and holding
+                // resp_tx through the RequestEnd grace below would keep the
+                // HTTP body open ~15s past the last token — clients would
+                // keep showing "running" after the answer completed.
+                drop(resp_tx);
                 // Release the lease — slot freed exactly once, idempotent.
                 let mut c = rt.conn.clone();
                 let _: String = redis::Script::new(crate::lua::LEASE_RELEASE)
