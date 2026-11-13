@@ -288,11 +288,14 @@ impl Connector {
                             // Auto-PKI resilience: a stored cert that no
                             // longer chains to the live CA (rotation/re-issue)
                             // stays "valid" for ~180d and would fail forever.
-                            // After repeated transport failures, drop it —
+                            // After repeated TLS-layer failures, drop it —
                             // the next attempt re-bootstraps from the live CA.
                             // Only mTLS endpoints exercise the cert — don't
-                            // burn the streak on credential-only fallbacks.
-                            if ep.pki {
+                            // burn the streak on credential-only fallbacks,
+                            // and only cert-implicating failures count:
+                            // server-down produces connect/h2/HTTP errors,
+                            // which must never touch the stored cert.
+                            if ep.pki && cert_suspect(&e) {
                                 tls_fail_streak += 1;
                             }
                             if cfg.connector.client_cert_path.is_empty()
@@ -300,7 +303,7 @@ impl Connector {
                             {
                                 self.state.cert_store.clear_cert();
                                 tls_fail_streak = 0;
-                                warn!("dropping stored mTLS cert after repeated TLS failures — re-bootstrapping");
+                                warn!(error = %format!("{e:#}"), "dropping stored mTLS cert after repeated TLS failures — re-bootstrapping");
                             }
                         }
                     }
@@ -1774,6 +1777,34 @@ fn norm_ep_url(u: &str) -> &str {
     u.trim_end_matches('/')
 }
 
+/// True when a session failure implicates the TLS layer (client cert
+/// rejected, CA/host verification, fatal alert) — only those count
+/// toward dropping the stored cert. Connectivity failures (refused,
+/// DNS, timeouts), h2/EOF on established streams, HTTP-level proxy
+/// errors and application rejections (HelloAck, credential deny) are
+/// server/network problems the cert cannot fix.
+fn cert_suspect(e: &anyhow::Error) -> bool {
+    for cause in e.chain() {
+        if cause.downcast_ref::<rustls::Error>().is_some() {
+            return true;
+        }
+        // tokio-rustls wraps handshake failures inside io::Error — look
+        // through that shell before falling back to text matching.
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            if io
+                .get_ref()
+                .is_some_and(|inner| inner.downcast_ref::<rustls::Error>().is_some())
+            {
+                return true;
+            }
+        }
+    }
+    let msg = format!("{e:#}").to_lowercase();
+    ["certificate", "handshake", "alert"]
+        .iter()
+        .any(|m| msg.contains(m))
+}
+
 /// Merge admin-pushed EndpointHints into an ordered endpoint list:
 /// lan/wan-scoped hints lead (auto local-upgrade), configured entries keep
 /// their relative order, public hints trail. Dedup by normalized URL — a
@@ -2141,5 +2172,43 @@ mod endpoint_hint_tests {
         assert_eq!(url_host("https://x.ccl-lab.de:50052/p"), "x.ccl-lab.de");
         assert_eq!(url_host("https://[::1]:50052"), "::1");
         assert_eq!(url_host("host:50052"), "host");
+    }
+
+    #[test]
+    fn cert_suspect_classification() {
+        // Connectivity, established-stream EOF, proxy and app-level
+        // failures must never burn the cert-drop streak (all observed
+        // during a server outage, none is the cert's fault).
+        for msg in [
+            "transport error: tcp connect error: tcp connect error: Connection refused (os error 111)",
+            "transport error: tcp connect error: dns error: failed to lookup address information",
+            "transport error: operation timed out",
+            "status: Unknown, message: \"h2 protocol error: error reading a body from connection\"",
+            "error reading a body from connection: peer closed connection without sending TLS close_notify",
+            "server did not send HelloAck",
+            "server rejected registration: device credential revoked",
+            "ws connect: HTTP error: 502 Bad Gateway",
+        ] {
+            assert!(!cert_suspect(&anyhow::anyhow!("{msg}")), "{msg}");
+        }
+        // Typed rustls errors — directly or inside io::Error (the
+        // tokio-rustls handshake-failure shape).
+        assert!(cert_suspect(&anyhow::anyhow!(rustls::Error::General(
+            "x".into()
+        ))));
+        let io = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::General("x".into()),
+        );
+        assert!(cert_suspect(&anyhow::anyhow!(io)));
+        // TLS-layer text in flattened chains (tonic wraps as opaque
+        // transport errors, losing the typed source).
+        for msg in [
+            "transport error: invalid peer certificate: UnknownIssuer",
+            "received fatal alert: HandshakeFailure",
+            "received fatal alert: CertificateUnknown",
+        ] {
+            assert!(cert_suspect(&anyhow::anyhow!("{msg}")), "{msg}");
+        }
     }
 }
