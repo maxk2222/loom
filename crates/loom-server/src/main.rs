@@ -33,53 +33,24 @@ async fn main() -> anyhow::Result<()> {
     // Single-owner guard: a second loom-server on the same Redis namespace
     // must not wipe the live instance's runtime state mid-flight. Acquire a
     // short-lived owner lock; only the owner may reset, and it keeps the
-    // lease renewed while it runs.
-    let instance_lock = rt.k("instance:owner");
-    let instance_token = loom_core::ids::opaque_token(16);
-    {
-        let mut c = rt.conn.clone();
-        let got: Option<String> = redis::cmd("SET")
-            .arg(&instance_lock)
-            .arg(&instance_token)
-            .arg("PX")
-            .arg(30_000)
-            .arg("NX")
-            .query_async(&mut c)
-            .await
-            .unwrap_or(None);
-        if got.is_some() {
+    // lease renewed while it runs. `acquire` waits out a dead predecessor's
+    // remaining TTL so restarts never skip the reset.
+    let lock_key = rt.k("instance:owner");
+    let lock_token = loom_core::ids::opaque_token(16);
+    let lock_opts = instance_lock::LockOpts::default();
+    match instance_lock::acquire(&rt, &lock_key, &lock_token, &lock_opts).await {
+        instance_lock::Acquire::Owner => {
             rt.reset_runtime().await?; // boot reconciliation: no stale slots
             info!("redis connected, runtime state reset (instance owner)");
-            // Renew while running so a stale lock cannot let a peer reset
-            // underneath us; CAS on the token so only the owner extends.
-            let rt2 = rt.clone();
-            let lock_key = instance_lock.clone();
-            let token = instance_token.clone();
-            tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
-                loop {
-                    tick.tick().await;
-                    let mut c = rt2.conn.clone();
-                    let _: i64 = redis::Script::new(
-                        "if redis.call('GET', KEYS[1]) == ARGV[1] \
-                         then return redis.call('PEXPIRE', KEYS[1], 30000) \
-                         else return 0 end",
-                    )
-                    .key(&lock_key)
-                    .arg(&token)
-                    .invoke_async(&mut c)
-                    .await
-                    .unwrap_or(0);
-                }
-            });
-        } else {
-            // Another live server owns this Redis namespace. Serve anyway —
-            // after the ownership-aware queue/dispatch changes, multi-instance
-            // degrades gracefully instead of corrupting — but warn loudly.
-            tracing::warn!(
-                "another loom-server owns this Redis namespace — starting without \
-                 runtime reset (multi-instance: shared queue, per-instance waiters)"
-            );
+            instance_lock::set_renewer(instance_lock::spawn_renewer(
+                rt.clone(),
+                lock_key,
+                lock_token,
+                lock_opts.ttl_ms,
+                lock_opts.renew_tick_ms,
+            ));
+        }
+        instance_lock::Acquire::Peer => {
             info!("redis connected (peer instance already owns runtime state)");
         }
     }
@@ -501,8 +472,36 @@ async fn main() -> anyhow::Result<()> {
                 Some(Ok(Ok(()))) | None => anyhow::bail!("grpc listener set ended unexpectedly"),
             }
         }
+        _ = shutdown_signal() => {
+            // Free the instance lock so the next boot acquires (and resets)
+            // instantly instead of waiting out the dead-owner TTL.
+            instance_lock::release_if_owner(&rt).await;
+            return Ok(());
+        }
     }
     Ok(())
+}
+
+/// Resolves on SIGTERM or Ctrl-C — the signal supervisors actually send.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 /// Security headers on every HTTP response — dashboard + /api + /v1.

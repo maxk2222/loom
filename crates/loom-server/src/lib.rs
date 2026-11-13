@@ -10,6 +10,7 @@ pub mod db;
 pub mod events;
 pub mod gateway;
 pub mod grpc_service;
+pub mod instance_lock;
 pub mod lua;
 pub mod metrics;
 pub mod model_registry;

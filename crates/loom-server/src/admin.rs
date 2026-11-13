@@ -2993,8 +2993,12 @@ async fn server_update(State(s): State<AdminState>, body: Option<Json<Value>>) -
         .bind(json!({"self_update": {"to": target, "pinned": pin.is_some()}}))
         .execute(&s.db)
         .await;
-        tokio::spawn(async {
+        let rt = s.scheduler.rt();
+        tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            // Free the instance lock — exit(0) bypasses the SIGTERM arm,
+            // so without this the next boot waits out the dead-owner TTL.
+            crate::instance_lock::release_if_owner(&rt).await;
             std::process::exit(0);
         });
         Json(json!({ "ok": true, "restarting": true, "version": target }))

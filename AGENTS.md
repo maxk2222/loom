@@ -98,6 +98,15 @@ Rollback runbook:
 - Self-update is recreate-safe but NOT image-rollback-safe by design —
   always prefer `LOOM_FORCE_RESEED` over deleting files on the volume.
 
+Instance-owner lock (`crates/loom-server/src/instance_lock.rs`): exactly
+one server per Redis namespace may `reset_runtime` at boot. The owner
+CAS-deletes `instance:owner` on SIGTERM/SIGINT and before the
+self-update exit, so restarts hand over instantly. A dead predecessor
+(no release — SIGKILL/crash) is waited out via its remaining lock TTL
+(`LOOM_INSTANCE_LOCK_WAIT_MS`, default 35000; must stay < ~50s
+healthcheck threshold, `0` = single-shot). A live peer is detected by
+its rising PTTL and skipped fast — multi-instance unchanged.
+
 New-client install is one command: the gateway serves `deploy/install-client.sh`
 at `GET /install-client.sh` with the `scope=public` URL from the `endpoint_hints`
 setting (`public_base` fallback) substituted as `SERVER_URL`. The script resolves
