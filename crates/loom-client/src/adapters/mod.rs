@@ -191,12 +191,12 @@ pub(crate) mod common {
             obj.insert("model".into(), Value::String(model.to_string()));
         }
         let url = format!("{}{}", endpoint.trim_end_matches('/'), api.path());
-        let mut req = http.post(&url).json(&body).timeout(timeout);
+        let mut req = http.post(&url).json(&body);
         if !api_key.is_empty() {
             req = req.bearer_auth(api_key);
         }
 
-        send_stream(req, cancel).await
+        send_stream(req, cancel, timeout).await
     }
 
     /// Forward a raw multipart/form-data body to `{endpoint}{api.path()}`,
@@ -251,18 +251,23 @@ pub(crate) mod common {
         }
         form = form.text("model", model.to_string());
         let url = format!("{}{}", endpoint.trim_end_matches('/'), api.path());
-        let mut req = http.post(&url).multipart(form).timeout(timeout);
+        let mut req = http.post(&url).multipart(form);
         if !api_key.is_empty() {
             req = req.bearer_auth(api_key);
         }
-        send_stream(req, cancel).await
+        send_stream(req, cancel, timeout).await
     }
 
     /// Send a fully-built request and return the raw byte stream. Shared by
     /// adapters with custom auth/URL schemes (Azure, Anthropic).
+    /// `idle_timeout` bounds the silence between chunks, NOT the total
+    /// stream duration — long generations legitimately decode for many
+    /// minutes, and a wall-clock cap would kill them mid-flight (the bug
+    /// class the 3600s gRPC endpoint timeout had).
     pub async fn send_stream(
         req: reqwest::RequestBuilder,
         cancel: CancellationToken,
+        idle_timeout: std::time::Duration,
     ) -> Result<BackendResponse, AdapterError> {
         let send = req.send();
         let resp = tokio::select! {
@@ -284,12 +289,39 @@ pub(crate) mod common {
         let is_sse = content_type.contains("text/event-stream");
 
         let cancel2 = cancel.clone();
-        let stream = resp.bytes_stream().map(move |r| {
-            if cancel2.is_cancelled() {
-                return Err(AdapterError::Cancelled);
+        let raw = resp.bytes_stream();
+        let stream = async_stream::stream! {
+            tokio::pin!(raw);
+            loop {
+                let item = tokio::select! {
+                    // Instant cancel even while the socket is silent —
+                    // the old map() only checked when a chunk arrived,
+                    // so a stalled upstream ignored cancels indefinitely.
+                    _ = cancel2.cancelled() => {
+                        yield Err(AdapterError::Cancelled);
+                        return;
+                    }
+                    r = tokio::time::timeout(idle_timeout, raw.next()) => {
+                        match r {
+                            Ok(v) => v,
+                            Err(_) => {
+                                yield Err(AdapterError::Timeout);
+                                return;
+                            }
+                        }
+                    }
+                };
+                match item {
+                    Some(Ok(b)) => yield Ok(b),
+                    Some(Err(e)) => {
+                        yield Err(AdapterError::Io(e.to_string()));
+                        return;
+                    }
+                    None => return,
+                }
             }
-            r.map_err(|e| AdapterError::Io(e.to_string()))
-        });
+        };
+        let stream: ByteStream = Box::pin(stream);
 
         // Field normalization only applies to text payloads — binary streams
         // (audio/mpeg, octet-stream) must not be line-buffered: arbitrary byte

@@ -676,9 +676,11 @@ impl Connector {
             }
         }
 
-        // Initial inventory + capacity report.
+        // Initial inventory + capacity report. Lossy on a full channel —
+        // the report repeats on the next notify; a wedged server must not
+        // stall session setup.
         let inv = self.build_inventory().await;
-        let _ = ctrl_tx.send(client_msgs::inventory(inv)).await;
+        let _ = ctrl_tx.try_send(client_msgs::inventory(inv));
         self.state.send_capacity_report().await;
 
         // Heartbeat task. Session-scoped cancel: the guard fires when this
@@ -707,12 +709,13 @@ impl Connector {
                     .counters()
                     .iter()
                     .fold((0u32, 0u32), |a, c| (a.0 + c.1, a.1 + c.2));
-                if hb_tx
-                    .send(client_msgs::heartbeat(&session_id, local, t2))
-                    .await
-                    .is_err()
-                {
-                    break;
+                match hb_tx.try_send(client_msgs::heartbeat(&session_id, local, t2)) {
+                    Ok(()) => {}
+                    // A full channel means the server is not draining —
+                    // drop this beat rather than wedge the task; the next
+                    // tick sends a fresher one.
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
         });
@@ -998,16 +1001,18 @@ impl Connector {
                     let applied = self
                         .apply_desired(&p.desired_config_json, p.config_version)
                         .await;
-                    let _ = ctrl_tx
-                        .send(client_msgs::config_ack(
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        ctrl_tx.send(client_msgs::config_ack(
                             p.config_version,
                             applied.is_ok(),
                             &applied.err().map(|e| e.to_string()).unwrap_or_default(),
-                        ))
-                        .await;
+                        )),
+                    )
+                    .await;
                 }
                 server_envelope::Msg::Ping(p) => {
-                    let _ = ctrl_tx.send(client_msgs::pong(p.sent_at_unix_ms)).await;
+                    let _ = ctrl_tx.try_send(client_msgs::pong(p.sent_at_unix_ms));
                 }
                 server_envelope::Msg::NotesSync(sync) => {
                     let slot = self.state.notes.read().unwrap().clone();
@@ -1198,15 +1203,17 @@ impl Connector {
                     };
                     if is_dup {
                         drop(token); // return the just-admitted slot
-                        let _ = ctrl_tx
-                            .send(client_msgs::assign_reject(
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            ctrl_tx.send(client_msgs::assign_reject(
                                 &request_id,
                                 &a.lease_id,
                                 a.fencing_token,
                                 "duplicate_assign",
                                 true,
-                            ))
-                            .await;
+                            )),
+                        )
+                        .await;
                         return;
                     }
                     if tokio::time::timeout(
@@ -1276,7 +1283,8 @@ impl ConnectorState {
                     .unwrap_or_default()
                     .as_millis() as u64,
             };
-            let _ = tx.send(client_msgs::inventory(inv)).await;
+            // Lossy — the next notify resends fresher state anyway.
+            let _ = tx.try_send(client_msgs::inventory(inv));
         }
     }
 
@@ -1310,7 +1318,9 @@ impl ConnectorState {
                         .unwrap_or(0),
                 })
             };
-            let _ = tx.send(client_msgs::capacity_report(caps, host)).await;
+            // Lossy — capacity snapshots age out in seconds; a wedged
+            // control channel must not stall the reporter task.
+            let _ = tx.try_send(client_msgs::capacity_report(caps, host));
         }
     }
 

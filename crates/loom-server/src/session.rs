@@ -94,6 +94,24 @@ impl SessionManager {
         }
     }
 
+    /// Kick only when the armed handle still belongs to `session_id`. A
+    /// watcher acting on a snapshot can otherwise kick a newer session that
+    /// re-registered between snapshot and kick.
+    pub async fn kick_session(&self, client_id: &str, session_id: &str) -> bool {
+        let mut inner = self.inner.lock().await;
+        if inner
+            .kicks
+            .get(client_id)
+            .is_some_and(|(sid, _)| sid == session_id)
+        {
+            if let Some((_, tx)) = inner.kicks.remove(client_id) {
+                let _ = tx.send(());
+            }
+            return true;
+        }
+        false
+    }
+
     pub async fn send(&self, client_id: &str, msg: ServerEnvelope) -> Result<(), &'static str> {
         // Clone the sender under a short lock — awaiting a full channel while
         // holding the session map would wedge every session operation.

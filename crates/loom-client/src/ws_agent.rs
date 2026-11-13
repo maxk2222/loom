@@ -127,6 +127,9 @@ impl WsAgent {
             .post(&url)
             .header("content-type", "application/x-protobuf")
             .body(prost::Message::encode_to_vec(&req))
+            // Unary pull on the reconnect path: without a bound a stalled
+            // socket wedges the control loop's restart (and heartbeats).
+            .timeout(Duration::from_secs(15))
             .send()
             .await
             .context("config request")?;

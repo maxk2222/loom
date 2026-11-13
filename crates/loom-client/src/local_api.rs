@@ -558,7 +558,15 @@ async fn openai_inference_raw(
                             &mut finish_reason,
                             &mut saw_output,
                         );
-                        if tx.send(Ok(b)).await.is_err() {
+                        // A send stalled on a full channel must still honour
+                        // cancellation — the select at loop top never runs
+                        // while send is pending, so admin/API cancels would
+                        // otherwise wait for a stalled caller forever.
+                        let sent = tokio::select! {
+                            _ = cancel.cancelled() => break,
+                            r = tx.send(Ok(b)) => r,
+                        };
+                        if sent.is_err() {
                             // caller disconnected -> abort upstream work
                             cancel.cancel();
                             break;
@@ -571,7 +579,10 @@ async fn openai_inference_raw(
                         let msg = bytes::Bytes::from(
                             "data: {\"error\":{\"message\":\"upstream stream error\"}}\n\n",
                         );
-                        let _ = tx.send(Ok(msg)).await;
+                        let _ = tokio::select! {
+                            _ = cancel.cancelled() => break,
+                            r = tx.send(Ok(msg)) => r,
+                        };
                         break;
                     }
                     None => {

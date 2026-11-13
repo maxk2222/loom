@@ -155,9 +155,8 @@ impl BackendAdapter for AzureAdapter {
             .http
             .post(self.deploy_url(model, Self::op_path(api)))
             .header("api-key", &self.cfg.api_key)
-            .json(&body)
-            .timeout(Duration::from_secs(600));
-        common::send_stream(req, cancel).await
+            .json(&body);
+        common::send_stream(req, cancel, Duration::from_secs(600)).await
     }
 }
 

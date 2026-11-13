@@ -150,8 +150,9 @@ async fn main() -> anyhow::Result<()> {
                         // Kill the stale control task itself: without a kick
                         // it keeps running, keeps sending capacity reports,
                         // and can mark deployments available again while no
-                        // longer registered — split-brain routing.
-                        sess.kick(&cid).await;
+                        // longer registered — split-brain routing. Session-
+                        // scoped: a racing reconnect must not eat the kick.
+                        sess.kick_session(&cid, &sid).await;
                         sch.wake();
                     }
                 }

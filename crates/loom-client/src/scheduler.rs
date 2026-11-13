@@ -453,11 +453,16 @@ impl LocalScheduler {
         let sharing = *self.inner.sharing_enabled.read().unwrap();
         let kv_charged = dep.admit(class, sharing, footprint)?;
         let cancel = CancellationToken::new();
+        // or_insert: a duplicate assign for an already-running request_id
+        // must not overwrite the live request's cancel token — the dup's
+        // token dies with its (rejected) AdmitToken while the original
+        // stays cancellable.
         self.inner
             .request_cancels
             .write()
             .unwrap()
-            .insert(request_id.to_string(), cancel.clone());
+            .entry(request_id.to_string())
+            .or_insert_with(|| cancel.clone());
         Ok(AdmitToken {
             dep: dep.id.clone(),
             class,

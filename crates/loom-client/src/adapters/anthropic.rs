@@ -118,10 +118,9 @@ impl BackendAdapter for AnthropicAdapter {
         let req = self.auth(
             self.http
                 .post(format!("{}/v1/messages", self.endpoint()))
-                .json(&anth)
-                .timeout(Duration::from_secs(600)),
+                .json(&anth),
         );
-        let resp = common::send_stream(req, cancel).await?;
+        let resp = common::send_stream(req, cancel, Duration::from_secs(600)).await?;
         let status = resp.status;
 
         if !streaming {
