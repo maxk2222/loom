@@ -158,6 +158,11 @@ local f = redis.call('HGET', KEYS[1], 'fencing')
 if not f then return 'NOT_FOUND' end
 if tonumber(f) ~= tonumber(ARGV[1]) then return 'STALE' end
 redis.call('HSET', KEYS[1], 'state', 'active', 'activated_at', ARGV[2])
+-- The acquire-time PEXPIRE (ttl*3) only covers the reserved window; an
+-- active lease lives until RELEASE or the idle watchdog — without PERSIST
+-- any generation longer than ~3*lease_ttl destroys the hash mid-flight and
+-- the slot is never returned.
+redis.call('PERSIST', KEYS[1])
 return 'OK'
 "#;
 
@@ -174,11 +179,14 @@ local dep = KEYS[2]
 local now = tonumber(ARGV[1])
 local deadline = tonumber(ARGV[2])
 local out = {}
+local corrupt = false
 local leases = redis.call('ZRANGE', lset, 0, -1)
 for _,lkey in ipairs(leases) do
   local st = redis.call('HGET', lkey, 'state')
   local at = tonumber(redis.call('HGET', lkey, 'activated_at') or '0')
-  if st == 'active' and at > 0 and now - at > deadline then
+  -- a ZSET member without 'state' is a hash that expired (or was partially
+  -- rewritten by a late heartbeat) — it still holds a slot, so reap it
+  if (not st) or (st == 'active' and at > 0 and now - at > deadline) then
     local rq = redis.call('HGET', lkey, 'request_id')
     local fp = tonumber(redis.call('HGET', lkey, 'fp') or '0')
     table.insert(out, rq or lkey)
@@ -188,8 +196,19 @@ for _,lkey in ipairs(leases) do
     if fp > 0 then
       local u = redis.call('HINCRBY', dep, 'kv_used', -fp)
       if u < 0 then redis.call('HSET', dep, 'kv_used', 0) end
+    else
+      corrupt = true
     end
   end
+end
+-- a corrupt lease's fp is unrecoverable; rebuild kv_used from the leases
+-- that are still intact so token admission converges back to reality
+if corrupt then
+  local sum = 0
+  for _,k in ipairs(redis.call('ZRANGE', lset, 0, -1)) do
+    sum = sum + tonumber(redis.call('HGET', k, 'fp') or '0')
+  end
+  redis.call('HSET', dep, 'kv_used', sum)
 end
 return out
 "#;
@@ -274,23 +293,33 @@ local lset = KEYS[2]
 local now = tonumber(ARGV[1])
 local expired = redis.call('ZRANGEBYSCORE', lset, 0, now)
 local out = {}
+local corrupt = false
 for _,lkey in ipairs(expired) do
   local rq = redis.call('HGET', lkey, 'request_id')
   local st = redis.call('HGET', lkey, 'state')
-  if rq then
-    -- only free 'reserved' leases; confirmed/active die via watchdog not sweep
-    if st == 'reserved' then
-      local fp = tonumber(redis.call('HGET', lkey, 'fp') or '0')
-      table.insert(out, rq)
-      redis.call('DEL', lkey)
-      redis.call('ZREM', lset, lkey)
-      redis.call('HINCRBY', dep, 'tier2_free', 1)
-      if fp > 0 then
-        local u = redis.call('HINCRBY', dep, 'kv_used', -fp)
-        if u < 0 then redis.call('HSET', dep, 'kv_used', 0) end
-      end
+  -- reap reserved/confirmed leases past their score deadline, plus members
+  -- whose hash already vanished (state nil): a member in the lease set with
+  -- no hash is always post-mortem and must return its slot regardless
+  if st ~= 'active' then
+    local fp = tonumber(redis.call('HGET', lkey, 'fp') or '0')
+    table.insert(out, rq or lkey)
+    redis.call('DEL', lkey)
+    redis.call('ZREM', lset, lkey)
+    redis.call('HINCRBY', dep, 'tier2_free', 1)
+    if fp > 0 then
+      local u = redis.call('HINCRBY', dep, 'kv_used', -fp)
+      if u < 0 then redis.call('HSET', dep, 'kv_used', 0) end
+    else
+      corrupt = true
     end
   end
+end
+if corrupt then
+  local sum = 0
+  for _,k in ipairs(redis.call('ZRANGE', lset, 0, -1)) do
+    sum = sum + tonumber(redis.call('HGET', k, 'fp') or '0')
+  end
+  redis.call('HSET', dep, 'kv_used', sum)
 end
 return out
 "#;

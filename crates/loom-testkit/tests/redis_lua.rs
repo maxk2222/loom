@@ -391,6 +391,175 @@ async fn lease_sweep_expires_reserved_only() {
 }
 
 #[tokio::test]
+async fn lease_sweep_also_reaps_confirmed() {
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let dep = format!("{p}dep:d1");
+    let leases = format!("{p}dep:d1:leases");
+    let fencing_key = format!("{p}cap:fencing");
+
+    // confirmed lease stuck past its score deadline (assign-ack never
+    // became active) — the slot must come back too, not just 'reserved'
+    let v: redis::Value = redis::Script::new(lua::LEASE_ACQUIRE)
+        .key(&dep)
+        .key(&leases)
+        .key(format!("{p}lease:cf1"))
+        .key(&fencing_key)
+        .arg("req-cf1")
+        .arg("client-1")
+        .arg("d1")
+        .arg(60_000i64)
+        .arg(now_ms() - 120_000)
+        .arg(0)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    let f = fencing_from(v);
+    let r: String = redis::Script::new(lua::LEASE_CONFIRM)
+        .key(format!("{p}lease:cf1"))
+        .key(&dep)
+        .arg(f)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(r, "OK");
+
+    let swept: Vec<String> = redis::Script::new(lua::LEASE_SWEEP)
+        .key(&dep)
+        .key(&leases)
+        .arg(now_ms())
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(swept, vec!["req-cf1".to_string()]);
+    let free: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("tier2_free")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(free, 2);
+}
+
+#[tokio::test]
+async fn activate_persists_lease_hash() {
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let dep = format!("{p}dep:d1");
+    let leases = format!("{p}dep:d1:leases");
+    let fencing_key = format!("{p}cap:fencing");
+    let lkey = format!("{p}lease:act1");
+
+    let v: redis::Value = redis::Script::new(lua::LEASE_ACQUIRE)
+        .key(&dep)
+        .key(&leases)
+        .key(&lkey)
+        .key(&fencing_key)
+        .arg("req-act1")
+        .arg("client-1")
+        .arg("d1")
+        .arg(60_000i64)
+        .arg(now_ms())
+        .arg(0)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    let f = fencing_from(v);
+    let pttl: i64 = redis::cmd("PTTL")
+        .arg(&lkey)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert!(pttl > 0, "reserved lease hash should carry a safety ttl");
+
+    // activation must drop the ttl — the hash has to outlive arbitrarily
+    // long generations; the idle watchdog owns its lifetime from here on
+    let r: String = redis::Script::new(lua::LEASE_ACTIVATE)
+        .key(&lkey)
+        .arg(f)
+        .arg(now_ms())
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(r, "OK");
+    let pttl: i64 = redis::cmd("PTTL")
+        .arg(&lkey)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(pttl, -1, "active lease hash must be persistent");
+}
+
+#[tokio::test]
+async fn sweeps_reap_corrupt_member_and_recompute_kv() {
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let dep = format!("{p}dep:d1");
+    let leases = format!("{p}dep:d1:leases");
+    let fencing_key = format!("{p}cap:fencing");
+    let budget = 1_000_000i64;
+
+    // one live lease with a real footprint, one that will lose its hash
+    for (name, req, fp) in [
+        ("z1", "req-zombie", 40_000i64),
+        ("ok1", "req-live", 10_000i64),
+    ] {
+        let v: redis::Value = redis::Script::new(lua::LEASE_ACQUIRE)
+            .key(&dep)
+            .key(&leases)
+            .key(format!("{p}lease:{name}"))
+            .key(&fencing_key)
+            .arg(req)
+            .arg("client-1")
+            .arg("d1")
+            .arg(60_000i64)
+            .arg(now_ms())
+            .arg(0)
+            .arg(fp)
+            .arg(budget)
+            .invoke_async(&mut c)
+            .await
+            .unwrap();
+        assert!(fencing_from(v) > 0);
+    }
+    // simulate the production bug: hash expired mid-flight (PEXPIRE) or a
+    // partial rewrite — the ZSET member is all that is left
+    let _: () = redis::cmd("DEL")
+        .arg(format!("{p}lease:z1"))
+        .query_async(&mut c)
+        .await
+        .unwrap();
+
+    let out: Vec<String> = redis::Script::new(lua::ACTIVE_LEASE_SWEEP)
+        .key(&leases)
+        .key(&dep)
+        .arg(now_ms())
+        .arg(600_000i64)
+        .invoke_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(out, vec![format!("{p}lease:z1")]);
+
+    let free: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("tier2_free")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(free, 1, "corrupt lease still held a slot");
+    let kv: i64 = redis::cmd("HGET")
+        .arg(&dep)
+        .arg("kv_used")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(kv, 10_000, "kv_used recomputed from surviving leases");
+}
+
+#[tokio::test]
 async fn queue_fifo_and_pop_order() {
     let Some((mut c, p)) = conn().await else {
         return;

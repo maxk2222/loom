@@ -1108,13 +1108,18 @@ impl Scheduler {
                             if last_liveness.elapsed() > Duration::from_secs(10) {
                                 last_liveness = std::time::Instant::now();
                                 let mut conn = rt.conn.clone();
-                                let _: () = redis::cmd("HSET")
-                                    .arg(rt.k(&format!("lease:{lease2}")))
-                                    .arg("activated_at")
-                                    .arg(crate::client_registry::now_ms())
-                                    .query_async(&mut conn)
-                                    .await
-                                    .unwrap_or(());
+                                // EXISTS guard: a plain HSET on a vanished lease
+                                // would recreate a partial hash (activated_at
+                                // only) that no sweep can attribute to a state.
+                                let _: () = redis::Script::new(
+                                    "if redis.call('EXISTS', KEYS[1]) == 1 then \
+                                     redis.call('HSET', KEYS[1], 'activated_at', ARGV[1]) end",
+                                )
+                                .key(rt.k(&format!("lease:{lease2}")))
+                                .arg(crate::client_registry::now_ms())
+                                .invoke_async(&mut conn)
+                                .await
+                                .unwrap_or(());
                             }
                             tracing::debug!(req = %rid_for_release, n = b.len(), "response_chunk");
                             if resp_tx.send(Ok(b.into())).await.is_err() {
