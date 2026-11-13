@@ -541,32 +541,21 @@ impl Scheduler {
         // a2) `queue:count` is maintained inside the queue scripts, but any
         // missed decrement (legacy data, script error) re-arms QueueFull
         // forever — periodically clamp it to the sum of the class zsets.
+        // The measure+fix itself must be atomic: a read-then-SET from here
+        // would race live traffic and inject the drift it corrects.
         {
-            let mut n: i64 = 0;
-            for p in 0..self.inner.cfg.priority_classes.max(1) {
-                let z: i64 = redis::cmd("ZCARD")
-                    .arg(self.inner.rt.k(&format!("queue:{p}")))
-                    .query_async(&mut c)
-                    .await
-                    .unwrap_or(0);
-                n += z;
-            }
-            let cur: i64 = redis::cmd("GET")
-                .arg(self.inner.rt.k("queue:count"))
-                .query_async::<Option<String>>(&mut c)
+            let mut keys: Vec<String> = (0..self.inner.cfg.priority_classes.max(1))
+                .map(|p| self.inner.rt.k(&format!("queue:{p}")))
+                .collect();
+            keys.push(self.inner.rt.k("queue:count"));
+            let (cur, n): (i64, i64) = redis::Script::new(crate::lua::QUEUE_COUNT_RECONCILE)
+                .key(keys)
+                .invoke_async::<Vec<i64>>(&mut c)
                 .await
-                .ok()
-                .flatten()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
+                .map(|v| (*v.first().unwrap_or(&0), *v.get(1).unwrap_or(&0)))
+                .unwrap_or((0, 0));
             if cur != n {
                 tracing::warn!(stored = cur, actual = n, "queue:count drift corrected");
-                let _: () = redis::cmd("SET")
-                    .arg(self.inner.rt.k("queue:count"))
-                    .arg(n)
-                    .query_async(&mut c)
-                    .await
-                    .unwrap_or(());
             }
         }
         // b) expired reserved leases on ALL deployments — a disabled dep keeps
@@ -1346,6 +1335,13 @@ impl Scheduler {
                 // HTTP body open ~15s past the last token — clients would
                 // keep showing "running" after the answer completed.
                 drop(resp_tx);
+                // The data phase is over — the entry must leave `active`
+                // BEFORE the lease is released: the watchdog reconcile
+                // treats `active` + missing lease as a crash and would
+                // overwrite a completed request's history with
+                // `failed/lease_lost` whenever its tick lands in the
+                // release→RequestEnd gap.
+                inner2.active.lock().await.remove(&rid_for_release);
                 // Release the lease — slot freed exactly once, idempotent.
                 let mut c = rt.conn.clone();
                 let _: String = redis::Script::new(crate::lua::LEASE_RELEASE)
@@ -1357,6 +1353,9 @@ impl Scheduler {
                     .invoke_async(&mut c)
                     .await
                     .unwrap_or_default();
+                // The freed slot is dispatchable capacity — wake the loop now
+                // instead of letting queued work wait out the 2s tick.
+                inner2.wake.notify_one();
                 // Safety net for a missing RequestEnd: the client normally
                 // reports usage/end on the control stream within ms, but if
                 // it died mid-teardown (or is non-conforming) `ends`/`active`

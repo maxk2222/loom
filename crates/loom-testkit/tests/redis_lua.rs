@@ -703,7 +703,7 @@ async fn queue_any_nonempty_reports_higher_class_waiters() {
 
     async fn any(c: &mut ConnectionManager, keys: Vec<String>) -> i64 {
         redis::Script::new(lua::QUEUE_ANY_NONEMPTY)
-            .key(keys)
+            .key(&keys)
             .invoke_async::<i64>(c)
             .await
             .unwrap()
@@ -1248,4 +1248,85 @@ async fn capacity_apply_recomputes_free_from_lease_set() {
         .await
         .unwrap();
     assert_eq!(apply(&mut c, &dep, &leases, 4, 4).await, 3);
+}
+
+#[tokio::test]
+async fn queue_count_reconcile_clamps_atomically() {
+    let Some((mut c, p)) = conn().await else {
+        return;
+    };
+    let q0 = format!("{p}queue:0");
+    let q1 = format!("{p}queue:1");
+    let count = format!("{p}queue:count");
+    async fn reconcile(c: &mut ConnectionManager, keys: [&String; 3]) -> Vec<i64> {
+        redis::Script::new(lua::QUEUE_COUNT_RECONCILE)
+            .key(&keys)
+            .invoke_async::<Vec<i64>>(c)
+            .await
+            .unwrap()
+    }
+    let keys = [&q0, &q1, &count];
+
+    // two members in class 0, one in class 1 → actual 3
+    let _: () = redis::pipe()
+        .cmd("ZADD")
+        .arg(&q0)
+        .arg(1)
+        .arg("r1")
+        .arg(2)
+        .arg("r2")
+        .ignore()
+        .cmd("ZADD")
+        .arg(&q1)
+        .arg(1)
+        .arg("r3")
+        .ignore()
+        .query_async(&mut c)
+        .await
+        .unwrap();
+
+    // matching counter → no rewrite, reports (stored, actual) equal
+    let _: () = redis::cmd("SET")
+        .arg(&count)
+        .arg(3)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(reconcile(&mut c, keys).await, vec![3, 3]);
+
+    // inflated counter (missed decrement) → clamped to reality
+    let _: () = redis::cmd("SET")
+        .arg(&count)
+        .arg(9)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(reconcile(&mut c, keys).await, vec![9, 3]);
+    let n: i64 = redis::cmd("GET")
+        .arg(&count)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(n, 3);
+
+    // negative counter (clamped-over-enqueue + pops) → clamped back to 0+
+    let _: () = redis::cmd("DEL")
+        .arg(&q0)
+        .arg(&q1)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    let _: () = redis::cmd("SET")
+        .arg(&count)
+        .arg(-1)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(reconcile(&mut c, keys).await, vec![-1, 0]);
+    let n: i64 = redis::cmd("GET")
+        .arg(&count)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
 }

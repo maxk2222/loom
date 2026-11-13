@@ -78,6 +78,20 @@ end
 return 'NOT_FOUND'
 "#;
 
+/// queue_count_reconcile: KEYS=[queue:{c0}..queue:{cN}, queue:count]
+/// -> {stored, actual} — clamps the global counter to the sum of the class
+/// zsets when they differ. Measure+fix must run inside the script: a
+/// Rust-side ZCARD-then-SET leaves a window where a real enqueue/pop
+/// mutates the counter between the reads and the clamp, so the corrector
+/// itself injects the drift it is meant to heal (recurring ±1 warnings).
+pub const QUEUE_COUNT_RECONCILE: &str = r#"
+local n = 0
+for i=1,#KEYS-1 do n = n + redis.call('ZCARD', KEYS[i]) end
+local cur = tonumber(redis.call('GET', KEYS[#KEYS]) or '0')
+if cur ~= n then redis.call('SET', KEYS[#KEYS], n) end
+return {cur, n}
+"#;
+
 /// lease_acquire: KEYS=[dep:{id}, dep:{id}:leases, lease:{lid}, cap:fencing]
 /// ARGV=[request_id, client_id, dep_id, ttl_ms, now_ms, fencing_in, fp, kv_budget]
 /// -> {fencing} | "NO_CAPACITY" | "KV_FULL" | "UNAVAILABLE"

@@ -83,3 +83,5 @@ in release notes.
 | Requests 429 `overloaded` | queue depth (Scheduler page), class caps |
 | `rate_limited` | API key limits; raise or add key |
 | Leases stuck | `lease_sweep` runs each heartbeat cycle; fencing mismatches log `stale_fencing` |
+| `active entry with dead lease` / `lease_lost` warnings | Genuine state loss only: a lease vanished while its request was still streaming (peer `reset_runtime`, manual Redis ops, crashed bridge task). Clean stream ends no longer produce these. |
+| `queue:count drift corrected` | The gauge is re-clamped to the class zsets atomically each watchdog pass. Recurring corrections point at a real missed increment/decrement, not load noise. |
