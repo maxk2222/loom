@@ -203,6 +203,67 @@ impl ModelRegistry {
             .collect()
     }
 
+    /// `/v1/models` detail: api_name → (api_type, capability union across
+    /// members). The union mirrors admission semantics — an unprobed member
+    /// contributes chat/completions (what it may serve optimistically), a
+    /// router contributes the union of its resolvable member vms. Callers
+    /// use this to learn which endpoint families/features a model covers.
+    pub async fn list_detailed(&self) -> Vec<(String, String, Capabilities)> {
+        let snap = self.snapshot.read().await;
+        let mut out = Vec::with_capacity(snap.len());
+        for (name, vm) in snap.iter() {
+            if vm.kind == "direct" {
+                continue;
+            }
+            let mut caps = Capabilities::default();
+            let mut absorb = |c: &Capabilities| {
+                let effective = if *c == Capabilities::default() {
+                    // Unprobed member — admits chat/completions optimistically.
+                    Capabilities {
+                        chat: true,
+                        completions: true,
+                        ..Default::default()
+                    }
+                } else {
+                    c.clone()
+                };
+                caps.union_with(&effective);
+            };
+            if vm.kind == "router" {
+                // Router members live in router_config and point at other
+                // vms — union what the router can actually reach. Same
+                // target resolution as the router engine's member_target.
+                if let Some(ms) = vm.router_config["members"].as_array() {
+                    for m in ms {
+                        let target = m["resolved"].as_str().map(String::from).or_else(|| {
+                            let r = m["ref"].as_str().unwrap_or("");
+                            r.strip_prefix("vm:").map(String::from).or_else(|| {
+                                r.strip_prefix("dep:")
+                                    .map(crate::router_engine::dep_vm_name)
+                            })
+                        });
+                        let Some(target) = target else { continue };
+                        if let Some(tvm) = snap.get(&target) {
+                            for mem in &tvm.members {
+                                if mem.enabled() {
+                                    absorb(&mem.capabilities);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                for mem in &vm.members {
+                    if mem.enabled() {
+                        absorb(&mem.capabilities);
+                    }
+                }
+            }
+            out.push((name.clone(), vm.api_type.as_str().to_string(), caps));
+        }
+        out
+    }
+
     /// Candidate members for a request, filtered by api type + required caps.
     pub async fn candidates(
         &self,
@@ -519,5 +580,92 @@ mod tests {
         v.api_type = ApiType::Chat;
         assert!(v.serves_api(ApiType::Embeddings));
         assert!(v.serves_api(ApiType::Images));
+    }
+}
+
+#[cfg(test)]
+mod list_detailed_tests {
+    use super::*;
+
+    fn registry() -> ModelRegistry {
+        let pool =
+            PgPool::connect_lazy("postgres://loom:loom@127.0.0.1:1/loom_test").expect("lazy pool");
+        ModelRegistry::new(pool)
+    }
+
+    fn member(id: &str, caps: Capabilities) -> Member {
+        Member {
+            deployment_id: id.into(),
+            client_id: "c".into(),
+            model_name: "m".into(),
+            capabilities: caps,
+            priority: 10,
+            weight: 1,
+            manual_pinned: false,
+            member_enabled: true,
+            dep_enabled: true,
+            kv_budget: None,
+            admission_mode: "slots".into(),
+        }
+    }
+
+    fn vm(api_type: ApiType, kind: &str, members: Vec<Member>) -> VirtualModel {
+        VirtualModel {
+            id: "x".into(),
+            api_name: "x".into(),
+            api_type,
+            routing_strategy: "priority".into(),
+            required_caps: RequiredCaps::default(),
+            allow_heterogeneous: true,
+            fallback_virtual_model_id: None,
+            members,
+            kind: kind.into(),
+            router_config: serde_json::json!({}),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_detailed_unions_member_caps_and_hides_direct() {
+        let reg = registry();
+        let mut embed = VirtualModel {
+            kind: "vm".into(),
+            members: vec![
+                member(
+                    "d-chat",
+                    Capabilities {
+                        chat: true,
+                        vision: true,
+                        context_length: 8192,
+                        ..Default::default()
+                    },
+                ),
+                member(
+                    "d-embed",
+                    Capabilities {
+                        embeddings: true,
+                        context_length: 2048,
+                        ..Default::default()
+                    },
+                ),
+                member("d-unprobed", Capabilities::default()),
+            ],
+            ..vm(ApiType::Multi, "vm", vec![])
+        };
+        embed.api_name = "omni".into();
+        let mut direct = vm(ApiType::Chat, "direct", vec![]);
+        direct.api_name = "dep-hidden".into();
+        {
+            let mut snap = reg.snapshot.write().await;
+            snap.insert("omni".into(), embed);
+            snap.insert("dep-hidden".into(), direct);
+        }
+        let out = reg.list_detailed().await;
+        assert_eq!(out.len(), 1, "direct vms must not be listed");
+        let (name, ty, caps) = &out[0];
+        assert_eq!(name, "omni");
+        assert_eq!(ty, "multi");
+        assert!(caps.chat && caps.vision && caps.embeddings && caps.completions);
+        assert_eq!(caps.context_length, 8192, "largest member window wins");
+        assert!(!caps.images);
     }
 }

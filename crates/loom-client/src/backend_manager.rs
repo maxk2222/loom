@@ -1039,9 +1039,21 @@ impl BackendManager {
 
     /// List exposed model names for the local OpenAI API (deployment names).
     pub async fn local_models(&self) -> Vec<String> {
+        self.local_models_detailed()
+            .await
+            .into_iter()
+            .map(|(m, _)| m)
+            .collect()
+    }
+
+    /// `/v1/models` detail: model name → capability union across the
+    /// deployments serving it. `None` means unprobed — the local api
+    /// admits it optimistically (chat/completions), so the listing reports
+    /// the same.
+    pub async fn local_models_detailed(&self) -> Vec<(String, Option<Capabilities>)> {
         let deps = self.inner.deployments.read().await;
-        let mut seen = std::collections::BTreeSet::new();
-        let mut out = Vec::new();
+        let mut out: std::collections::BTreeMap<String, Option<Capabilities>> =
+            std::collections::BTreeMap::new();
         for d in deps.values().filter(|d| d.cfg.enabled) {
             let m = if d.cfg.model_name == loom_core::config::DYNAMIC_MODEL {
                 match d.resolved_model.read().await.clone() {
@@ -1051,11 +1063,19 @@ impl BackendManager {
             } else {
                 d.cfg.model_name.clone()
             };
-            if seen.insert(m.clone()) {
-                out.push(m);
+            let caps = d.caps.read().await.clone();
+            match out.get_mut(&m) {
+                Some(slot) => match (slot.as_mut(), caps) {
+                    (Some(acc), Some(c)) => acc.union_with(&c),
+                    (None, c @ Some(_)) => *slot = c,
+                    _ => {}
+                },
+                None => {
+                    out.insert(m, caps);
+                }
             }
         }
-        out
+        out.into_iter().collect()
     }
 
     /// Capability of a deployment for local API checks.

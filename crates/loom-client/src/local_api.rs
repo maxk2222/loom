@@ -386,11 +386,41 @@ async fn openai_translation(
 }
 
 async fn openai_models(State(s): State<AppState>) -> Json<Value> {
-    let models = s.backends.local_models().await;
-    Json(
-        serde_json::to_value(ModelList::of(models, "loom-local"))
-            .unwrap_or(json!({"object":"list","data":[]})),
-    )
+    let models = s.backends.local_models_detailed().await;
+    let created = chrono::Utc::now().timestamp();
+    let cards = models
+        .into_iter()
+        .map(|(name, caps)| {
+            let mut extra = serde_json::Map::new();
+            // Unprobed deployments admit chat/completions optimistically —
+            // report that instead of a misleading all-false block, flagged
+            // via capabilities_probed so callers can tell.
+            let probed = caps.is_some();
+            let c = caps.unwrap_or_else(|| loom_core::capability::Capabilities {
+                chat: true,
+                completions: true,
+                ..Default::default()
+            });
+            extra.insert(
+                "capabilities".into(),
+                serde_json::to_value(&c).unwrap_or_default(),
+            );
+            if !probed {
+                extra.insert("capabilities_probed".into(), json!(false));
+            }
+            loom_core::openai::ModelCard {
+                id: name,
+                object: "model".into(),
+                created,
+                owned_by: "loom-local".into(),
+                extra,
+            }
+        })
+        .collect();
+    Json(json!(ModelList {
+        object: "list".into(),
+        data: cards,
+    }))
 }
 
 async fn openai_inference(s: AppState, api: ApiType, headers: HeaderMap, body: Value) -> Response {

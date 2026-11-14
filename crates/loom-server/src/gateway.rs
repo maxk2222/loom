@@ -148,14 +148,32 @@ async fn videos(State(s): State<GatewayState>, req: Request) -> Response {
 
 async fn models(State(s): State<GatewayState>, req: Request) -> Response {
     let c = ctx(&req);
-    let all = s.models.list().await;
-    let mut allowed = Vec::new();
-    for m in all {
-        if s.auth.model_allowed(&c, &m).await.unwrap_or(false) {
-            allowed.push(m);
+    let all = s.models.list_detailed().await;
+    let mut cards = Vec::new();
+    let created = chrono::Utc::now().timestamp();
+    for (name, api_type, caps) in all {
+        if !s.auth.model_allowed(&c, &name).await.unwrap_or(false) {
+            continue;
         }
+        let mut extra = serde_json::Map::new();
+        extra.insert("api_type".into(), json!(api_type));
+        extra.insert(
+            "capabilities".into(),
+            serde_json::to_value(&caps).unwrap_or_default(),
+        );
+        cards.push(loom_core::openai::ModelCard {
+            id: name,
+            object: "model".into(),
+            created,
+            owned_by: "loom".into(),
+            extra,
+        });
     }
-    Json(json!(ModelList::of(allowed, "loom"))).into_response()
+    Json(json!(ModelList {
+        object: "list".into(),
+        data: cards,
+    }))
+    .into_response()
 }
 
 async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {

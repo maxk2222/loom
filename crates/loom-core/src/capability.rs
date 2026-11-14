@@ -165,6 +165,27 @@ impl Capabilities {
         }
     }
 
+    /// Merge another deployment's capabilities into self: flags OR —
+    /// "the model can do X when at least one member can" — context takes
+    /// the largest offered window, modalities union.
+    pub fn union_with(&mut self, o: &Capabilities) {
+        self.chat |= o.chat;
+        self.completions |= o.completions;
+        self.embeddings |= o.embeddings;
+        self.images |= o.images;
+        self.audio_speech |= o.audio_speech;
+        self.audio_transcription |= o.audio_transcription;
+        self.audio_translation |= o.audio_translation;
+        self.video |= o.video;
+        self.video_input |= o.video_input;
+        self.tools |= o.tools;
+        self.vision |= o.vision;
+        self.json_mode |= o.json_mode;
+        self.streaming |= o.streaming;
+        self.context_length = self.context_length.max(o.context_length);
+        self.modalities.extend(o.modalities.iter().cloned());
+    }
+
     /// Check whether this deployment satisfies a required-caps request.
     pub fn satisfies(&self, req: &RequiredCaps) -> bool {
         (!req.tools || self.tools)
@@ -316,5 +337,32 @@ mod tests {
         // Multi = "serves at least one family" (legacy/union semantics).
         assert!(c.supports_api(ApiType::Multi));
         assert!(!c.supports_api(ApiType::Video));
+    }
+}
+
+#[cfg(test)]
+mod union_tests {
+    use super::*;
+
+    #[test]
+    fn union_ors_flags_max_ctx_and_merges_modalities() {
+        let mut a = Capabilities {
+            chat: true,
+            context_length: 4096,
+            modalities: ["text"].into_iter().map(String::from).collect(),
+            ..Default::default()
+        };
+        let b = Capabilities {
+            embeddings: true,
+            vision: true,
+            context_length: 8192,
+            modalities: ["text", "image"].into_iter().map(String::from).collect(),
+            ..Default::default()
+        };
+        a.union_with(&b);
+        assert!(a.chat && a.embeddings && a.vision);
+        assert_eq!(a.context_length, 8192);
+        assert!(a.modalities.contains("image") && a.modalities.contains("text"));
+        assert!(!a.images && !a.video);
     }
 }
