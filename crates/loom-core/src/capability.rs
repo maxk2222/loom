@@ -61,6 +61,17 @@ impl ApiType {
         )
     }
 
+    /// Apis an unprobed (all-false capabilities) deployment may serve
+    /// optimistically — local client admission is authoritative for text
+    /// generation only. Embeddings and every media api require a probed or
+    /// declared flag: unlike chat, an embedding request against a backend
+    /// without an embedding model cannot fall back and only fails upstream,
+    /// so in an omni/multi virtual model a freshly registered chat
+    /// deployment would otherwise steal embedding traffic until probed.
+    pub fn admits_unprobed(&self) -> bool {
+        matches!(self, ApiType::Chat | ApiType::Completions | ApiType::Multi)
+    }
+
     /// Whether the request body is multipart/form-data rather than JSON.
     pub fn is_multipart(&self) -> bool {
         matches!(
@@ -266,5 +277,44 @@ impl std::str::FromStr for SharingMode {
             "shared" | "reserved" => SharingMode::Shared,
             _ => return Err(()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admits_unprobed_only_for_text_generation() {
+        assert!(ApiType::Chat.admits_unprobed());
+        assert!(ApiType::Completions.admits_unprobed());
+        assert!(ApiType::Multi.admits_unprobed());
+        // Embeddings and media need probed/declared flags — an unprobed
+        // deployment must never absorb them.
+        for api in [
+            ApiType::Embeddings,
+            ApiType::Images,
+            ApiType::AudioSpeech,
+            ApiType::AudioTranscription,
+            ApiType::AudioTranslation,
+            ApiType::Video,
+        ] {
+            assert!(!api.admits_unprobed(), "{api} must not admit unprobed");
+        }
+    }
+
+    #[test]
+    fn supports_api_maps_each_type() {
+        let c = Capabilities {
+            embeddings: true,
+            images: true,
+            ..Default::default()
+        };
+        assert!(!c.supports_api(ApiType::Chat));
+        assert!(c.supports_api(ApiType::Embeddings));
+        assert!(c.supports_api(ApiType::Images));
+        // Multi = "serves at least one family" (legacy/union semantics).
+        assert!(c.supports_api(ApiType::Multi));
+        assert!(!c.supports_api(ApiType::Video));
     }
 }

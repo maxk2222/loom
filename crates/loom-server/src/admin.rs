@@ -1475,6 +1475,15 @@ async fn create_vm(State(s): State<AdminState>, Json(b): Json<Value>) -> Respons
         )
             .into_response();
     }
+    if let Some(t) = b.get("api_type").and_then(|v| v.as_str()) {
+        if t.parse::<loom_core::capability::ApiType>().is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"invalid api_type"})),
+            )
+                .into_response();
+        }
+    }
     let mut tx = match s.db.begin().await {
         Ok(t) => t,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -1566,6 +1575,17 @@ async fn update_vm(
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> Response {
+    // Reject unknown api types up front — the UPDATE otherwise hits the DB
+    // CHECK and silently no-ops while the UI reports success.
+    if let Some(t) = b.get("api_type").and_then(|v| v.as_str()) {
+        if t.parse::<loom_core::capability::ApiType>().is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"invalid api_type"})),
+            )
+                .into_response();
+        }
+    }
     let _ = sqlx::query(
         "UPDATE virtual_models SET description=COALESCE($2,description), api_type=COALESCE($3,api_type),
          routing_strategy=COALESCE($4,routing_strategy), required_capabilities=COALESCE($5,required_capabilities),
@@ -1668,6 +1688,7 @@ async fn history(State(s): State<AdminState>, Query(q): Query<HistQ>) -> Json<Va
     type HistRow = (
         uuid::Uuid,
         String,
+        String,
         Option<i64>,
         Option<i64>,
         Option<i64>,
@@ -1680,10 +1701,10 @@ async fn history(State(s): State<AdminState>, Query(q): Query<HistQ>) -> Json<Va
     );
     let limit = q.limit.unwrap_or(100).min(500);
     let rows: Vec<HistRow> = sqlx::query_as(
-        "SELECT id, status, queue_wait_ms, ttft_ms, duration_ms, prompt_tokens, completion_tokens, error_code, created_at, client_id::text AS client_id, deployment_id::text AS deployment_id FROM requests_history ORDER BY created_at DESC LIMIT $1")
+        "SELECT id, status, api_type, queue_wait_ms, ttft_ms, duration_ms, prompt_tokens, completion_tokens, error_code, created_at, client_id::text AS client_id, deployment_id::text AS deployment_id FROM requests_history ORDER BY created_at DESC LIMIT $1")
         .bind(limit).fetch_all(&s.db).await.unwrap_or_default();
     Json(
-        json!({"requests": rows.iter().map(|(id,st,qw,t,d,pt,ct,ec,ca,cid,did)| json!({"id":id,"status":st,"queue_wait_ms":qw,"ttft_ms":t,"duration_ms":d,"prompt_tokens":pt,"completion_tokens":ct,"error_code":ec,"created_at":ca,"client_id":cid,"deployment_id":did})).collect::<Vec<_>>()}),
+        json!({"requests": rows.iter().map(|(id,st,at,qw,t,d,pt,ct,ec,ca,cid,did)| json!({"id":id,"status":st,"api_type":at,"queue_wait_ms":qw,"ttft_ms":t,"duration_ms":d,"prompt_tokens":pt,"completion_tokens":ct,"error_code":ec,"created_at":ca,"client_id":cid,"deployment_id":did})).collect::<Vec<_>>()}),
     )
 }
 

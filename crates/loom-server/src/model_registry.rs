@@ -55,6 +55,18 @@ impl Member {
     }
 }
 
+impl VirtualModel {
+    /// Whether this vm may serve a request for `api`. A typed vm only
+    /// serves its declared api_type; `multi` is the wildcard for omni
+    /// models bundling members of different endpoint families. `direct`
+    /// vms are implicit per-deployment aliases whose stored api_type is a
+    /// placeholder ('chat') — the single member's own capabilities remain
+    /// the authority there.
+    pub fn serves_api(&self, api: ApiType) -> bool {
+        self.kind == "direct" || self.api_type == ApiType::Multi || self.api_type == api
+    }
+}
+
 #[derive(Clone)]
 pub struct ModelRegistry {
     db: PgPool,
@@ -207,12 +219,14 @@ impl ModelRegistry {
                     return false;
                 }
                 // Unprobed members (reported all-false / empty) are permissive
-                // for text-family apis — the client's local admission is
-                // authoritative. Media apis require an explicit flag: an
-                // unprobed chat deployment must never absorb image/audio
-                // requests.
+                // for apis the local client can authoritatively admit
+                // (chat/completions). Embeddings and media apis require an
+                // explicit probed/declared flag: an unprobed deployment must
+                // never absorb image/audio requests, and in an omni model it
+                // must not steal embedding traffic either — embedding calls
+                // cannot fall back mid-request, they only fail upstream.
                 let unknown = m.capabilities == Capabilities::default();
-                (unknown && api.is_text_family())
+                (unknown && api.admits_unprobed())
                     || (m.capabilities.supports_api(api) && m.capabilities.satisfies(&merged))
             })
             .cloned()
@@ -297,5 +311,213 @@ fn merge_caps(a: &RequiredCaps, b: &RequiredCaps) -> RequiredCaps {
         streaming: a.streaming || b.streaming,
         json_mode: a.json_mode || b.json_mode,
         video: a.video || b.video,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `candidates()` never queries Postgres — a lazy pool suffices.
+    fn registry() -> ModelRegistry {
+        let pool =
+            PgPool::connect_lazy("postgres://loom:loom@127.0.0.1:1/loom_test").expect("lazy pool");
+        ModelRegistry::new(pool)
+    }
+
+    fn vm(api_type: ApiType, allow_hetero: bool, members: Vec<Member>) -> VirtualModel {
+        VirtualModel {
+            id: "vm1".into(),
+            api_name: "omni".into(),
+            api_type,
+            routing_strategy: "priority".into(),
+            required_caps: RequiredCaps::default(),
+            allow_heterogeneous: allow_hetero,
+            fallback_virtual_model_id: None,
+            members,
+            kind: "vm".into(),
+            router_config: serde_json::json!({}),
+        }
+    }
+
+    fn member(id: &str, model: &str, caps: Capabilities) -> Member {
+        Member {
+            deployment_id: id.into(),
+            client_id: "c1".into(),
+            model_name: model.into(),
+            capabilities: caps,
+            priority: 10,
+            weight: 1,
+            manual_pinned: false,
+            member_enabled: true,
+            dep_enabled: true,
+            kv_budget: None,
+            admission_mode: "slots".into(),
+        }
+    }
+
+    fn caps_chat() -> Capabilities {
+        Capabilities {
+            chat: true,
+            streaming: true,
+            ..Default::default()
+        }
+    }
+
+    fn caps_embed() -> Capabilities {
+        Capabilities {
+            embeddings: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn omni_vm_routes_each_api_to_matching_member() {
+        let reg = registry();
+        let v = vm(
+            ApiType::Multi,
+            true,
+            vec![
+                member("dep-chat", "qwen3", caps_chat()),
+                member("dep-embed", "nomic-embed", caps_embed()),
+                member(
+                    "dep-img",
+                    "sdxl",
+                    Capabilities {
+                        images: true,
+                        ..Default::default()
+                    },
+                ),
+            ],
+        );
+        let req = RequiredCaps::default();
+
+        let chat = reg.candidates(&v, ApiType::Chat, &req).await;
+        assert_eq!(chat.len(), 1);
+        assert_eq!(chat[0].deployment_id, "dep-chat");
+
+        let emb = reg.candidates(&v, ApiType::Embeddings, &req).await;
+        assert_eq!(emb.len(), 1);
+        assert_eq!(emb[0].deployment_id, "dep-embed");
+
+        let img = reg.candidates(&v, ApiType::Images, &req).await;
+        assert_eq!(img.len(), 1);
+        assert_eq!(img[0].deployment_id, "dep-img");
+
+        // A family no member serves yields nothing — the scheduler then
+        // reports NoCandidates rather than mis-routing.
+        assert!(reg
+            .candidates(&v, ApiType::AudioSpeech, &req)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn unprobed_member_admits_text_but_not_embeddings_or_media() {
+        let reg = registry();
+        let v = vm(
+            ApiType::Multi,
+            true,
+            vec![member("dep-new", "anything", Capabilities::default())],
+        );
+        let req = RequiredCaps::default();
+        assert_eq!(reg.candidates(&v, ApiType::Chat, &req).await.len(), 1);
+        assert_eq!(
+            reg.candidates(&v, ApiType::Completions, &req).await.len(),
+            1
+        );
+        assert!(reg
+            .candidates(&v, ApiType::Embeddings, &req)
+            .await
+            .is_empty());
+        assert!(reg.candidates(&v, ApiType::Images, &req).await.is_empty());
+        assert!(reg
+            .candidates(&v, ApiType::AudioTranscription, &req)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn heterogeneity_applies_within_filtered_family() {
+        let reg = registry();
+        // allow_heterogeneous=false: a chat + an embed member with different
+        // model names must not collide — the name check runs on the
+        // api-filtered set only.
+        let v = vm(
+            ApiType::Multi,
+            false,
+            vec![
+                member("dep-chat", "qwen3", caps_chat()),
+                member("dep-embed", "nomic-embed", caps_embed()),
+            ],
+        );
+        let req = RequiredCaps::default();
+        assert_eq!(reg.candidates(&v, ApiType::Chat, &req).await.len(), 1);
+        assert_eq!(reg.candidates(&v, ApiType::Embeddings, &req).await.len(), 1);
+
+        // But two chat members with different model names collapse to the
+        // canonical (lowest-priority-value) family.
+        let mut a = member("dep-a", "model-a", caps_chat());
+        a.priority = 5;
+        let b = member("dep-b", "model-b", caps_chat());
+        let v2 = vm(ApiType::Chat, false, vec![a, b]);
+        let out = reg.candidates(&v2, ApiType::Chat, &req).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].deployment_id, "dep-a");
+    }
+
+    #[tokio::test]
+    async fn required_caps_still_filter_within_family() {
+        let reg = registry();
+        let v = vm(
+            ApiType::Multi,
+            true,
+            vec![
+                member("dep-plain", "qwen3", caps_chat()),
+                member(
+                    "dep-tools",
+                    "qwen3-tools",
+                    Capabilities {
+                        chat: true,
+                        tools: true,
+                        ..Default::default()
+                    },
+                ),
+            ],
+        );
+        let req = RequiredCaps {
+            tools: true,
+            ..Default::default()
+        };
+        let out = reg.candidates(&v, ApiType::Chat, &req).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].deployment_id, "dep-tools");
+    }
+
+    #[test]
+    fn serves_api_contract() {
+        let mut v = vm(ApiType::Multi, true, vec![]);
+        for api in [
+            ApiType::Chat,
+            ApiType::Embeddings,
+            ApiType::Images,
+            ApiType::Video,
+        ] {
+            assert!(v.serves_api(api), "multi serves {api}");
+        }
+        v.api_type = ApiType::Chat;
+        assert!(v.serves_api(ApiType::Chat));
+        assert!(!v.serves_api(ApiType::Embeddings));
+        assert!(!v.serves_api(ApiType::Images));
+        v.api_type = ApiType::Embeddings;
+        assert!(!v.serves_api(ApiType::Chat));
+        assert!(v.serves_api(ApiType::Embeddings));
+
+        // 'direct' vms are implicit per-deployment aliases — their stored
+        // api_type is a 'chat' placeholder and must not reject any api.
+        v.kind = "direct".into();
+        v.api_type = ApiType::Chat;
+        assert!(v.serves_api(ApiType::Embeddings));
+        assert!(v.serves_api(ApiType::Images));
     }
 }

@@ -45,6 +45,11 @@ pub enum SchedErr {
     /// "will never fit" verdict that must fail fast instead of queueing.
     #[error("request footprint exceeds every deployment budget")]
     ContextTooLarge,
+    /// Virtual model's declared `api_type` does not serve this api — a typed
+    /// (non-`multi`) vm must reject foreign api types instead of silently
+    /// cross-routing to a member that happens to support them.
+    #[error("model does not serve this api type")]
+    ApiTypeMismatch,
     #[error("backend: {0}")]
     Backend(String),
 }
@@ -211,6 +216,11 @@ impl Scheduler {
         let Some(vm) = self.inner.models.resolve(model).await else {
             return false;
         };
+        // Same api_type contract as try_dispatch — the auto-router must
+        // never mark a typed vm pickable for an api it does not serve.
+        if !vm.serves_api(api) {
+            return false;
+        }
         let candidates = self.inner.models.candidates(&vm, api, required).await;
         for m in &candidates {
             if let Ok(Some(rt)) = self.inner.registry.dep_runtime(&m.deployment_id).await {
@@ -868,6 +878,11 @@ impl Scheduler {
         let Some(vm) = self.inner.models.resolve(&req.model).await else {
             return Err(SchedErr::NoCandidates);
         };
+        // A typed vm only serves its declared api_type — `multi` is the
+        // wildcard for omni models bundling heterogeneous members.
+        if !vm.serves_api(req.api) {
+            return Err(SchedErr::ApiTypeMismatch);
+        }
         let mut candidates = self
             .inner
             .models

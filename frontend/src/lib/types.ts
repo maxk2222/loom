@@ -123,6 +123,7 @@ export interface UserRow {
 export interface HistoryRow {
   id: string;
   status: string;
+  api_type: string;
   queue_wait_ms: number;
   ttft_ms: number;
   duration_ms: number;

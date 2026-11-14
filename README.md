@@ -235,6 +235,19 @@ in the background (backoff on repeated evictions).
 by explicit per-deployment capability flags, same grants/scopes/limits as
 chat.
 
+**Omni virtual models** (`api_type='multi'`): one model name serves every
+endpoint family. Members bundle heterogeneous backends — a chat
+deployment, an embedding deployment, an image backend — and the scheduler
+picks per request by `api_type` + capabilities. Typed virtual models keep
+their contract: a `chat` vm rejects `/v1/embeddings` with
+`invalid_request` instead of silently cross-routing. Unprobed members are
+admitted permissively only for chat/completions — embedding and media
+traffic always requires a probed or declared capability flag (declare via
+`capability_overrides` when the backend cannot be probed). Media api
+scopes on API keys stay opt-in (`images`, `audio_*`, `video`, or `*`);
+`required_capabilities` applies globally, so on an omni vm only require
+what *every* member family must satisfy.
+
 ### Fairness under contention
 
 - Strict priority classes per API user, FIFO inside each class, weighted

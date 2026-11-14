@@ -172,12 +172,13 @@ export default function MonitoringPage() {
       <Card className="overflow-x-auto p-0">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Request history</div>
         <table className="w-full">
-          <thead><tr><th className="th">Time</th><th className="th">Status</th><th className="th">Queue</th><th className="th">TTFT</th><th className="th">Duration</th><th className="th">Tokens</th><th className="th">Error</th></tr></thead>
+          <thead><tr><th className="th">Time</th><th className="th">Status</th><th className="th">API</th><th className="th">Queue</th><th className="th">TTFT</th><th className="th">Duration</th><th className="th">Tokens</th><th className="th">Error</th></tr></thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
                 <td className="td text-muted">{fmtTimeS(r.created_at)}</td>
                 <td className="td"><span className={r.status === "completed" ? "text-ok" : r.status === "failed" ? "text-err" : "text-warn"}>{r.status}</span></td>
+                <td className="td text-muted">{r.api_type}</td>
                 <td className="td text-muted">{fmtMs(r.queue_wait_ms)}</td>
                 <td className="td text-muted">{fmtMs(r.ttft_ms)}</td>
                 <td className="td text-muted">{fmtMs(r.duration_ms)}</td>
@@ -185,7 +186,7 @@ export default function MonitoringPage() {
                 <td className="td text-muted">{r.error_code || "—"}</td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td className="td text-center text-muted" colSpan={7}>No history.</td></tr>}
+            {rows.length === 0 && <tr><td className="td text-center text-muted" colSpan={8}>No history.</td></tr>}
           </tbody>
         </table>
       </Card>

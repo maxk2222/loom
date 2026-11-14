@@ -430,6 +430,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
             usage
                 .record(crate::usage::UsageRecord {
                     request_id: rid_f.clone(),
+                    api_type: api.as_str().into(),
                     api_key_id: key_id.clone(),
                     project_id: project_id.clone(),
                     virtual_model_id: vm_id.clone(),
@@ -638,6 +639,7 @@ fn sched_err(e: SchedErr, rid: &str) -> Response {
         SchedErr::Timeout => "timeout",
         SchedErr::Cancelled => "cancelled",
         SchedErr::ContextTooLarge => "context_too_large",
+        SchedErr::ApiTypeMismatch => "api_type_mismatch",
         SchedErr::Backend(_) => "backend_error",
     });
     let (code, msg): (ErrorCode, String) = match e {
@@ -652,6 +654,10 @@ fn sched_err(e: SchedErr, rid: &str) -> Response {
         SchedErr::ContextTooLarge => (
             ErrorCode::InvalidRequest,
             "request exceeds the context capacity of every deployment".into(),
+        ),
+        SchedErr::ApiTypeMismatch => (
+            ErrorCode::InvalidRequest,
+            "model does not serve this api type".into(),
         ),
         SchedErr::Backend(m) => (ErrorCode::UpstreamError, m),
     };

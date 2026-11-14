@@ -22,6 +22,7 @@ const API_TYPES = [
   { value: "video", label: "Video generation" },
   { value: "completions", label: "Completions" },
   { value: "embeddings", label: "Embeddings" },
+  { value: "multi", label: "Multi — all API types" },
 ];
 
 interface FormState {

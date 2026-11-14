@@ -8,6 +8,9 @@ use tokio::sync::mpsc;
 #[derive(Debug)]
 pub struct UsageRecord {
     pub request_id: String,
+    /// Endpoint family that produced this record (`chat`, `embeddings`,
+    /// `images`, …) — lets history/analytics distinguish omni-vm traffic.
+    pub api_type: String,
     pub api_key_id: String,
     pub project_id: String,
     pub virtual_model_id: String,
@@ -72,13 +75,14 @@ async fn flush(db: &PgPool, buf: &mut Vec<UsageRecord>) {
     for r in buf.drain(..) {
         if let Err(e) = sqlx::query(
             "INSERT INTO requests_history
-             (id, api_key_id, project_id, virtual_model_id, deployment_id, client_id,
+             (id, api_type, api_key_id, project_id, virtual_model_id, deployment_id, client_id,
               status, queue_wait_ms, ttft_ms, duration_ms, prompt_tokens,
               completion_tokens, error_code, routing_trace)
-             VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid,
-                     $7, $8, $9, $10, $11, $12, $13, $14)",
+             VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid,
+                     $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(&r.request_id)
+        .bind(&r.api_type)
         .bind(opt_uuid(&r.api_key_id))
         .bind(opt_uuid(&r.project_id))
         .bind(opt_uuid(&r.virtual_model_id))
