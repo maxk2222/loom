@@ -204,11 +204,12 @@ impl ModelRegistry {
     }
 
     /// `/v1/models` detail: api_name → (api_type, capability union across
-    /// members). The union mirrors admission semantics — an unprobed member
-    /// contributes chat/completions (what it may serve optimistically), a
-    /// router contributes the union of its resolvable member vms. Callers
-    /// use this to learn which endpoint families/features a model covers.
-    pub async fn list_detailed(&self) -> Vec<(String, String, Capabilities)> {
+    /// members, all_probed). The union mirrors admission semantics — an
+    /// unprobed member contributes chat/completions (what it may serve
+    /// optimistically) and flips `all_probed` off so callers can tell
+    /// optimistic claims from probed fact. A router contributes the union
+    /// of its resolvable member vms.
+    pub async fn list_detailed(&self) -> Vec<(String, String, Capabilities, bool)> {
         let snap = self.snapshot.read().await;
         let mut out = Vec::with_capacity(snap.len());
         for (name, vm) in snap.iter() {
@@ -216,18 +217,21 @@ impl ModelRegistry {
                 continue;
             }
             let mut caps = Capabilities::default();
+            let mut all_probed = true;
             let mut absorb = |c: &Capabilities| {
-                let effective = if *c == Capabilities::default() {
+                let probed = *c != Capabilities::default();
+                let effective = if probed {
+                    c.clone()
+                } else {
                     // Unprobed member — admits chat/completions optimistically.
                     Capabilities {
                         chat: true,
                         completions: true,
                         ..Default::default()
                     }
-                } else {
-                    c.clone()
                 };
                 caps.union_with(&effective);
+                all_probed &= probed;
             };
             if vm.kind == "router" {
                 // Router members live in router_config and point at other
@@ -259,7 +263,12 @@ impl ModelRegistry {
                     }
                 }
             }
-            out.push((name.clone(), vm.api_type.as_str().to_string(), caps));
+            out.push((
+                name.clone(),
+                vm.api_type.as_str().to_string(),
+                caps,
+                all_probed,
+            ));
         }
         out
     }
@@ -661,11 +670,14 @@ mod list_detailed_tests {
         }
         let out = reg.list_detailed().await;
         assert_eq!(out.len(), 1, "direct vms must not be listed");
-        let (name, ty, caps) = &out[0];
+        let (name, ty, caps, probed) = &out[0];
         assert_eq!(name, "omni");
         assert_eq!(ty, "multi");
         assert!(caps.chat && caps.vision && caps.embeddings && caps.completions);
         assert_eq!(caps.context_length, 8192, "largest member window wins");
         assert!(!caps.images);
+        // One member is unprobed → its chat/completions contribution is
+        // optimistic, the flag must say so.
+        assert!(!probed);
     }
 }

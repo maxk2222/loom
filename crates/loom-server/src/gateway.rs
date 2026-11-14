@@ -151,7 +151,7 @@ async fn models(State(s): State<GatewayState>, req: Request) -> Response {
     let all = s.models.list_detailed().await;
     let mut cards = Vec::new();
     let created = chrono::Utc::now().timestamp();
-    for (name, api_type, caps) in all {
+    for (name, api_type, caps, all_probed) in all {
         if !s.auth.model_allowed(&c, &name).await.unwrap_or(false) {
             continue;
         }
@@ -161,6 +161,7 @@ async fn models(State(s): State<GatewayState>, req: Request) -> Response {
             "capabilities".into(),
             serde_json::to_value(&caps).unwrap_or_default(),
         );
+        extra.insert("capabilities_probed".into(), json!(all_probed));
         cards.push(loom_core::openai::ModelCard {
             id: name,
             object: "model".into(),

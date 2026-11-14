@@ -390,24 +390,15 @@ async fn openai_models(State(s): State<AppState>) -> Json<Value> {
     let created = chrono::Utc::now().timestamp();
     let cards = models
         .into_iter()
-        .map(|(name, caps)| {
+        .map(|(name, caps, all_probed)| {
             let mut extra = serde_json::Map::new();
-            // Unprobed deployments admit chat/completions optimistically —
-            // report that instead of a misleading all-false block, flagged
-            // via capabilities_probed so callers can tell.
-            let probed = caps.is_some();
-            let c = caps.unwrap_or_else(|| loom_core::capability::Capabilities {
-                chat: true,
-                completions: true,
-                ..Default::default()
-            });
             extra.insert(
                 "capabilities".into(),
-                serde_json::to_value(&c).unwrap_or_default(),
+                serde_json::to_value(&caps).unwrap_or_default(),
             );
-            if !probed {
-                extra.insert("capabilities_probed".into(), json!(false));
-            }
+            // false when any contributing deployment is unprobed — its
+            // chat/completions claims are optimistic admission, not fact.
+            extra.insert("capabilities_probed".into(), json!(all_probed));
             loom_core::openai::ModelCard {
                 id: name,
                 object: "model".into(),

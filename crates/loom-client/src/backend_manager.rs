@@ -1042,17 +1042,18 @@ impl BackendManager {
         self.local_models_detailed()
             .await
             .into_iter()
-            .map(|(m, _)| m)
+            .map(|(m, _, _)| m)
             .collect()
     }
 
-    /// `/v1/models` detail: model name → capability union across the
-    /// deployments serving it. `None` means unprobed — the local api
-    /// admits it optimistically (chat/completions), so the listing reports
-    /// the same.
-    pub async fn local_models_detailed(&self) -> Vec<(String, Option<Capabilities>)> {
+    /// `/v1/models` detail: model name → (capability union, all_probed)
+    /// across the deployments serving it. Each unprobed deployment
+    /// contributes chat/completions — the same optimistic admission the
+    /// local api grants it — and flips `all_probed` off so callers can
+    /// tell optimism from probed fact.
+    pub async fn local_models_detailed(&self) -> Vec<(String, Capabilities, bool)> {
         let deps = self.inner.deployments.read().await;
-        let mut out: std::collections::BTreeMap<String, Option<Capabilities>> =
+        let mut out: std::collections::BTreeMap<String, (Capabilities, bool)> =
             std::collections::BTreeMap::new();
         for d in deps.values().filter(|d| d.cfg.enabled) {
             let m = if d.cfg.model_name == loom_core::config::DYNAMIC_MODEL {
@@ -1064,18 +1065,22 @@ impl BackendManager {
                 d.cfg.model_name.clone()
             };
             let caps = d.caps.read().await.clone();
-            match out.get_mut(&m) {
-                Some(slot) => match (slot.as_mut(), caps) {
-                    (Some(acc), Some(c)) => acc.union_with(&c),
-                    (None, c @ Some(_)) => *slot = c,
-                    _ => {}
-                },
-                None => {
-                    out.insert(m, caps);
-                }
-            }
+            let probed = caps.is_some();
+            let eff = caps.unwrap_or(Capabilities {
+                chat: true,
+                completions: true,
+                ..Default::default()
+            });
+            out.entry(m)
+                .and_modify(|(acc, p)| {
+                    acc.union_with(&eff);
+                    *p &= probed;
+                })
+                .or_insert((eff, probed));
         }
-        out.into_iter().collect()
+        out.into_iter()
+            .map(|(m, (caps, probed))| (m, caps, probed))
+            .collect()
     }
 
     /// Capability of a deployment for local API checks.
