@@ -14,6 +14,7 @@ const STRATEGIES = [
   { value: "manual", label: "Manual — pinned members only", hint: "Only members marked pin can be picked (for router rules that pin a member explicitly)." },
 ];
 const API_TYPES = [
+  { value: "multi", label: "Multi — all API types (omni)" },
   { value: "chat", label: "Chat completions" },
   { value: "images", label: "Image generation" },
   { value: "audio_speech", label: "Audio — speech (TTS)" },
@@ -22,8 +23,30 @@ const API_TYPES = [
   { value: "video", label: "Video generation" },
   { value: "completions", label: "Completions" },
   { value: "embeddings", label: "Embeddings" },
-  { value: "multi", label: "Multi — all API types" },
 ];
+
+// Endpoint families shown in omni coverage/member badges. "audio" is one
+// family in the UI — a member covering any audio endpoint counts.
+const FAMILIES = ["chat", "completions", "embeddings", "images", "audio", "video"] as const;
+const FAMILY_LABEL: Record<string, string> = {
+  chat: "chat", completions: "completions", embeddings: "embeddings",
+  images: "images", audio: "audio", video: "video",
+};
+
+/** API families a deployment serves, matching server-side admission
+ * semantics: unprobed capabilities admit chat/completions only. */
+function depFamilies(d: DeploymentRow | undefined): string[] {
+  const caps = d?.capabilities as Record<string, boolean> | null | undefined;
+  if (!caps) return ["chat", "completions"];
+  const f: string[] = [];
+  if (caps.chat) f.push("chat");
+  if (caps.completions) f.push("completions");
+  if (caps.embeddings) f.push("embeddings");
+  if (caps.images) f.push("images");
+  if (caps.audio_speech || caps.audio_transcription || caps.audio_translation) f.push("audio");
+  if (caps.video) f.push("video");
+  return f;
+}
 
 interface FormState {
   api_name: string;
@@ -186,7 +209,13 @@ export default function ModelsPage() {
             <Field label="API name" hint="Model id used in /v1 requests">
               <input className="input font-mono" value={f.api_name} disabled={!!editId} onChange={(e) => setF({ ...f, api_name: e.target.value })} required placeholder="vm-llama3" />
             </Field>
-            <Field label="API type"><Select value={f.api_type} onChange={(v) => setF({ ...f, api_type: v })} options={API_TYPES} /></Field>
+            <Field label="API type" hint={
+              f.api_type === "multi"
+                ? "Omni — serves every endpoint family; members are picked per request type by their capabilities"
+                : `Typed — only accepts ${f.api_type} requests; other API types are rejected with invalid_request`
+            }>
+              <Select value={f.api_type} onChange={(v) => setF({ ...f, api_type: v })} options={API_TYPES} />
+            </Field>
           </div>
           <Field label="Description"><input className="input" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></Field>
 
@@ -200,7 +229,34 @@ export default function ModelsPage() {
                 options={[{ value: "", label: "— none —" }, ...(vms.data?.models ?? []).filter((m) => m.id !== editId).map((m) => ({ value: m.id, label: m.api_name }))]} />
             </Field>
           </div>
-          <Field label="Required capabilities" hint="Requests needing these are only routed to capable members">
+          {f.api_type === "multi" && (() => {
+            // Union of endpoint families across ENABLED members — the set
+            // of API types this omni model can actually serve right now.
+            const covered = new Set<string>();
+            for (const m of f.members) {
+              if (!m.enabled) continue;
+              for (const fam of depFamilies(deps.data?.deployments.find((d) => d.id === m.deployment_id))) covered.add(fam);
+            }
+            return (
+              <div className="rounded-md border border-border bg-panel2 p-3">
+                <div className="mb-2 text-xs font-medium text-muted">Omni coverage — endpoint families served by current members</div>
+                <div className="flex flex-wrap gap-2">
+                  {FAMILIES.map((fam) => (
+                    <Badge key={fam} tone={covered.has(fam) ? "ok" : "muted"}>
+                      {covered.has(fam) ? "✓" : "—"} {FAMILY_LABEL[fam]}
+                    </Badge>
+                  ))}
+                </div>
+                {covered.size === 0 && <div className="mt-2 text-xs text-muted">No enabled members yet — this model cannot serve any API type.</div>}
+              </div>
+            );
+          })()}
+
+          <Field label="Required capabilities" hint={
+            f.api_type === "multi"
+              ? "Global — applies to every request on this model. Only require what ALL member families can satisfy."
+              : "Requests needing these are only routed to capable members"
+          }>
             <div className="flex gap-6 pt-1">
               <Toggle checked={f.req_tools} onChange={(v) => setF({ ...f, req_tools: v })} label="tools" />
               <Toggle checked={f.req_vision} onChange={(v) => setF({ ...f, req_vision: v })} label="vision" />
@@ -265,6 +321,17 @@ export default function ModelsPage() {
                     <option value={m.deployment_id}>{(deps.data?.deployments ?? []).find(d => d.id === m.deployment_id)?.model_name ?? m.deployment_id.slice(0, 8)}</option>
                   )}
                 </select>
+                {/* Endpoint families this deployment serves — the per-request
+                    api_type filter routes only matching families here. */}
+                <span className="flex shrink-0 gap-1" title={
+                  !(deps.data?.deployments.find((d) => d.id === m.deployment_id)?.capabilities)
+                    ? "unprobed — admits chat/completions optimistically"
+                    : "endpoint families this deployment serves"
+                }>
+                  {depFamilies(deps.data?.deployments.find((d) => d.id === m.deployment_id)).map((fam) => (
+                    <Badge key={fam} tone="muted">{FAMILY_LABEL[fam]}</Badge>
+                  ))}
+                </span>
                 {f.routing_strategy === "weighted" && (
                   <input className="input w-16" type="number" min={1} title="weight" placeholder="w"
                     value={m.weight} onChange={(e) => setMember(i, { weight: +e.target.value })} />
