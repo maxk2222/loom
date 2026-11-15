@@ -4,7 +4,7 @@ import { api, copyText, LOCAL_KEY_STORAGE, localKey } from "../../lib/api";
 import { WindowPicker } from "../Overview";
 import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { Badge, Card, ConfirmModal, Field, Modal, Stat } from "../../components/ui";
-import { CapacityTile, useCapacitySeries } from "../../components/CapacityTile";
+import { CapacityChart, CapacityTile, useCapacitySeries } from "../../components/CapacityTile";
 import { TokenHeatmap } from "../../components/Heatmap";
 import { Check, Copy, Eye, EyeOff, Megaphone, RefreshCw, X } from "lucide-react";
 import type { ClientNote, ClientStatus } from "../../lib/types";
@@ -336,6 +336,7 @@ export default function ClientStatusPage() {
           ))}
         </Card>
       </div>
+      <CapacityChart title="Capacity over time" series={capSeries} note="share of kv budget and request slots across local deployments — live samples while this page is open" />
       <ClientCharts />
       <Card className="overflow-x-auto p-0">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Per-deployment capacity</div>

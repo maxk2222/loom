@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { Badge, LiveBadge, PageHeader, Stat } from "../components/ui";
 import { TokenHeatmap, expandHeatmap, type HeatmapData } from "../components/Heatmap";
-import { CapacityTile, useCapacitySeries } from "../components/CapacityTile";
+import { CapacityChart, CapacityTile, useCapacitySeries } from "../components/CapacityTile";
 import type { ClientRow, DeploymentRow, Overview, VirtualModel } from "../lib/types";
 import { fmtPct, fmtTs, fmtTime, fmtDay, fmtDayT, fmtNum, fmtMs, PRIORITY_LABELS, prioTone } from "../lib/format";
 
@@ -216,6 +216,7 @@ export default function OverviewPage() {
         </div>
         <CapacityTile title="Fleet capacity" series={capSeries} note="token-gated deployments only" />
       </div>
+      <CapacityChart title="Capacity over time" series={capSeries} note="share of summed kv budget and request slots — live samples while this page is open" />
       {fleet.length > 0 && (
         <div className="card p-4">
           <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted">Fleet load — live per client</div>
