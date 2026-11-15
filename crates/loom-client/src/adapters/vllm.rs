@@ -42,6 +42,21 @@ fn kv_tokens_from_cache_config(body: &str) -> Option<u64> {
     None
 }
 
+/// Deep-search a JSON tree for `max_model_len` — vLLM nests it under the
+/// launch config; newer builds may wrap it differently.
+fn find_max_model_len(v: &Value) -> Option<u64> {
+    match v {
+        Value::Object(m) => {
+            if let Some(n) = m.get("max_model_len").and_then(|n| n.as_u64()) {
+                return Some(n);
+            }
+            m.values().find_map(find_max_model_len)
+        }
+        Value::Array(a) => a.iter().find_map(find_max_model_len),
+        _ => None,
+    }
+}
+
 impl VllmAdapter {
     pub fn new(cfg: BackendConfig, http: reqwest::Client) -> Self {
         Self { cfg, http }
@@ -51,25 +66,19 @@ impl VllmAdapter {
         self.cfg.endpoint.trim_end_matches('/')
     }
 
-    /// vLLM's `/get_server_info` (newer builds) returns the launch config —
-    /// `limit_mm_per_prompt` / mm-processor kwargs name the accepted input
-    /// types ("image", "video", "audio"). Missing endpoint → empty set.
-    async fn server_info_mm(&self) -> std::collections::HashSet<String> {
+    /// Raw `/get_server_info` JSON — newer vLLM builds return the launch
+    /// config. Shared fetch for mm-type detection and `max_model_len`.
+    async fn server_info(&self) -> Option<Value> {
         let url = format!("{}/get_server_info", self.endpoint());
         let mut req = self.http.get(&url).timeout(Duration::from_secs(5));
         if !self.cfg.api_key.is_empty() {
             req = req.bearer_auth(&self.cfg.api_key);
         }
-        let Ok(resp) = req.send().await else {
-            return Default::default();
-        };
+        let resp = req.send().await.ok()?;
         if !resp.status().is_success() {
-            return Default::default();
+            return None;
         }
-        let v: Value = resp.json().await.unwrap_or_default();
-        let mut out = std::collections::HashSet::new();
-        collect_mm_types(&v, &mut out);
-        out
+        resp.json().await.ok()
     }
 
     /// `vllm:cache_config_info` info metric carries the physical KV pool
@@ -92,31 +101,28 @@ impl VllmAdapter {
     /// `/get_server_info` `max_model_len` — a conservative floor (admits at
     /// least one full-context request) when metrics can't be measured.
     async fn server_info_max_model_len(&self) -> u64 {
-        let url = format!("{}/get_server_info", self.endpoint());
-        let mut req = self.http.get(&url).timeout(Duration::from_secs(5));
-        if !self.cfg.api_key.is_empty() {
-            req = req.bearer_auth(&self.cfg.api_key);
-        }
-        let Ok(resp) = req.send().await else {
-            return 0;
-        };
-        if !resp.status().is_success() {
-            return 0;
-        }
-        let v: Value = resp.json().await.unwrap_or_default();
-        fn find(v: &Value) -> Option<u64> {
-            match v {
-                Value::Object(m) => {
-                    if let Some(n) = m.get("max_model_len").and_then(|n| n.as_u64()) {
-                        return Some(n);
-                    }
-                    m.values().find_map(find)
-                }
-                Value::Array(a) => a.iter().find_map(find),
-                _ => None,
-            }
-        }
-        find(&v).unwrap_or(0)
+        self.server_info()
+            .await
+            .as_ref()
+            .and_then(find_max_model_len)
+            .unwrap_or(0)
+    }
+
+    /// vLLM's `/v1/models` cards carry `max_model_len` per entry — the
+    /// honest context length the engine enforces (may be < the model's
+    /// architecture limit when `--max-model-len` is set).
+    async fn models_max_model_len(&self, model: &str) -> Option<u64> {
+        let url = format!("{}/v1/models", self.endpoint());
+        let v = common::get_json(&self.http, &url, &self.cfg.api_key, Duration::from_secs(5))
+            .await
+            .ok()?;
+        let cards = v.get("data")?.as_array()?;
+        let find = |m: &Value| m.get("max_model_len")?.as_u64();
+        cards
+            .iter()
+            .find(|m| m.get("id").and_then(|i| i.as_str()) == Some(model))
+            .and_then(find)
+            .or_else(|| cards.first().and_then(find))
     }
 
     /// Does the served model accept `kind` ("image"/"video") input parts?
@@ -217,6 +223,16 @@ impl BackendAdapter for VllmAdapter {
         };
         caps.modalities.insert("text".into());
 
+        // vLLM's own /v1/models cards carry `max_model_len` (dropped by
+        // parse_openai_models → re-read raw). /get_server_info (missing on
+        // some builds) is the fallback; unknown context length stays 0.
+        let server_info = self.server_info().await;
+        caps.context_length = self
+            .models_max_model_len(model)
+            .await
+            .or_else(|| server_info.as_ref().and_then(find_max_model_len))
+            .unwrap_or(0) as u32;
+
         // Vision detection, strongest signal first:
         //  1. /get_server_info — vLLM exposes its launch config; the
         //     multimodal limits ("limit_mm_per_prompt": {"image":n,"video":n})
@@ -225,7 +241,13 @@ impl BackendAdapter for VllmAdapter {
         //  3. Functional probe — a real 1-px image (and a video part) through
         //     chat/completions; vLLM rejects unsupported modalities with a
         //     clear error, success proves the path works regardless of name.
-        let mut mm = self.server_info_mm().await;
+        let mut mm = server_info
+            .map(|v| {
+                let mut s = std::collections::HashSet::new();
+                collect_mm_types(&v, &mut s);
+                s
+            })
+            .unwrap_or_default();
         let lower = model.to_lowercase();
         if !mm.contains("image")
             && (lower.contains("vl")
