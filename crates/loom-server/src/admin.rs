@@ -1096,7 +1096,7 @@ async fn list_deployments(State(s): State<AdminState>) -> Json<Value> {
             "capabilities": caps, "referenced_by": referenced_by,
             "kv_budget_tokens": kvb, "reported_kv_budget_tokens": rkvb,
             "kv_budget_effective": kvb.or(rkvb), "admission_mode": amode,
-            "runtime": rt.map(|r| json!({"state":r.state,"tier2_free":r.tier2_free,"tier2_total":r.tier2_total,"pressure_gated":r.pressure_gated,"kv_used":r.kv_used}))}));
+            "runtime": rt.map(|r| json!({"state":r.state,"health":r.health,"tier2_free":r.tier2_free,"tier2_total":r.tier2_total,"pressure_gated":r.pressure_gated,"kv_used":r.kv_used}))}));
     }
     Json(json!({"deployments": out}))
 }

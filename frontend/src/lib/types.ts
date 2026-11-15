@@ -65,7 +65,7 @@ export interface DeploymentRow {
   reported_kv_budget_tokens?: number | null;
   kv_budget_effective?: number | null;
   admission_mode?: "auto" | "slots" | "tokens";
-  runtime?: { state: string; tier2_free: number; tier2_total: number; pressure_gated?: boolean; kv_used?: number } | null;
+  runtime?: { state: string; health?: string; tier2_free: number; tier2_total: number; pressure_gated?: boolean; kv_used?: number } | null;
 }
 
 export interface VirtualModel {
@@ -202,6 +202,9 @@ export interface CapacityInfo {
   sharing_mode: string;
   accepting: boolean;
   pressure_gated?: boolean;
+  max_concurrent?: number;
+  kv_budget_tokens?: number;
+  kv_used_tokens?: number;
 }
 
 export interface LocalDeployment {

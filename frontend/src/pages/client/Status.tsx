@@ -4,6 +4,7 @@ import { api, copyText, LOCAL_KEY_STORAGE, localKey } from "../../lib/api";
 import { WindowPicker } from "../Overview";
 import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { Badge, Card, ConfirmModal, Field, Modal, Stat } from "../../components/ui";
+import { CapacityTile, useCapacitySeries } from "../../components/CapacityTile";
 import { TokenHeatmap } from "../../components/Heatmap";
 import { Check, Copy, Eye, EyeOff, Megaphone, RefreshCw, X } from "lucide-react";
 import type { ClientNote, ClientStatus } from "../../lib/types";
@@ -248,6 +249,20 @@ export default function ClientStatusPage() {
   const totalFree = (d?.capacities ?? []).reduce((a, c) => a + c.tier2_free, 0);
   const totalCap = (d?.capacities ?? []).reduce((a, c) => a + c.tier2_total, 0);
 
+  // Local KV picture: budget counts only deployments currently accepting
+  // work; kv_used is real usage on every reported deployment. Slots count
+  // local + tier-2 inflight against the sum of concurrency pools.
+  const capSample = (() => {
+    const caps = d?.capacities ?? [];
+    return {
+      used: caps.reduce((a, c) => a + (c.kv_used_tokens ?? 0), 0),
+      budget: caps.filter((c) => c.accepting).reduce((a, c) => a + (c.kv_budget_tokens ?? 0), 0),
+      slotsA: caps.reduce((a, c) => a + c.inflight_tier2 + c.inflight_local, 0),
+      slotsT: caps.reduce((a, c) => a + (c.max_concurrent ?? c.tier2_total), 0),
+    };
+  })();
+  const capSeries = useCapacitySeries(d ? capSample : null, d);
+
   return (
     <div className="space-y-6">
       <h1 className="text-lg font-semibold">Status</h1>
@@ -296,8 +311,9 @@ export default function ClientStatusPage() {
         </Card>
       )}
       <NotesCard />
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <ApiKeyCard />
+        <CapacityTile title="Local capacity" series={capSeries} note="budget over accepting deployments" />
         <Card className="space-y-1.5">
           <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">Local API <span className="normal-case text-muted/70">(port 8391)</span></div>
           {LOCAL_ENDPOINTS.map(e => (

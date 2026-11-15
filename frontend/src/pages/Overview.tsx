@@ -5,7 +5,8 @@ import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
 import { Badge, LiveBadge, PageHeader, Stat } from "../components/ui";
 import { TokenHeatmap, expandHeatmap, type HeatmapData } from "../components/Heatmap";
-import type { ClientRow, Overview, VirtualModel } from "../lib/types";
+import { CapacityTile, useCapacitySeries } from "../components/CapacityTile";
+import type { ClientRow, DeploymentRow, Overview, VirtualModel } from "../lib/types";
 import { fmtPct, fmtTs, fmtTime, fmtDay, fmtDayT, fmtNum, fmtMs, PRIORITY_LABELS, prioTone } from "../lib/format";
 
 const API_ENDPOINTS = [
@@ -82,7 +83,7 @@ export default function OverviewPage() {
   });
   // Keys must match the owning pages ("deployments"/"vms") — a divergent
   // key forks the cache and leaves this view permanently stale.
-  const depCap = useQuery({ queryKey: ["deployments"], queryFn: () => api.get<{ deployments: any[] }>("/api/deployments"), refetchInterval: 5000 });
+  const depCap = useQuery({ queryKey: ["deployments"], queryFn: () => api.get<{ deployments: DeploymentRow[] }>("/api/deployments"), refetchInterval: 5000 });
   const vms = useQuery({ queryKey: ["vms"], queryFn: () => api.get<{ models: VirtualModel[] }>("/api/models"), refetchInterval: 15000 });
 
   // Tick formatter per window: HH:mm for a day, "MM-DD HH:mm" for week/month,
@@ -105,6 +106,27 @@ export default function OverviewPage() {
   });
   const tpsModel = (brk.data?.models ?? []).map(tpsOf);
   const tpsClient = (brk.data?.clients ?? []).map(tpsOf);
+  // Fleet capacity aggregate: token-gated deployments report kv_used against
+  // their effective budget; "available" mirrors the scheduler's own filter.
+  const capSample = (() => {
+    // "available" + not health-down mirrors the scheduler's own filter —
+    // a crash-looping backend must not inflate the live budget.
+    const live = (depCap.data?.deployments ?? []).filter(
+      (d) => d.enabled && d.runtime?.state === "available" && d.runtime?.health !== "down"
+    );
+    const kvDeps = live.filter(
+      (d) => (d.kv_budget_effective ?? 0) > 0 && d.admission_mode !== "slots"
+    );
+    const slotsT = live.reduce((a, d) => a + (d.runtime?.tier2_total ?? 0), 0);
+    return {
+      used: kvDeps.reduce((a, d) => a + (d.runtime?.kv_used ?? 0), 0),
+      budget: kvDeps.reduce((a, d) => a + (d.kv_budget_effective ?? 0), 0),
+      slotsA: Math.max(0, slotsT - live.reduce((a, d) => a + (d.runtime?.tier2_free ?? 0), 0)),
+      slotsT,
+    };
+  })();
+  const capSeries = useCapacitySeries(depCap.data ? capSample : null, depCap.data);
+
   const perClient = (() => {
     const m = new Map<string, { name: string; cap: number }>();
     for (const d of depCap.data?.deployments ?? []) {
@@ -166,7 +188,7 @@ export default function OverviewPage() {
         <Stat label="In flight" value={<span className="flex items-center gap-2"><Activity size={18} className="text-accent" />{d?.inflight ?? 0}</span>} />
         <Stat label="Requests (24h)" value={<span className="flex items-center gap-2"><Zap size={18} className="text-ok" />{fmtNum(d?.requests_24h ?? 0)}</span>} />
       </div>
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-4 md:grid-cols-3">
         <div className="card p-4">
           <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted">API endpoints</div>
           <div className="space-y-1.5">
@@ -192,6 +214,7 @@ export default function OverviewPage() {
             ))}
           </div>
         </div>
+        <CapacityTile title="Fleet capacity" series={capSeries} note="token-gated deployments only" />
       </div>
       {fleet.length > 0 && (
         <div className="card p-4">
