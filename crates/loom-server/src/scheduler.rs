@@ -268,6 +268,11 @@ impl Scheduler {
                 self.inner.cfg.kv_output_reserve_tokens,
                 self.inner.cfg.kv_margin_pct,
             ),
+            // Embeddings grow no output KV but prefill the whole input — a
+            // flat value under-reserves large inputs by orders of magnitude.
+            ApiType::Embeddings => {
+                loom_core::tokens::embedding_footprint(body, self.inner.cfg.kv_margin_pct)
+            }
             _ => loom_core::tokens::flat_footprint(),
         }
     }

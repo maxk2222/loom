@@ -65,6 +65,11 @@ pub fn estimate_request_tokens(body: &serde_json::Value) -> u32 {
                         t += estimate_content_part(p);
                     }
                 }
+                // Non-standard content (object/other JSON) still reaches the
+                // model — count its serialized form rather than zero.
+                Some(other @ serde_json::Value::Object(_)) => {
+                    t += estimate_tokens(&other.to_string());
+                }
                 _ => {}
             }
             // Reasoning models echo their chain-of-thought into the context
@@ -150,10 +155,18 @@ pub fn request_footprint(body: &serde_json::Value, output_reserve: u64, margin_p
     base + (base * margin_pct / 100)
 }
 
-/// Flat footprint for non-text apis (embeddings, images, audio, video):
-/// no KV growth, but the lease still occupies scheduler bookkeeping.
+/// Flat footprint for media apis (images, audio, video): generation output
+/// isn't KV text; the prompt part is still estimated by the caller.
 pub fn flat_footprint() -> u64 {
     512
+}
+
+/// KV footprint for embeddings: no generation, but the whole `input` is
+/// prefilled — a flat value under-reserves large inputs by orders of
+/// magnitude. Real prompt estimate + margin, floored at `flat_footprint`.
+pub fn embedding_footprint(body: &serde_json::Value, margin_pct: u64) -> u64 {
+    let p = estimate_request_tokens(body) as u64;
+    (p + p * margin_pct / 100).max(flat_footprint())
 }
 
 /// Estimate tokens for one part of a multimodal `content` array.
@@ -256,6 +269,24 @@ mod tests {
         let t = estimate_request_tokens(&body);
         // tool schema + call + result + messages → well above bare-text count.
         assert!(t >= 60, "t={t}");
+    }
+
+    #[test]
+    fn embedding_footprint_scales_with_input() {
+        let small = serde_json::json!({"input": "hi"});
+        assert_eq!(embedding_footprint(&small, 20), flat_footprint());
+        let big = serde_json::json!({"input": "x".repeat(100_000)});
+        // ~25k est tokens × 1.2 margin — far above the flat floor.
+        assert!(embedding_footprint(&big, 20) > 20_000);
+    }
+
+    #[test]
+    fn object_content_is_counted() {
+        let body = serde_json::json!({
+            "messages": [{"role": "user",
+                "content": {"text": "a fairly long piece of text content here"}}]
+        });
+        assert!(estimate_request_tokens(&body) > 10);
     }
 
     #[test]

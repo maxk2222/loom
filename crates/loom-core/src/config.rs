@@ -647,7 +647,8 @@ pub struct SchedulerConfig {
     #[serde(default = "default_request_deadline", alias = "request_deadline_secs")]
     pub stream_idle_timeout_secs: u64,
     /// Output tokens reserved per request for KV-budget admission when the
-    /// caller does not specify max_tokens (also caps explicit values).
+    /// caller does not specify max_tokens. An explicit max_tokens is used
+    /// verbatim — it is the declared worst case, never capped.
     #[serde(default = "default_kv_output_reserve")]
     pub kv_output_reserve_tokens: u64,
     /// Safety margin (%) added to every request footprint to absorb
@@ -681,7 +682,7 @@ fn default_kv_output_reserve() -> u64 {
     8192
 }
 fn default_kv_margin_pct() -> u64 {
-    15
+    20
 }
 
 impl Default for SchedulerConfig {
