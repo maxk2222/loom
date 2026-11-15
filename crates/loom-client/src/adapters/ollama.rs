@@ -169,6 +169,18 @@ impl BackendAdapter for OllamaAdapter {
             if declared.iter().any(|c| c == "embedding") {
                 caps.embeddings = true;
             }
+            // Declared capabilities are authoritative for generation too:
+            // an embedding-only model advertises "embedding" but no
+            // "completion" — without this it would claim chat and get
+            // routed requests it cannot serve (observed: nomic-embed
+            // failing chat calls upstream). Absent array = older Ollama,
+            // keep the optimistic defaults.
+            if !declared.is_empty() {
+                let gen = declared.iter().any(|c| c == "completion");
+                caps.chat = gen;
+                caps.completions = gen;
+                caps.tools = declared.iter().any(|c| c == "tools");
+            }
             // Older multimodal models expose a `projector_info` block.
             if info.get("projector_info").is_some() {
                 caps.vision = true;
