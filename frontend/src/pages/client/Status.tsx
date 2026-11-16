@@ -465,13 +465,17 @@ function ClientCharts({ win, onWindowChange }: { win: string; onWindowChange: (v
     dec: r.duration_ms > (r.ttft_ms ?? 0) && (r.ttft_ms ?? 0) > 0 ? +((r.completion_tokens ?? 0) / ((r.duration_ms - r.ttft_ms) / 1000)).toFixed(1) : 0,
     cls: r.class === "local" ? "t1" : "t2",
   }));
-  if (rows.length === 0) return null;
+  // The picker must stay visible even with an empty history — it also
+  // drives the capacity chart above; only the history charts hide.
   return (
     <div className="space-y-4">
     <div className="flex items-center justify-between">
       <div className="text-xs font-medium uppercase tracking-wide text-muted">Request analytics</div>
       <WindowPicker value={win} onChange={onWindowChange} options={CLIENT_WINDOWS} />
     </div>
+    {rows.length === 0 && (
+      <div className="card p-4 text-center text-[11px] text-muted">no requests in this window yet</div>
+    )}
     {reqSeries.length > 0 && (
       <div className="card p-4">
         <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">requests over time</div>
