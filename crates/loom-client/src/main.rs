@@ -158,7 +158,9 @@ async fn async_main() -> anyhow::Result<()> {
         let cp = cap_hist_path.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                // ~2.4 MB when the ring is full — a 60 s cadence would write
+                // several GB per day; a restart loses ≤5 min of chart data.
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 local_api::save_cap_history(&cp, &ch);
             }
         });

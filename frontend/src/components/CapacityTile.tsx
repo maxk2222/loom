@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Area, AreaChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "../lib/api";
 import { WindowPicker } from "./ui";
-import { fmtNum, fmtTimeS } from "../lib/format";
+import { fmtNum, fmtTimeS, fmtDayT, fmtDay } from "../lib/format";
 
 export interface CapSample {
   /** leased KV tokens across budget-gated deployments */
@@ -137,6 +137,10 @@ export function CapacityChart({ title, url, windows, note }: {
     queryFn: () => api.get<{ buckets: CapBucket[] }>(`${url}?window=${win}`),
     refetchInterval: 15000,
   });
+  // Same window→formatter convention as the monitoring charts: sub-day
+  // windows get time-of-day ticks, day-plus windows get day+time.
+  const tick = win === "1h" || win === "6h" || win === "24h" ? fmtTimeS
+    : win === "all" || win === "1y" || win === "365d" ? fmtDay : fmtDayT;
   const buckets = q.data?.buckets ?? [];
   const data = buckets.map((b) => ({
     t: b.t * 1000,
@@ -177,7 +181,7 @@ export function CapacityChart({ title, url, windows, note }: {
               tick={{ fontSize: 10, fill: "#5b6b8c" }}
               tickLine={false}
               axisLine={false}
-              tickFormatter={(v) => fmtTimeS(Number(v))}
+              tickFormatter={(v) => tick(Number(v))}
               minTickGap={40}
             />
             <YAxis
@@ -190,7 +194,7 @@ export function CapacityChart({ title, url, windows, note }: {
             <Tooltip
               cursor={{ stroke: "#4a86c8", strokeOpacity: 0.35 }}
               contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }}
-              labelFormatter={(v) => fmtTimeS(Number(v))}
+              labelFormatter={(v) => fmtDayT(Number(v))}
               formatter={(v, name) => [`${Number(v).toFixed(1)}%`, name]}
             />
             <Legend wrapperStyle={{ fontSize: 11 }} />
