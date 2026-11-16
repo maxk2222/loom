@@ -91,6 +91,13 @@ services:
     ports:
       - "${LOOM_GRPC_ADDR:-127.0.0.1}:${LOOM_GRPC_PORT:-50051}:${LOOM_GRPC_PORT:-50051}"
       - "${LOOM_HTTP_ADDR:-127.0.0.1}:${LOOM_HTTP_PORT:-8080}:${LOOM_HTTP_PORT:-8080}"
+    # json-file grows unboundedly otherwise; at loom_server=debug the bridge
+    # can emit tens of lines per second under streaming load.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
 
   # Optional Cloudflare Tunnel ingress (instead of caddy for external exposure).
   # Set CF_TUNNEL_TOKEN + LOOM_TRUST_PROXY=1 in .env, then:

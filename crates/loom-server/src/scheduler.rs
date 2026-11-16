@@ -1272,7 +1272,7 @@ impl Scheduler {
                             }
                             v = inbound.next() => v,
                         };
-                        tracing::debug!(req = %rid_for_release, frame = ?next.as_ref().map(|r| r.as_ref().map(|f| std::mem::discriminant(&f.frame))), "bridge inbound");
+                        tracing::trace!(req = %rid_for_release, frame = ?next.as_ref().map(|r| r.as_ref().map(|f| std::mem::discriminant(&f.frame))), "bridge inbound");
                         match next {
                             Some(Ok(loom_protocol::pb::DataFrame {
                                 frame: Some(loom_protocol::pb::data_frame::Frame::ResponseChunk(b)),
@@ -1293,7 +1293,7 @@ impl Scheduler {
                                     .await
                                     .unwrap_or(());
                                 }
-                                tracing::debug!(req = %rid_for_release, n = b.len(), "response_chunk");
+                                tracing::trace!(req = %rid_for_release, n = b.len(), "response_chunk");
                                 if resp_tx.send(Ok(b.into())).await.is_err() {
                                     // Caller gone: tell the client to abort backend
                                     // generation — merely stop reading would leave
