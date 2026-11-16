@@ -231,6 +231,9 @@ function ApiKeyCard() {
 }
 
 export default function ClientStatusPage() {
+  // Shared window selector — one picker drives the capacity chart and the
+  // request-history charts, matching the server overview behaviour.
+  const [win, setWin] = useState("24h");
   const q = useQuery({
     queryKey: ["client-status"],
     queryFn: () => api.get<ClientStatus>("/local/api/status"),
@@ -335,8 +338,8 @@ export default function ClientStatusPage() {
           ))}
         </Card>
       </div>
-      <CapacityChart title="Capacity over time" url="/local/api/capacity-series" windows={CAP_HISTORY_WINDOWS} note="share of kv budget and request slots across local deployments — sampled every 20 s, ~7 d retained" />
-      <ClientCharts />
+      <CapacityChart title="Capacity over time" url="/local/api/capacity-series" win={win} note="share of kv budget and request slots across local deployments — sampled every 20 s, ~7 d retained" />
+      <ClientCharts win={win} onWindowChange={setWin} />
       <Card className="overflow-x-auto p-0">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Per-deployment capacity</div>
         <table className="w-full">
@@ -368,23 +371,17 @@ const CLIENT_WINDOWS = [
   { v: "24h", l: "24h" },
   { v: "all", l: "All" },
 ];
-// Capacity history windows — bounded by the client sampler's ~7 d ring.
-const CAP_HISTORY_WINDOWS = [
-  { v: "1h", l: "1h" },
-  { v: "6h", l: "6h" },
-  { v: "24h", l: "24h" },
-  { v: "7d", l: "7d" },
-];
+// The capacity chart shares the CLIENT_WINDOWS picker — its series
+// endpoint accepts the same keys ("all" = the whole ~7 d ring).
 const WIN_MS: Record<string, number> = { "1h": 3.6e6, "6h": 21.6e6, "24h": 86.4e6, all: Infinity };
 // Same log-spaced buckets as the server heatmap — a 200-token ping and a
 // 200k agent context share one chart.
 const TOK_BOUNDS = [256, 1024, 4096, 16384, 65536, 262144];
 const TOK_LABELS = ["<256", "256–1k", "1k–4k", "4k–16k", "16k–64k", "64k–256k", "≥256k"];
 
-function ClientCharts() {
+function ClientCharts({ win, onWindowChange }: { win: string; onWindowChange: (v: string) => void }) {
   const q = useQuery({ queryKey: ["client-hist"], queryFn: () => api.get<{ history: any[] }>("/local/api/history"), refetchInterval: 8000 });
   const bk = useQuery({ queryKey: ["client-backends"], queryFn: () => api.get<{ backends: LocalBackend[] }>("/local/api/backends"), refetchInterval: 30000 });
-  const [win, setWin] = useState("24h");
   // History is a ~300-entry ring — filter client-side by the picked window.
   const rows = (q.data?.history ?? []).filter(r => Date.now() - r.ended_unix_ms <= WIN_MS[win]);
   const modelName = (() => {
@@ -473,7 +470,7 @@ function ClientCharts() {
     <div className="space-y-4">
     <div className="flex items-center justify-between">
       <div className="text-xs font-medium uppercase tracking-wide text-muted">Request analytics</div>
-      <WindowPicker value={win} onChange={setWin} options={CLIENT_WINDOWS} />
+      <WindowPicker value={win} onChange={onWindowChange} options={CLIENT_WINDOWS} />
     </div>
     {reqSeries.length > 0 && (
       <div className="card p-4">

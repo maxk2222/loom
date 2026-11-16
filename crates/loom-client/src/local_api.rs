@@ -1347,6 +1347,9 @@ async fn admin_capacity_series(
         Some("1h") => (3_600_000, 60),
         Some("6h") => (21_600_000, 432),
         Some("7d") => (604_800_000, 10_800),
+        // "all" = the whole ring (~8 d) — same semantics as the history
+        // picker's Infinity window, bounded by what we actually keep.
+        Some("all") => (CAP_HIST_KEEP_MS, 14_400),
         _ => (86_400_000, 1_800),
     };
     let cutoff = now_ms() - span_ms;

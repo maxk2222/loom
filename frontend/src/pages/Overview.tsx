@@ -24,15 +24,9 @@ export const WINDOWS = [
   { v: "all", l: "All" },
 ];
 
-// Capacity history windows — bounded by the sampler's retention
-// (history_retention_days, default 30 d).
-const CAP_WINDOWS = [
-  { v: "1h", l: "1h" },
-  { v: "6h", l: "6h" },
-  { v: "24h", l: "24h" },
-  { v: "7d", l: "7d" },
-  { v: "30d", l: "30d" },
-];
+// The capacity chart shares the page window picker — the server series
+// endpoint accepts the same window keys (retention caps effective depth
+// at history_retention_days, default 30 d).
 
 interface SeriesBucket {
   t: string;
@@ -212,7 +206,7 @@ export default function OverviewPage() {
         </div>
         <CapacityTile title="Fleet capacity" series={capSeries} note="token-gated deployments only" />
       </div>
-      <CapacityChart title="Capacity over time" url="/api/stats/capacity-series" windows={CAP_WINDOWS} note="share of summed kv budget and request slots — sampled every 20 s, kept per history retention" />
+      <CapacityChart title="Capacity over time" url="/api/stats/capacity-series" win={win} note="share of summed kv budget and request slots — sampled every 20 s, kept per history retention" />
       {fleet.length > 0 && (
         <div className="card p-4">
           <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted">Fleet load — live per client</div>

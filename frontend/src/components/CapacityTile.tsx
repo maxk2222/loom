@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Area, AreaChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "../lib/api";
-import { WindowPicker } from "./ui";
 import { fmtNum, fmtTimeS, fmtDayT, fmtDay } from "../lib/format";
 
 export interface CapSample {
@@ -124,14 +123,15 @@ interface CapBucket {
  *  two percentage lines over a real time axis, fed by the persisted
  *  sampler series (server /api/stats/capacity-series or client
  *  /local/api/capacity-series). Null percentages leave honest gaps. */
-export function CapacityChart({ title, url, windows, note }: {
+export function CapacityChart({ title, url, win, note }: {
   title: string;
   /** series endpoint accepting ?window= */
   url: string;
-  windows: { v: string; l: string }[];
+  /** shared window selector — controlled by the page-level picker like
+   *  the other history charts */
+  win: string;
   note?: string;
 }) {
-  const [win, setWin] = useState(windows[Math.min(2, windows.length - 1)].v);
   const q = useQuery({
     queryKey: ["capacity-series", url, win],
     queryFn: () => api.get<{ buckets: CapBucket[] }>(`${url}?window=${win}`),
@@ -168,9 +168,8 @@ export function CapacityChart({ title, url, windows, note }: {
             )}
           </div>
         </div>
-        <WindowPicker value={win} onChange={setWin} options={windows} />
       </div>
-      {data.length > 1 ? (
+      {data.length > 0 ? (
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={data} margin={{ top: 4, right: 8, bottom: 0, left: -18 }}>
             <CartesianGrid stroke="#1c2740" vertical={false} />
@@ -198,12 +197,14 @@ export function CapacityChart({ title, url, windows, note }: {
               formatter={(v, name) => [`${Number(v).toFixed(1)}%`, name]}
             />
             <Legend wrapperStyle={{ fontSize: 11 }} />
-            <Line type="monotone" dataKey="kv" name="kv budget used" stroke="#34d399" strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />
-            <Line type="monotone" dataKey="slots" name="request slots used" stroke="#38bdf8" strokeWidth={2} dot={false} connectNulls={false} isAnimationActive={false} />
+            <Line type="monotone" dataKey="kv" name="kv budget used" stroke="#34d399" strokeWidth={2} dot={data.length < 6 ? { r: 3, fill: "#34d399", strokeWidth: 0 } : false} connectNulls={false} isAnimationActive={false} />
+            <Line type="monotone" dataKey="slots" name="request slots used" stroke="#38bdf8" strokeWidth={2} dot={data.length < 6 ? { r: 3, fill: "#38bdf8", strokeWidth: 0 } : false} connectNulls={false} isAnimationActive={false} />
           </LineChart>
         </ResponsiveContainer>
       ) : (
-        <div className="flex h-[200px] items-center justify-center text-[11px] text-muted">collecting samples…</div>
+        <div className="flex h-[200px] items-center justify-center text-[11px] text-muted">
+          {q.isError ? "series unavailable" : q.isLoading ? "loading…" : "collecting samples…"}
+        </div>
       )}
       <div className="mt-1 flex items-baseline justify-between text-[10px] text-muted/70">
         <span>{note ?? "rolling window — collected while this page is open"}</span>
