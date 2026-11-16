@@ -1693,6 +1693,7 @@ async fn history(State(s): State<AdminState>, Query(q): Query<HistQ>) -> Json<Va
         Option<i64>,
         Option<i64>,
         Option<i64>,
+        Option<i64>,
         i64,
         i64,
         Option<String>,
@@ -1702,10 +1703,10 @@ async fn history(State(s): State<AdminState>, Query(q): Query<HistQ>) -> Json<Va
     );
     let limit = q.limit.unwrap_or(100).min(500);
     let rows: Vec<HistRow> = sqlx::query_as(
-        "SELECT id, status, api_type, queue_wait_ms, ttft_ms, duration_ms, prompt_tokens, completion_tokens, error_code, created_at, client_id::text AS client_id, deployment_id::text AS deployment_id FROM requests_history ORDER BY created_at DESC LIMIT $1")
+        "SELECT id, status, api_type, queue_wait_ms, ttft_ms, ttfrt_ms, duration_ms, prompt_tokens, completion_tokens, error_code, created_at, client_id::text AS client_id, deployment_id::text AS deployment_id FROM requests_history ORDER BY created_at DESC LIMIT $1")
         .bind(limit).fetch_all(&s.db).await.unwrap_or_default();
     Json(
-        json!({"requests": rows.iter().map(|(id,st,at,qw,t,d,pt,ct,ec,ca,cid,did)| json!({"id":id,"status":st,"api_type":at,"queue_wait_ms":qw,"ttft_ms":t,"duration_ms":d,"prompt_tokens":pt,"completion_tokens":ct,"error_code":ec,"created_at":ca,"client_id":cid,"deployment_id":did})).collect::<Vec<_>>()}),
+        json!({"requests": rows.iter().map(|(id,st,at,qw,t,tr,d,pt,ct,ec,ca,cid,did)| json!({"id":id,"status":st,"api_type":at,"queue_wait_ms":qw,"ttft_ms":t,"ttfrt_ms":tr,"duration_ms":d,"prompt_tokens":pt,"completion_tokens":ct,"error_code":ec,"created_at":ca,"client_id":cid,"deployment_id":did})).collect::<Vec<_>>()}),
     )
 }
 
@@ -1750,20 +1751,34 @@ async fn stats_series(State(s): State<AdminState>, Query(q): Query<StatsQ>) -> J
         Option<f64>,
         Option<f64>,
         Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
         i64,
         i64,
     );
+    // NULLIF(x,0) drops unmeasured values so percentile_cont only sees real
+    // observations — ttfrt stays 0 for non-reasoning traffic and old rows.
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT to_timestamp(floor(extract(epoch from created_at)/$2)*$2) AS bucket,
                 count(*)::bigint,
                 sum(prompt_tokens)::bigint,
                 sum(completion_tokens)::bigint,
                 avg(NULLIF(ttft_ms,0))::float8,
+                percentile_cont(0.5)  within group (order by NULLIF(ttft_ms,0))::float8,
+                percentile_cont(0.95) within group (order by NULLIF(ttft_ms,0))::float8,
+                percentile_cont(0.99) within group (order by NULLIF(ttft_ms,0))::float8,
+                percentile_cont(0.5)  within group (order by NULLIF(ttfrt_ms,0))::float8,
+                percentile_cont(0.95) within group (order by NULLIF(ttfrt_ms,0))::float8,
+                percentile_cont(0.99) within group (order by NULLIF(ttfrt_ms,0))::float8,
                 percentile_cont(0.5)  within group (order by NULLIF(duration_ms,0))::float8,
                 percentile_cont(0.95) within group (order by NULLIF(duration_ms,0))::float8,
                 percentile_cont(0.99) within group (order by NULLIF(duration_ms,0))::float8,
                 sum(duration_ms)::bigint,
-                sum(GREATEST(duration_ms - ttft_ms, 0))::bigint
+                sum(GREATEST(duration_ms - CASE WHEN ttfrt_ms > 0 THEN ttfrt_ms ELSE ttft_ms END, 0))::bigint
            FROM requests_history
           WHERE created_at > now() - $1::interval
           GROUP BY bucket ORDER BY bucket",
@@ -1776,10 +1791,12 @@ async fn stats_series(State(s): State<AdminState>, Query(q): Query<StatsQ>) -> J
     Json(json!({
         "window": q.window.unwrap_or_else(|| "24h".into()),
         "bucket_secs": bucket,
-        "buckets": rows.iter().map(|(t,r,pt,ct,ttft,p50,p95,p99,dur,dec)| json!({
+        "buckets": rows.iter().map(|(t,r,pt,ct,ttft,tp50,tp95,tp99,tr50,tr95,tr99,p50,p95,p99,dur,dec)| json!({
             "t": t, "requests": r, "prompt_tokens": pt, "completion_tokens": ct,
-            "ttft_ms": ttft.unwrap_or(0.0), "p50_ms": p50.unwrap_or(0.0),
-            "p95_ms": p95.unwrap_or(0.0), "p99_ms": p99.unwrap_or(0.0),
+            "ttft_ms": ttft.unwrap_or(0.0),
+            "ttft_p50": tp50.unwrap_or(0.0), "ttft_p95": tp95.unwrap_or(0.0), "ttft_p99": tp99.unwrap_or(0.0),
+            "ttfrt_p50": tr50.unwrap_or(0.0), "ttfrt_p95": tr95.unwrap_or(0.0), "ttfrt_p99": tr99.unwrap_or(0.0),
+            "p50_ms": p50.unwrap_or(0.0), "p95_ms": p95.unwrap_or(0.0), "p99_ms": p99.unwrap_or(0.0),
             "duration_ms": dur, "decode_ms": dec,
         })).collect::<Vec<_>>()
     }))
@@ -1880,20 +1897,20 @@ async fn stats_breakdown(State(s): State<AdminState>, Query(q): Query<StatsQ>) -
         match group {
             "model" => "SELECT coalesce(vm.api_name, h.virtual_model_id::text, 'unknown'), NULL::uuid, '',
                         count(*)::bigint, sum(h.prompt_tokens)::bigint, sum(h.completion_tokens)::bigint,
-                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - h.ttft_ms,0))::bigint
+                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - CASE WHEN h.ttfrt_ms > 0 THEN h.ttfrt_ms ELSE h.ttft_ms END,0))::bigint
                    FROM requests_history h LEFT JOIN virtual_models vm ON vm.id = h.virtual_model_id
                   WHERE h.created_at > now() - $1::interval
                   GROUP BY vm.api_name, h.virtual_model_id ORDER BY sum(h.prompt_tokens)+sum(h.completion_tokens) DESC",
             "client" => "SELECT coalesce(c.name, h.client_id::text, 'unknown'), NULL::uuid, '',
                         count(*)::bigint, sum(h.prompt_tokens)::bigint, sum(h.completion_tokens)::bigint,
-                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - h.ttft_ms,0))::bigint
+                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - CASE WHEN h.ttfrt_ms > 0 THEN h.ttfrt_ms ELSE h.ttft_ms END,0))::bigint
                    FROM requests_history h LEFT JOIN clients c ON c.id = h.client_id
                   WHERE h.created_at > now() - $1::interval
                   GROUP BY c.name, h.client_id ORDER BY sum(h.prompt_tokens)+sum(h.completion_tokens) DESC",
             "key" => "SELECT coalesce(nullif(k.name,''), k.prefix, h.api_key_id::text, 'unknown'), NULL::uuid,
                         coalesce(p.name,''),
                         count(*)::bigint, sum(h.prompt_tokens)::bigint, sum(h.completion_tokens)::bigint,
-                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - h.ttft_ms,0))::bigint
+                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - CASE WHEN h.ttfrt_ms > 0 THEN h.ttfrt_ms ELSE h.ttft_ms END,0))::bigint
                    FROM requests_history h
                    LEFT JOIN api_keys k ON k.id = h.api_key_id
                    LEFT JOIN projects p ON p.id = h.project_id
@@ -1901,7 +1918,7 @@ async fn stats_breakdown(State(s): State<AdminState>, Query(q): Query<StatsQ>) -
                   GROUP BY k.name, k.prefix, p.name, h.api_key_id ORDER BY sum(h.prompt_tokens)+sum(h.completion_tokens) DESC",
             _ => "SELECT coalesce(p.name, h.project_id::text, 'unknown'), NULL::uuid, '',
                         count(*)::bigint, sum(h.prompt_tokens)::bigint, sum(h.completion_tokens)::bigint,
-                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - h.ttft_ms,0))::bigint
+                        sum(h.duration_ms)::bigint, sum(GREATEST(h.duration_ms - CASE WHEN h.ttfrt_ms > 0 THEN h.ttfrt_ms ELSE h.ttft_ms END,0))::bigint
                    FROM requests_history h LEFT JOIN projects p ON p.id = h.project_id
                   WHERE h.created_at > now() - $1::interval
                   GROUP BY p.name, h.project_id ORDER BY sum(h.prompt_tokens)+sum(h.completion_tokens) DESC",

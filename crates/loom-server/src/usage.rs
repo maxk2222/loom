@@ -19,6 +19,7 @@ pub struct UsageRecord {
     pub status: String,
     pub queue_wait_ms: i64,
     pub ttft_ms: i64,
+    pub ttfrt_ms: i64,
     pub duration_ms: i64,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -76,10 +77,10 @@ async fn flush(db: &PgPool, buf: &mut Vec<UsageRecord>) {
         if let Err(e) = sqlx::query(
             "INSERT INTO requests_history
              (id, api_type, api_key_id, project_id, virtual_model_id, deployment_id, client_id,
-              status, queue_wait_ms, ttft_ms, duration_ms, prompt_tokens,
+              status, queue_wait_ms, ttft_ms, ttfrt_ms, duration_ms, prompt_tokens,
               completion_tokens, error_code, routing_trace)
              VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid,
-                     $8, $9, $10, $11, $12, $13, $14, $15)",
+                     $8, $9, $10, $11, $12, $13, $14, $15, $16)",
         )
         .bind(&r.request_id)
         .bind(&r.api_type)
@@ -91,6 +92,7 @@ async fn flush(db: &PgPool, buf: &mut Vec<UsageRecord>) {
         .bind(&r.status)
         .bind(r.queue_wait_ms)
         .bind(r.ttft_ms)
+        .bind(r.ttfrt_ms)
         .bind(r.duration_ms)
         .bind(r.prompt_tokens as i64)
         .bind(r.completion_tokens as i64)

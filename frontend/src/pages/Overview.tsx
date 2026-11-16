@@ -34,6 +34,12 @@ interface SeriesBucket {
   prompt_tokens: number;
   completion_tokens: number;
   ttft_ms: number;
+  ttft_p50: number;
+  ttft_p95: number;
+  ttft_p99: number;
+  ttfrt_p50: number;
+  ttfrt_p95: number;
+  ttfrt_p99: number;
   p50_ms: number;
   p95_ms: number;
   p99_ms: number;
@@ -82,7 +88,8 @@ export default function OverviewPage() {
   const heat = expandHeatmap(heatmap.data, tickFmt);
   const buckets = series.data?.buckets ?? [];
   const chart = buckets.map(b => ({ t: tickFmt(b.t), n: b.requests, tok: b.prompt_tokens + b.completion_tokens }));
-  const ttftChart = buckets.filter(b => b.ttft_ms > 0).map(b => ({ t: tickFmt(b.t), ttft: Math.round(b.ttft_ms) }));
+  const ttftChart = buckets.filter(b => b.ttft_p50 > 0).map(b => ({ t: tickFmt(b.t), p50: Math.round(b.ttft_p50), p95: Math.round(b.ttft_p95), p99: Math.round(b.ttft_p99) }));
+  const ttfrtChart = buckets.filter(b => b.ttfrt_p50 > 0).map(b => ({ t: tickFmt(b.t), p50: Math.round(b.ttfrt_p50), p95: Math.round(b.ttfrt_p95), p99: Math.round(b.ttfrt_p99) }));
   const latChart = buckets.filter(b => b.p50_ms > 0).map(b => ({ t: tickFmt(b.t), p50: Math.round(b.p50_ms), p95: Math.round(b.p95_ms), p99: Math.round(b.p99_ms) }));
   const tokSeries = buckets.map(b => ({
     t: tickFmt(b.t), pt: b.prompt_tokens, ct: b.completion_tokens,
@@ -269,16 +276,36 @@ export default function OverviewPage() {
         </div>
       )}
       <div className="grid gap-4 md:grid-cols-3">
-        {ttftChart.length > 1 && (
+        {ttftChart.length > 0 && (
           <div className="card p-4">
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">avg TTFT</div>
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">ttft percentiles <span className="normal-case text-muted/70">(first answer token)</span></div>
             <ResponsiveContainer width="100%" height={130}>
               <AreaChart data={ttftChart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
                 <CartesianGrid stroke="#1c2740" vertical={false} />
                 <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
                 <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={(v) => fmtMs(Number(v))} />
                 <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtMs(Number(v))} />
-                <Area type="monotone" dataKey="ttft" stroke="#5b7eae" fill="#5b7eae" fillOpacity={0.15} strokeWidth={2} isAnimationActive={false} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Area type="monotone" dataKey="p50" stroke="#34d399" fill="#34d399" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+                <Area type="monotone" dataKey="p95" stroke="#fbbf24" fill="#fbbf24" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+                <Area type="monotone" dataKey="p99" stroke="#fb7185" fill="#fb7185" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+        {ttfrtChart.length > 0 && (
+          <div className="card p-4">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">ttfrt percentiles <span className="normal-case text-muted/70">(first reasoning token)</span></div>
+            <ResponsiveContainer width="100%" height={130}>
+              <AreaChart data={ttfrtChart} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+                <CartesianGrid stroke="#1c2740" vertical={false} />
+                <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={(v) => fmtMs(Number(v))} />
+                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtMs(Number(v))} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Area type="monotone" dataKey="p50" stroke="#34d399" fill="#34d399" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+                <Area type="monotone" dataKey="p95" stroke="#fbbf24" fill="#fbbf24" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+                <Area type="monotone" dataKey="p99" stroke="#fb7185" fill="#fb7185" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
               </AreaChart>
             </ResponsiveContainer>
           </div>

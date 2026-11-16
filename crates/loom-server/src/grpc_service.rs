@@ -208,6 +208,7 @@ pub(crate) fn control_stream(
                                 prompt_tokens: e.prompt_tokens,
                                 completion_tokens: e.completion_tokens,
                                 ttft_ms: e.ttft_ms,
+                                ttfrt_ms: e.ttfrt_ms,
                                 duration_ms: e.duration_ms,
                             },
                         )

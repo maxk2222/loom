@@ -248,6 +248,7 @@ pub mod client_msgs {
         prompt_tokens: u32,
         completion_tokens: u32,
         ttft_ms: i64,
+        ttfrt_ms: i64,
         duration_ms: i64,
     ) -> ClientEnvelope {
         ClientEnvelope {
@@ -260,6 +261,7 @@ pub mod client_msgs {
                 completion_tokens,
                 ttft_ms,
                 duration_ms,
+                ttfrt_ms,
             })),
         }
     }

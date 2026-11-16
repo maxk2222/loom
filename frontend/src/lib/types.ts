@@ -126,6 +126,7 @@ export interface HistoryRow {
   api_type: string;
   queue_wait_ms: number;
   ttft_ms: number;
+  ttfrt_ms: number;
   duration_ms: number;
   prompt_tokens: number;
   completion_tokens: number;

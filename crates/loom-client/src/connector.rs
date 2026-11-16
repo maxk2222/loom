@@ -1457,6 +1457,7 @@ async fn run_request(
 
         let upstream_status = u32::from(resp.status);
         let mut ttft_ms: i64 = 0;
+        let mut ttfrt_ms: i64 = 0;
         let mut usage = loom_core::openai::Usage::default();
         let mut upstream_err: Option<String> = None;
         let mut finish_reason = String::new();
@@ -1478,13 +1479,19 @@ async fn run_request(
             };
             match next {
                 Some(Ok(bytes)) => {
-                    if ttft_ms == 0 {
+                    debug!(req = %request_id, n = bytes.len(), "upstream chunk → data stream");
+                    // Opportunistically parse usage/finish from the tail;
+                    // the first reasoning chunk marks ttfrt, the first
+                    // non-reasoning output chunk marks ttft.
+                    let f = tail.inspect(&bytes, &mut usage, &mut finish_reason);
+                    saw_output |= f.content || f.reasoning;
+                    if ttfrt_ms == 0 && f.reasoning {
+                        ttfrt_ms = started.elapsed().as_millis() as i64;
+                    }
+                    if ttft_ms == 0 && f.content {
                         ttft_ms = started.elapsed().as_millis() as i64;
                         telemetry::ttft(started.elapsed().as_secs_f64());
                     }
-                    debug!(req = %request_id, n = bytes.len(), "upstream chunk → data stream");
-                    // Opportunistically parse usage/finish from the tail.
-                    tail.inspect(&bytes, &mut usage, &mut finish_reason, &mut saw_output);
                     // Converge the server's token reservation toward the
                     // backend's real cumulative usage — long generations
                     // outgrow the submit-time estimate.
@@ -1561,11 +1568,11 @@ async fn run_request(
             &finish_reason,
             upstream_status,
         ));
-        Ok::<_, String>((status.to_string(), upstream_err, usage, ttft_ms))
+        Ok::<_, String>((status.to_string(), upstream_err, usage, ttft_ms, ttfrt_ms))
     }
     .await;
 
-    let (status, err, usage, ttft_ms) = match result {
+    let (status, err, usage, ttft_ms, ttfrt_ms) = match result {
         Ok(v) => v,
         Err(e) => {
             if e != "cancelled" {
@@ -1581,6 +1588,7 @@ async fn run_request(
                 .to_string(),
                 Some(e),
                 loom_core::openai::Usage::default(),
+                0,
                 0,
             )
         }
@@ -1610,6 +1618,7 @@ async fn run_request(
             usage.prompt_tokens,
             usage.completion_tokens,
             ttft_ms,
+            ttfrt_ms,
             started.elapsed().as_millis() as i64,
         )),
     )
@@ -1629,6 +1638,7 @@ async fn run_request(
             deployment_id: a.deployment_id.clone(),
             duration_ms: started.elapsed().as_millis() as i64,
             ttft_ms,
+            ttfrt_ms,
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             status: status.clone(),
@@ -1645,6 +1655,16 @@ async fn run_request(
 /// responses reach multiple MB; beyond the cap real bytes are clearly
 /// flowing, so the stream cannot be a zero-token zombie anyway.
 const JSON_BODY_CAP: usize = 8 * 1024 * 1024;
+
+/// What kinds of generated payload an inspected chunk carried. Reasoning
+/// deltas are tracked separately from answer output so ttft (first
+/// non-reasoning token) and ttfrt (first reasoning token) can be reported
+/// independently; either kind also satisfies the zombie-output check.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct TailFlags {
+    pub content: bool,
+    pub reasoning: bool,
+}
 
 /// Per-stream response-tail inspector. Non-SSE upstreams reply with a
 /// single JSON document that upstream chunking can split anywhere —
@@ -1667,15 +1687,14 @@ impl StreamTail {
         bytes: &bytes::Bytes,
         usage: &mut loom_core::openai::Usage,
         finish_reason: &mut String,
-        saw_output: &mut bool,
-    ) {
+    ) -> TailFlags {
         // Lock the framing on the first non-whitespace byte — an
         // all-whitespace prefix decides nothing and must not pin SSE.
         let json = match self.json {
             Some(j) => j,
             None => {
                 let Some(first) = bytes.iter().find(|b| !b.is_ascii_whitespace()) else {
-                    return;
+                    return TailFlags::default();
                 };
                 let j = *first == b'{';
                 self.json = Some(j);
@@ -1683,39 +1702,40 @@ impl StreamTail {
             }
         };
         if !json {
-            inspect_sse_tail(bytes, usage, finish_reason, saw_output);
-            return;
+            return inspect_sse_tail(bytes, usage, finish_reason);
         }
         // Per-chunk inspection keeps single-chunk documents, NDJSON-style
         // multi-doc streams and stray SSE frames working exactly as before.
-        inspect_sse_tail(bytes, usage, finish_reason, saw_output);
+        let mut flags = inspect_sse_tail(bytes, usage, finish_reason);
         if self.buf.len() + bytes.len() > JSON_BODY_CAP {
             // Megabytes of real payload flowed — not a zombie. Stop
             // buffering; usage keeps its estimate.
-            *saw_output = true;
-            return;
+            flags.content = true;
+            return flags;
         }
         self.buf.extend_from_slice(bytes);
         // Object documents end on `}` — skip the whole-buffer parse while
         // it is provably still incomplete (cheap O(n²) guard for backends
         // that chunk heavily).
         if self.buf.iter().rfind(|b| !b.is_ascii_whitespace()) == Some(&b'}') {
-            inspect_json_body(&self.buf, usage, finish_reason, saw_output);
+            let b = inspect_json_body(&self.buf, usage, finish_reason);
+            flags.content |= b.content;
+            flags.reasoning |= b.reasoning;
         }
+        flags
     }
 }
 
 /// Parse one complete non-SSE JSON body for usage + finish_reason +
-/// output presence. Incomplete documents parse-fail and leave all
+/// output kinds. Incomplete documents parse-fail and leave all
 /// out-params untouched so the caller can retry once more bytes arrive.
 fn inspect_json_body(
     body: &[u8],
     usage: &mut loom_core::openai::Usage,
     finish_reason: &mut String,
-    saw_output: &mut bool,
-) {
+) -> TailFlags {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return;
+        return TailFlags::default();
     };
     if let Some(u) = v.get("usage") {
         if let Ok(parsed) = serde_json::from_value::<loom_core::openai::Usage>(u.clone()) {
@@ -1730,28 +1750,27 @@ fn inspect_json_body(
     {
         *finish_reason = fr.to_string();
     }
-    if json_has_output(&v) {
-        *saw_output = true;
-    }
+    let (content, reasoning) = json_output_kinds(&v);
+    TailFlags { content, reasoning }
 }
 
 /// Parse trailing SSE data for usage + finish_reason (best effort).
-/// `saw_output` is set once any parsed payload carries generated content —
-/// used to detect zombie backends that answer 200 with zero tokens.
+/// The returned flags mark whether any parsed payload carried generated
+/// content or reasoning — used for ttft/ttfrt and to detect zombie
+/// backends that answer 200 with zero tokens.
 pub(crate) fn inspect_sse_tail(
     bytes: &bytes::Bytes,
     usage: &mut loom_core::openai::Usage,
     finish_reason: &mut String,
-    saw_output: &mut bool,
-) {
+) -> TailFlags {
+    let mut flags = TailFlags::default();
     let Ok(text) = std::str::from_utf8(bytes) else {
-        return;
+        return flags;
     };
     // Non-streaming responses arrive as one raw JSON object — parse it whole.
     let trimmed = text.trim();
     if trimmed.starts_with('{') && !trimmed.contains("\ndata:") {
-        inspect_json_body(trimmed.as_bytes(), usage, finish_reason, saw_output);
-        return;
+        return inspect_json_body(trimmed.as_bytes(), usage, finish_reason);
     }
     for line in text.split("\n\n") {
         let line = line.trim();
@@ -1778,34 +1797,46 @@ pub(crate) fn inspect_sse_tail(
         {
             *finish_reason = fr.to_string();
         }
-        if json_has_output(&v) {
-            *saw_output = true;
+        let (c, r) = json_output_kinds(&v);
+        flags.content |= c;
+        flags.reasoning |= r;
+    }
+    flags
+}
+
+/// Classify one parsed response/chunk payload: (content, reasoning).
+/// `content` = any generated non-reasoning payload — chat/completion
+/// text, tool calls, embeddings data or transcription text.
+/// `reasoning` = a non-empty `reasoning_content`/`reasoning` field on a
+/// choice delta or message (the adapter dual-emits both spellings).
+fn json_output_kinds(v: &serde_json::Value) -> (bool, bool) {
+    let ne = |x: &serde_json::Value| x.as_str().is_some_and(|s| !s.is_empty());
+    let mut reasoning = ne(&v["reasoning_content"]) || ne(&v["reasoning"]);
+    if ne(&v["text"]) || ne(&v["response"]) {
+        return (true, reasoning);
+    }
+    let mut content = v["data"].as_array().is_some_and(|a| !a.is_empty());
+    if let Some(choices) = v["choices"].as_array() {
+        for c in choices {
+            content |= ne(&c["text"]);
+            for h in [&c["message"], &c["delta"]] {
+                content |= ne(&h["content"])
+                    || h["tool_calls"].as_array().is_some_and(|a| !a.is_empty())
+                    || h["audio"].is_object();
+                reasoning |= ne(&h["reasoning_content"]) || ne(&h["reasoning"]);
+            }
         }
     }
+    (content, reasoning)
 }
 
 /// True when a response/chunk carries any generated payload — chat/completion
 /// text, tool calls, reasoning, embeddings data or transcription text.
+/// Kept for unit tests; production code consumes `json_output_kinds` flags.
+#[cfg(test)]
 pub(crate) fn json_has_output(v: &serde_json::Value) -> bool {
-    let ne = |x: &serde_json::Value| x.as_str().is_some_and(|s| !s.is_empty());
-    if ne(&v["text"]) || ne(&v["response"]) {
-        return true;
-    }
-    if v["data"].as_array().is_some_and(|a| !a.is_empty()) {
-        return true;
-    }
-    let Some(choices) = v["choices"].as_array() else {
-        return false;
-    };
-    choices.iter().any(|c| {
-        ne(&c["text"])
-            || [&c["message"], &c["delta"]].iter().any(|h| {
-                ne(&h["content"])
-                    || ne(&h["reasoning_content"])
-                    || h["tool_calls"].as_array().is_some_and(|a| !a.is_empty())
-                    || h["audio"].is_object()
-            })
-    })
+    let (c, r) = json_output_kinds(v);
+    c || r
 }
 
 /// A 200 text-family response that produced zero tokens and no content comes
@@ -2092,12 +2123,12 @@ mod tls_policy_tests {
         let mut finish = String::new();
         let mut saw = false;
         for chunk in body.chunks(13) {
-            tail.inspect(
+            let f = tail.inspect(
                 &bytes::Bytes::copy_from_slice(chunk),
                 &mut usage,
                 &mut finish,
-                &mut saw,
             );
+            saw |= f.content || f.reasoning;
         }
         assert!(saw, "accumulated embedding body must count as output");
         assert_eq!(usage.prompt_tokens, 7);
@@ -2114,12 +2145,12 @@ mod tls_policy_tests {
         let mut finish = String::new();
         let mut saw = false;
         for chunk in body.chunks(5) {
-            tail.inspect(
+            let f = tail.inspect(
                 &bytes::Bytes::copy_from_slice(chunk),
                 &mut usage,
                 &mut finish,
-                &mut saw,
             );
+            saw |= f.content || f.reasoning;
         }
         assert!(!saw);
         assert!(super::empty_generation_failure(true, 200, saw, &usage).is_some());
@@ -2136,12 +2167,8 @@ mod tls_policy_tests {
         let mut finish = String::new();
         let mut saw = false;
         for c in chunks {
-            tail.inspect(
-                &bytes::Bytes::copy_from_slice(c),
-                &mut usage,
-                &mut finish,
-                &mut saw,
-            );
+            let f = tail.inspect(&bytes::Bytes::copy_from_slice(c), &mut usage, &mut finish);
+            saw |= f.content || f.reasoning;
         }
         assert!(saw);
         assert!(super::empty_generation_failure(true, 200, saw, &usage).is_none());
@@ -2161,12 +2188,8 @@ mod tls_policy_tests {
         let mut finish = String::new();
         let mut saw = false;
         for c in chunks {
-            tail.inspect(
-                &bytes::Bytes::copy_from_slice(c),
-                &mut usage,
-                &mut finish,
-                &mut saw,
-            );
+            let f = tail.inspect(&bytes::Bytes::copy_from_slice(c), &mut usage, &mut finish);
+            saw |= f.content || f.reasoning;
         }
         assert!(saw);
         assert_eq!(usage.prompt_tokens, 9);
@@ -2183,15 +2206,125 @@ mod tls_policy_tests {
         let mut finish = String::new();
         let mut saw = false;
         for c in chunks {
-            tail.inspect(
-                &bytes::Bytes::copy_from_slice(c),
-                &mut usage,
-                &mut finish,
-                &mut saw,
-            );
+            let f = tail.inspect(&bytes::Bytes::copy_from_slice(c), &mut usage, &mut finish);
+            saw |= f.content || f.reasoning;
         }
         assert!(!saw);
         assert!(super::empty_generation_failure(true, 200, saw, &usage).is_some());
+    }
+
+    #[test]
+    fn stream_tail_separates_reasoning_from_content() {
+        // Reasoning deltas must stamp ttfrt only; the first answer delta
+        // stamps ttft. Both feed the zombie check independently.
+        let chunks = [
+            &b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n"[..],
+            &b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ing\"}}]}\n\n"[..],
+            &b"data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n"[..],
+        ];
+        let mut tail = super::StreamTail::default();
+        let mut usage = loom_core::openai::Usage::default();
+        let mut finish = String::new();
+        let f = tail.inspect(
+            &bytes::Bytes::copy_from_slice(chunks[0]),
+            &mut usage,
+            &mut finish,
+        );
+        assert!(f.reasoning && !f.content, "reasoning delta is not content");
+        let f = tail.inspect(
+            &bytes::Bytes::copy_from_slice(chunks[1]),
+            &mut usage,
+            &mut finish,
+        );
+        assert!(f.reasoning && !f.content);
+        let f = tail.inspect(
+            &bytes::Bytes::copy_from_slice(chunks[2]),
+            &mut usage,
+            &mut finish,
+        );
+        assert!(f.content && !f.reasoning, "answer delta is not reasoning");
+    }
+
+    #[test]
+    fn stream_tail_reasoning_alias_and_mixed_chunk() {
+        // The `reasoning` spelling (OpenRouter) counts too, and a chunk
+        // carrying both kinds sets both flags — same elapsed stamps both.
+        let mut tail = super::StreamTail::default();
+        let mut usage = loom_core::openai::Usage::default();
+        let mut finish = String::new();
+        let f = tail.inspect(
+            &bytes::Bytes::copy_from_slice(
+                b"data: {\"choices\":[{\"delta\":{\"reasoning\":\"r\",\"content\":\"a\"}}]}\n\n",
+            ),
+            &mut usage,
+            &mut finish,
+        );
+        assert!(f.content && f.reasoning);
+    }
+
+    #[test]
+    fn stream_tail_nonstream_reasoning_body_sets_both() {
+        // Non-streaming JSON: reasoning + answer arrive in one document —
+        // ttfrt == ttft == body-arrival time, never "no reasoning".
+        let body = br#"{"choices":[{"message":{"role":"assistant","reasoning_content":"thought","content":"hi"}}],"usage":{"prompt_tokens":3}}"#;
+        let mut tail = super::StreamTail::default();
+        let mut usage = loom_core::openai::Usage::default();
+        let mut finish = String::new();
+        let mut saw = false;
+        for c in body.chunks(7) {
+            let f = tail.inspect(&bytes::Bytes::copy_from_slice(c), &mut usage, &mut finish);
+            saw |= f.content || f.reasoning;
+        }
+        assert!(saw);
+        assert_eq!(usage.prompt_tokens, 3);
+    }
+
+    #[test]
+    fn stream_tail_metadata_chunks_stamp_nothing() {
+        // Role-only/empty deltas and keep-alive comments must not stamp
+        // ttft — the old first-byte logic fired on exactly these.
+        let chunks = [
+            &b"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":null}}]}\n\n"[..],
+            &b": keep-alive\n\n"[..],
+            &b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"[..],
+        ];
+        let mut tail = super::StreamTail::default();
+        let mut usage = loom_core::openai::Usage::default();
+        let mut finish = String::new();
+        let f = tail.inspect(
+            &bytes::Bytes::copy_from_slice(chunks[0]),
+            &mut usage,
+            &mut finish,
+        );
+        assert!(!f.content && !f.reasoning, "role-only delta stamps nothing");
+        let f = tail.inspect(
+            &bytes::Bytes::copy_from_slice(chunks[1]),
+            &mut usage,
+            &mut finish,
+        );
+        assert!(!f.content && !f.reasoning, "keep-alive stamps nothing");
+        let f = tail.inspect(
+            &bytes::Bytes::copy_from_slice(chunks[2]),
+            &mut usage,
+            &mut finish,
+        );
+        assert!(f.content);
+    }
+
+    #[test]
+    fn stream_tail_tool_calls_count_as_content() {
+        // A tool-call-only generation (no text ever) must still stamp ttft.
+        let mut tail = super::StreamTail::default();
+        let mut usage = loom_core::openai::Usage::default();
+        let mut finish = String::new();
+        let f = tail.inspect(
+            &bytes::Bytes::copy_from_slice(
+                b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"c1\"}]}}]}\n\n",
+            ),
+            &mut usage,
+            &mut finish,
+        );
+        assert!(f.content && !f.reasoning);
     }
 
     #[test]

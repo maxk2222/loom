@@ -397,7 +397,10 @@ function ClientCharts({ win, onWindowChange }: { win: string; onWindowChange: (v
       if (r.class === "local") b.t1++; else b.t2++;
       b.pt += r.prompt_tokens ?? 0; b.ct += r.completion_tokens ?? 0;
       b.dur += (r.duration_ms ?? 0) / 1000;
-      b.decdur += Math.max(0, (r.duration_ms ?? 0) - (r.ttft_ms ?? 0)) / 1000;
+      // Decode span starts at the first output token of any kind —
+      // reasoning token when present, otherwise the first answer token.
+      const firstTok = (r.ttfrt_ms ?? 0) > 0 ? r.ttfrt_ms : (r.ttft_ms ?? 0);
+      b.decdur += Math.max(0, (r.duration_ms ?? 0) - firstTok) / 1000;
       m.set(name, b);
     }
     return [...m.values()].map(b => ({
@@ -456,13 +459,41 @@ function ClientCharts({ win, onWindowChange }: { win: string; onWindowChange: (v
     const tick = win === "all" ? fmtDayT : fmtTimeS;
     return { grid, max, t0: end - span, bw, tick };
   })();
+  // Time-bucketed ttft/ttfrt percentiles — mirrors the server overview
+  // charts; ttfrt (first reasoning token) stays empty for non-reasoning
+  // backends, which is the honest signal.
+  const pctSeries = (key: "ttft_ms" | "ttfrt_ms") => {
+    if (rows.length === 0) return [];
+    const span = Number.isFinite(WIN_MS[win])
+      ? WIN_MS[win]
+      : Date.now() - rows[0].ended_unix_ms;
+    const end = Date.now();
+    const N = Math.min(30, Math.max(6, Math.floor(rows.length / 3)));
+    const bw = span / N;
+    const tick = win === "all" || win === "24h" ? fmtDayT : fmtTimeS;
+    const bkt: number[][] = Array.from({ length: N }, () => []);
+    for (const r of rows) {
+      const v = r[key] ?? 0;
+      if (v <= 0) continue;
+      const i = Math.min(N - 1, Math.max(0, Math.floor((r.ended_unix_ms - (end - span)) / bw)));
+      bkt[i].push(v);
+    }
+    return bkt.flatMap((v, i) => {
+      if (v.length === 0) return [];
+      const s = [...v].sort((a, b) => a - b);
+      const p = (q: number) => Math.round(s[Math.min(s.length - 1, Math.floor(s.length * q))]);
+      return [{ t: tick(end - span + (i + 0.5) * bw), p50: p(0.5), p95: p(0.95), p99: p(0.99) }];
+    });
+  };
+  const ttftSeries = pctSeries("ttft_ms");
+  const ttfrtSeries = pctSeries("ttfrt_ms");
   const latChart = rows.slice(-30).map((r: any) => ({ t: fmtTimeS(r.ended_unix_ms), ms: r.duration_ms }));
   const tokRows = rows.slice(-30).map((r: any) => ({
     t: fmtTimeS(r.ended_unix_ms),
     pt: r.prompt_tokens ?? 0,
     ct: r.completion_tokens ?? 0,
     e2e: r.duration_ms > 0 ? +(((r.prompt_tokens ?? 0) + (r.completion_tokens ?? 0)) / (r.duration_ms / 1000)).toFixed(1) : 0,
-    dec: r.duration_ms > (r.ttft_ms ?? 0) && (r.ttft_ms ?? 0) > 0 ? +((r.completion_tokens ?? 0) / ((r.duration_ms - r.ttft_ms) / 1000)).toFixed(1) : 0,
+    dec: (() => { const ft = (r.ttfrt_ms ?? 0) > 0 ? r.ttfrt_ms : (r.ttft_ms ?? 0); return r.duration_ms > ft && ft > 0 ? +((r.completion_tokens ?? 0) / ((r.duration_ms - ft) / 1000)).toFixed(1) : 0; })(),
     cls: r.class === "local" ? "t1" : "t2",
   }));
   // The picker must stay visible even with an empty history — it also
@@ -517,6 +548,40 @@ function ClientCharts({ win, onWindowChange }: { win: string; onWindowChange: (v
               <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
               <Bar dataKey="n" fill="#3d6fae" radius={[4, 4, 0, 0]} />
             </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+      {ttftSeries.length > 0 && (
+        <div className="card p-4">
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">ttft percentiles <span className="normal-case text-muted/70">(first answer token)</span></div>
+          <ResponsiveContainer width="100%" height={130}>
+            <AreaChart data={ttftSeries} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+              <CartesianGrid stroke="#1c2740" vertical={false} />
+              <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={(v) => fmtMs(Number(v))} />
+              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtMs(Number(v))} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Area type="monotone" dataKey="p50" stroke="#34d399" fill="#34d399" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+              <Area type="monotone" dataKey="p95" stroke="#fbbf24" fill="#fbbf24" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+              <Area type="monotone" dataKey="p99" stroke="#fb7185" fill="#fb7185" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+      {ttfrtSeries.length > 0 && (
+        <div className="card p-4">
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">ttfrt percentiles <span className="normal-case text-muted/70">(first reasoning token)</span></div>
+          <ResponsiveContainer width="100%" height={130}>
+            <AreaChart data={ttfrtSeries} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+              <CartesianGrid stroke="#1c2740" vertical={false} />
+              <XAxis dataKey="t" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+              <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} tickFormatter={(v) => fmtMs(Number(v))} />
+              <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtMs(Number(v))} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Area type="monotone" dataKey="p50" stroke="#34d399" fill="#34d399" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+              <Area type="monotone" dataKey="p95" stroke="#fbbf24" fill="#fbbf24" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+              <Area type="monotone" dataKey="p99" stroke="#fb7185" fill="#fb7185" fillOpacity={0.10} strokeWidth={2} isAnimationActive={false} />
+            </AreaChart>
           </ResponsiveContainer>
         </div>
       )}

@@ -59,6 +59,10 @@ pub struct FinReq {
     pub deployment_id: String,
     pub duration_ms: i64,
     pub ttft_ms: i64,
+    /// first reasoning token latency (0 = no reasoning) — history.json
+    /// written before this field existed deserializes to 0.
+    #[serde(default)]
+    pub ttfrt_ms: i64,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub status: String,
@@ -165,7 +169,15 @@ pub fn save_cap_history(path: &std::path::Path, ring: &RwLock<VecDeque<CapSample
 /// Remove an active request and append it to the history ring.
 /// `pt`/`ct` are real backend-reported tokens, or the estimate stored at
 /// admission time when the backend omitted usage.
-pub fn finish_req(s: &AppState, rid: &str, status: &str, pt: u32, ct: u32, ttft_ms: i64) {
+pub fn finish_req(
+    s: &AppState,
+    rid: &str,
+    status: &str,
+    pt: u32,
+    ct: u32,
+    ttft_ms: i64,
+    ttfrt_ms: i64,
+) {
     if let Some(i) = s.requests.write().unwrap().remove(rid) {
         let mut h = s.history.write().unwrap();
         if h.len() >= 300 {
@@ -177,6 +189,7 @@ pub fn finish_req(s: &AppState, rid: &str, status: &str, pt: u32, ct: u32, ttft_
             deployment_id: i.deployment_id,
             duration_ms: now_ms() - i.started_unix_ms,
             ttft_ms,
+            ttfrt_ms,
             prompt_tokens: if pt > 0 { pt } else { i.est_tokens },
             completion_tokens: ct,
             status: status.into(),
@@ -612,7 +625,7 @@ async fn openai_inference_raw(
         Err(e) => {
             telemetry::req_finished("failed");
             s.scheduler.finish_request(&request_id);
-            finish_req(&s, &request_id, "failed", 0, 0, 0);
+            finish_req(&s, &request_id, "failed", 0, 0, 0, 0);
             s.connector.notify_capacity();
             drop(token); // release the admission slot
             return err(ErrorCode::UpstreamError, e.to_string(), &request_id);
@@ -641,6 +654,7 @@ async fn openai_inference_raw(
             let mut tail = crate::connector::StreamTail::default();
             let mut outcome = "done";
             let mut ttft_ms: i64 = 0;
+            let mut ttfrt_ms: i64 = 0;
             loop {
                 let next = tokio::select! {
                     _ = cancel.cancelled() => break,
@@ -648,10 +662,14 @@ async fn openai_inference_raw(
                 };
                 match next {
                     Some(Ok(b)) => {
-                        if ttft_ms == 0 {
+                        let f = tail.inspect(&b, &mut usage, &mut finish_reason);
+                        saw_output |= f.content || f.reasoning;
+                        if ttfrt_ms == 0 && f.reasoning {
+                            ttfrt_ms = started.elapsed().as_millis() as i64;
+                        }
+                        if ttft_ms == 0 && f.content {
                             ttft_ms = started.elapsed().as_millis() as i64;
                         }
-                        tail.inspect(&b, &mut usage, &mut finish_reason, &mut saw_output);
                         // A send stalled on a full channel must still honour
                         // cancellation — the select at loop top never runs
                         // while send is pending, so admin/API cancels would
@@ -717,6 +735,7 @@ async fn openai_inference_raw(
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 ttft_ms,
+                ttfrt_ms,
             );
             conn.notify_capacity();
         });

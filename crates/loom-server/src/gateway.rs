@@ -458,6 +458,7 @@ async fn infer(s: GatewayState, api: ApiType, req: Request) -> Response {
                     status,
                     queue_wait_ms,
                     ttft_ms: meta.ttft_ms,
+                    ttfrt_ms: meta.ttfrt_ms,
                     duration_ms: started2.elapsed().as_millis() as i64,
                     prompt_tokens,
                     completion_tokens,

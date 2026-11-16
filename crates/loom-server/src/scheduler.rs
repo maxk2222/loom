@@ -99,6 +99,8 @@ pub struct EndMeta {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub ttft_ms: i64,
+    /// first reasoning-token latency (0 = no reasoning emitted)
+    pub ttfrt_ms: i64,
     pub duration_ms: i64,
 }
 

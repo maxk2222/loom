@@ -288,6 +288,9 @@ message RequestEnd {
   uint32 completion_tokens = 6;
   int64 ttft_ms = 7;
   int64 duration_ms = 8;
+  // Time to first reasoning token (0 = no reasoning emitted). Reasoning
+  // streams before answer content, so ttfrt <= ttft when both are set.
+  int64 ttfrt_ms = 9;
 }
 
 message ErrorReport {
