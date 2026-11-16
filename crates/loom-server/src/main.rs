@@ -147,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
     let usage = usage::UsageWriter::new(pool.clone(), cfg.history_retention_days);
+    capacity::spawn(pool.clone(), registry.clone(), cfg.history_retention_days);
     let auth = Arc::new(auth::Auth {
         db: pool.clone(),
         rt: rt.clone(),

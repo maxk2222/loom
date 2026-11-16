@@ -39,6 +39,9 @@ pub struct AppState {
     pub requests: Arc<RwLock<HashMap<String, RequestInfo>>>,
     /// Finished-request ring buffer (charts).
     pub history: Arc<RwLock<VecDeque<FinReq>>>,
+    /// Rolling capacity gauge samples (20 s cadence, ~7 d window) — feeds
+    /// the capacity-over-time chart beyond the page-open horizon.
+    pub cap_history: Arc<RwLock<VecDeque<CapSample>>>,
     /// Local UI sessions: sha256(token) -> expiry (unix ms). In-memory only —
     /// a restart simply means logging in again.
     pub sessions: Arc<RwLock<HashMap<String, i64>>>,
@@ -77,6 +80,79 @@ pub fn load_history_file(path: &std::path::Path) -> VecDeque<FinReq> {
 /// Persist the history ring (atomic via tmp+rename).
 pub fn save_history_file(path: &std::path::Path, ring: &RwLock<VecDeque<FinReq>>) {
     let items: Vec<FinReq> = ring.read().unwrap().iter().cloned().collect();
+    let Ok(json) = serde_json::to_vec(&items) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &json).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// One aggregated capacity gauge sample (fleet-wide sums over the local
+/// deployments — the same math the status page applies live).
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct CapSample {
+    /// unix ms
+    pub ts: i64,
+    /// leased KV tokens across deployments
+    pub used: u64,
+    /// summed budget over accepting deployments (0 = no token gate)
+    pub budget: u64,
+    /// occupied request slots (tier-1 local + tier-2 inflight)
+    pub slots_a: u64,
+    /// summed concurrency pools
+    pub slots_t: u64,
+}
+
+/// ~8 days at a 20 s tick — covers the largest chart window plus margin.
+const CAP_HIST_KEEP_MS: i64 = 8 * 24 * 3600 * 1000;
+const CAP_HIST_MAX: usize = 40_000;
+
+/// Aggregate one capacity_snapshot() into a storable sample — mirrors the
+/// status page's exact math so live and persisted series agree.
+pub fn cap_sample_now(caps: &[crate::scheduler::DeploymentCapacityInfo]) -> CapSample {
+    CapSample {
+        ts: now_ms(),
+        used: caps.iter().map(|c| c.kv_used_tokens).sum(),
+        budget: caps
+            .iter()
+            .filter(|c| c.accepting)
+            .map(|c| c.kv_budget_tokens)
+            .sum(),
+        slots_a: caps
+            .iter()
+            .map(|c| (c.inflight_local + c.inflight_tier2) as u64)
+            .sum(),
+        slots_t: caps.iter().map(|c| c.max_concurrent as u64).sum(),
+    }
+}
+
+/// Push a sample into the ring, trimming by age and hard cap.
+pub fn cap_history_push(ring: &RwLock<VecDeque<CapSample>>, s: CapSample) {
+    let mut h = ring.write().unwrap();
+    h.push_back(s);
+    let cutoff = now_ms() - CAP_HIST_KEEP_MS;
+    while h.front().map(|f| f.ts < cutoff).unwrap_or(false) || h.len() > CAP_HIST_MAX {
+        h.pop_front();
+    }
+}
+
+/// Load persisted capacity samples (best-effort, newest-only on overflow).
+pub fn load_cap_history(path: &std::path::Path) -> VecDeque<CapSample> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return VecDeque::new();
+    };
+    let mut items: Vec<CapSample> = serde_json::from_slice(&bytes).unwrap_or_default();
+    if items.len() > CAP_HIST_MAX {
+        items.drain(..items.len() - CAP_HIST_MAX);
+    }
+    items.into_iter().collect()
+}
+
+/// Persist the capacity ring (atomic via tmp+rename).
+pub fn save_cap_history(path: &std::path::Path, ring: &RwLock<VecDeque<CapSample>>) {
+    let items: Vec<CapSample> = ring.read().unwrap().iter().cloned().collect();
     let Ok(json) = serde_json::to_vec(&items) else {
         return;
     };
@@ -159,6 +235,7 @@ pub fn router(state: AppState) -> Router {
         .route("/local/api/deployments", get(admin_list_deployments))
         .route("/local/api/requests", get(admin_list_requests))
         .route("/local/api/history", get(admin_history))
+        .route("/local/api/capacity-series", get(admin_capacity_series))
         .route(
             "/local/api/requests/{id}/cancel",
             post(admin_cancel_request),
@@ -1255,6 +1332,53 @@ pub(crate) async fn fetch_latest_release() -> Option<(String, String)> {
 async fn admin_history(State(s): State<AppState>) -> Json<Value> {
     let h: Vec<FinReq> = s.history.read().unwrap().iter().cloned().collect();
     Json(json!({ "history": h }))
+}
+
+/// Time-bucketed local capacity series for the history chart. Window keys
+/// mirror the client UI picker; raw sums per bucket — the frontend derives
+/// percentages exactly like the live path.
+async fn admin_capacity_series(
+    State(s): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    // (span ms, bucket secs) — ~50-60 points per window, same targets as the
+    // server's stats_window.
+    let (span_ms, bucket_s) = match q.get("window").map(String::as_str) {
+        Some("1h") => (3_600_000, 60),
+        Some("6h") => (21_600_000, 432),
+        Some("7d") => (604_800_000, 10_800),
+        _ => (86_400_000, 1_800),
+    };
+    let cutoff = now_ms() - span_ms;
+    let bucket_ms = bucket_s * 1000;
+    let mut acc: std::collections::BTreeMap<i64, (u64, u64, u64, u64, u64)> = Default::default();
+    for sm in s.cap_history.read().unwrap().iter() {
+        if sm.ts < cutoff {
+            continue;
+        }
+        let b = acc.entry(sm.ts / bucket_ms * bucket_ms).or_default();
+        b.0 += sm.used;
+        b.1 += sm.budget;
+        b.2 += sm.slots_t;
+        b.3 += sm.slots_a;
+        b.4 += 1;
+    }
+    let buckets: Vec<Value> = acc
+        .into_iter()
+        .map(|(t, (u, b, st, sa, n))| {
+            json!({
+                "t": t / 1000,
+                "kv_used": u / n.max(1),
+                "kv_budget": b / n.max(1),
+                "slots_total": st / n.max(1),
+                "slots_active": sa / n.max(1),
+            })
+        })
+        .collect();
+    Json(
+        json!({ "window": q.get("window").cloned().unwrap_or_else(|| "24h".into()),
+                 "bucket_secs": bucket_s, "buckets": buckets }),
+    )
 }
 
 // ---------------- local UI auth (first-run wizard) ----------------

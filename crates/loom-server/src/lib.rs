@@ -3,6 +3,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod capacity;
 pub mod client_registry;
 pub mod config;
 pub mod dashboard_static;

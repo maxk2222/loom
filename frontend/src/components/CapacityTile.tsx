@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Area, AreaChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { api } from "../lib/api";
+import { WindowPicker } from "./ui";
 import { fmtNum, fmtTimeS } from "../lib/format";
 
 export interface CapSample {
@@ -15,11 +18,15 @@ export interface CapSample {
   t?: number;
 }
 
-const CAP = 240; // ~20 min at a 5 s poll (12 min at 3 s)
+/** The compact tile is a "right now" sparkline — a short trailing window,
+ *  trimmed by wall-clock so slow/fast polls cover the same span. Long
+ *  history lives in the persisted series behind CapacityChart. */
+const LIVE_WINDOW_MS = 30 * 60_000;
+const CAP = 600; // hard cap — 30 min at a 3 s poll fits with margin
 
-/** Accumulates one point per `tick` identity change (i.e. per poll) into a
- *  capped rolling window. Each sample is wall-clock stamped so charts can
- *  use a real time axis instead of assuming uniform spacing. */
+/** Accumulates one stamped point per `tick` identity change (i.e. per
+ *  poll), trimmed to the trailing LIVE_WINDOW_MS so the tile always shows
+ *  "the last ~30 minutes" regardless of poll cadence. */
 export function useCapacitySeries(sample: CapSample | null, tick: unknown): CapSample[] {
   const ref = useRef<CapSample | null>(null);
   ref.current = sample;
@@ -27,7 +34,12 @@ export function useCapacitySeries(sample: CapSample | null, tick: unknown): CapS
   useEffect(() => {
     const s = ref.current;
     if (!s) return;
-    setSeries((prev) => [...prev, { ...s, t: Date.now() }].slice(-CAP));
+    const now = Date.now();
+    setSeries((prev) =>
+      [...prev, { ...s, t: now }]
+        .filter((p) => (p.t ?? 0) >= now - LIVE_WINDOW_MS)
+        .slice(-CAP)
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick]);
   return series;
@@ -99,37 +111,60 @@ export function CapacityTile({ title, series, note }: { title: string; series: C
   );
 }
 
-/** Full-width capacity chart: KV-budget and request-slot usage as two
- *  percentage lines over a real time axis (rolling window, see CAP).
- *  A null percentage (no token budget / no slots configured) leaves an
- *  honest gap instead of a misleading flat zero. */
-export function CapacityChart({ title, series, note }: { title: string; series: CapSample[]; note?: string }) {
-  // t-less samples (not stamped by the hook) would sit at the epoch and
-  // stretch the axis — drop them rather than distort the chart.
-  const data = series.filter((s) => s.t != null).map((s) => ({
-    t: s.t!,
-    kv: s.budget > 0 ? +((s.used / s.budget) * 100).toFixed(1) : null,
-    slots: s.slotsT > 0 ? +((s.slotsA / s.slotsT) * 100).toFixed(1) : null,
+interface CapBucket {
+  /** bucket start, unix seconds */
+  t: number;
+  kv_used: number;
+  kv_budget: number;
+  slots_total: number;
+  slots_active: number;
+}
+
+/** Full-width capacity history chart: KV-budget and request-slot usage as
+ *  two percentage lines over a real time axis, fed by the persisted
+ *  sampler series (server /api/stats/capacity-series or client
+ *  /local/api/capacity-series). Null percentages leave honest gaps. */
+export function CapacityChart({ title, url, windows, note }: {
+  title: string;
+  /** series endpoint accepting ?window= */
+  url: string;
+  windows: { v: string; l: string }[];
+  note?: string;
+}) {
+  const [win, setWin] = useState(windows[Math.min(2, windows.length - 1)].v);
+  const q = useQuery({
+    queryKey: ["capacity-series", url, win],
+    queryFn: () => api.get<{ buckets: CapBucket[] }>(`${url}?window=${win}`),
+    refetchInterval: 15000,
+  });
+  const buckets = q.data?.buckets ?? [];
+  const data = buckets.map((b) => ({
+    t: b.t * 1000,
+    kv: b.kv_budget > 0 ? +((b.kv_used / b.kv_budget) * 100).toFixed(1) : null,
+    slots: b.slots_total > 0 ? +((b.slots_active / b.slots_total) * 100).toFixed(1) : null,
   }));
   const cur = data[data.length - 1];
-  const last = [...series].reverse().find((s) => s.t != null);
+  const last = buckets[buckets.length - 1];
 
   return (
     <div className="card p-4">
       <div className="mb-2 flex items-baseline justify-between">
-        <div className="text-xs font-medium uppercase tracking-wide text-muted">{title}</div>
-        <div className="flex items-center gap-4 text-[11px]">
-          {cur?.kv != null && (
-            <span className={`font-medium ${cur.kv >= 85 ? "text-rose-400" : cur.kv >= 65 ? "text-amber-300" : "text-emerald-400"}`}>
-              {cur.kv.toFixed(0)}% kv
-            </span>
-          )}
-          {cur?.slots != null && (
-            <span className={`font-medium ${cur.slots >= 85 ? "text-rose-400" : cur.slots >= 65 ? "text-amber-300" : "text-sky-400"}`}>
-              {cur.slots.toFixed(0)}% slots
-            </span>
-          )}
+        <div className="flex items-baseline gap-3">
+          <div className="text-xs font-medium uppercase tracking-wide text-muted">{title}</div>
+          <div className="flex items-center gap-3 text-[11px]">
+            {cur?.kv != null && (
+              <span className={`font-medium ${cur.kv >= 85 ? "text-rose-400" : cur.kv >= 65 ? "text-amber-300" : "text-emerald-400"}`}>
+                {cur.kv.toFixed(0)}% kv
+              </span>
+            )}
+            {cur?.slots != null && (
+              <span className={`font-medium ${cur.slots >= 85 ? "text-rose-400" : cur.slots >= 65 ? "text-amber-300" : "text-sky-400"}`}>
+                {cur.slots.toFixed(0)}% slots
+              </span>
+            )}
+          </div>
         </div>
+        <WindowPicker value={win} onChange={setWin} options={windows} />
       </div>
       {data.length > 1 ? (
         <ResponsiveContainer width="100%" height={200}>
@@ -170,9 +205,9 @@ export function CapacityChart({ title, series, note }: { title: string; series: 
         <span>{note ?? "rolling window — collected while this page is open"}</span>
         {cur && last && (
           <span className="font-mono">
-            {cur.kv != null && `kv ${fmtTok(last.used)} / ${fmtTok(last.budget)}`}
+            {cur.kv != null && `kv ${fmtTok(last.kv_used)} / ${fmtTok(last.kv_budget)}`}
             {cur.kv != null && cur.slots != null && " · "}
-            {cur.slots != null && `slots ${last.slotsA} / ${last.slotsT}`}
+            {cur.slots != null && `slots ${last.slots_active} / ${last.slots_total}`}
           </span>
         )}
       </div>

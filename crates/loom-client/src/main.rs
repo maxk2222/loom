@@ -133,6 +133,37 @@ async fn async_main() -> anyhow::Result<()> {
         });
     }
 
+    // Capacity gauge ring: 20 s samples so the capacity chart renders beyond
+    // the page-open horizon; persisted next to the config like history.json.
+    let cap_hist_path = config_path.with_file_name("capacity_history.json");
+    let cap_history: std::sync::Arc<
+        std::sync::RwLock<std::collections::VecDeque<local_api::CapSample>>,
+    > = std::sync::Arc::new(std::sync::RwLock::new(local_api::load_cap_history(
+        &cap_hist_path,
+    )));
+    {
+        let ch = cap_history.clone();
+        let sched = scheduler.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
+            loop {
+                tick.tick().await;
+                let s = local_api::cap_sample_now(&sched.capacity_snapshot());
+                local_api::cap_history_push(&ch, s);
+            }
+        });
+    }
+    {
+        let ch = cap_history.clone();
+        let cp = cap_hist_path.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                local_api::save_cap_history(&cp, &ch);
+            }
+        });
+    }
+
     let state = AppState {
         cfg: cfg_store.clone(),
         backends: backends.clone(),
@@ -141,6 +172,7 @@ async fn async_main() -> anyhow::Result<()> {
         started: Instant::now(),
         requests: Default::default(),
         history,
+        cap_history,
         sessions: Default::default(),
         notes,
         notes_path,

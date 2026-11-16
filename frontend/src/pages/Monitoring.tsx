@@ -5,7 +5,8 @@ import { Card, ConfirmModal, Spinner } from "../components/ui";
 import { TokenHeatmap, expandHeatmap } from "../components/Heatmap";
 import type { HistoryRow, ApiUser, UsageStat } from "../lib/types";
 import { fmtTs, fmtTimeS, fmtDayT, fmtDay, fmtMs, fmtNum } from "../lib/format";
-import { WindowPicker } from "./Overview";
+import { WindowPicker } from "../components/ui";
+import { WINDOWS } from "./Overview";
 import {
   Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
@@ -90,7 +91,7 @@ export default function MonitoringPage() {
         <h1 className="text-lg font-semibold">Monitoring</h1>
         <div className="flex items-center gap-3">
           <button className="btn-ghost px-2 py-1 text-xs text-muted" onClick={() => setPurgeOpen(true)}>Purge orphaned stats</button>
-          <WindowPicker value={win} onChange={setWin} />
+          <WindowPicker value={win} onChange={setWin} options={WINDOWS} />
         </div>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

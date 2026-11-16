@@ -1,9 +1,8 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, copyText, LOCAL_KEY_STORAGE, localKey } from "../../lib/api";
-import { WindowPicker } from "../Overview";
 import { AreaChart, Area, BarChart, Bar, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
-import { Badge, Card, ConfirmModal, Field, Modal, Stat } from "../../components/ui";
+import { Badge, Card, ConfirmModal, Field, Modal, Stat, WindowPicker } from "../../components/ui";
 import { CapacityChart, CapacityTile, useCapacitySeries } from "../../components/CapacityTile";
 import { TokenHeatmap } from "../../components/Heatmap";
 import { Check, Copy, Eye, EyeOff, Megaphone, RefreshCw, X } from "lucide-react";
@@ -336,7 +335,7 @@ export default function ClientStatusPage() {
           ))}
         </Card>
       </div>
-      <CapacityChart title="Capacity over time" series={capSeries} note="share of kv budget and request slots across local deployments — live samples while this page is open" />
+      <CapacityChart title="Capacity over time" url="/local/api/capacity-series" windows={CAP_HISTORY_WINDOWS} note="share of kv budget and request slots across local deployments — sampled every 20 s, ~7 d retained" />
       <ClientCharts />
       <Card className="overflow-x-auto p-0">
         <div className="border-b border-border px-4 py-3 text-sm font-medium">Per-deployment capacity</div>
@@ -368,6 +367,13 @@ const CLIENT_WINDOWS = [
   { v: "6h", l: "6h" },
   { v: "24h", l: "24h" },
   { v: "all", l: "All" },
+];
+// Capacity history windows — bounded by the client sampler's ~7 d ring.
+const CAP_HISTORY_WINDOWS = [
+  { v: "1h", l: "1h" },
+  { v: "6h", l: "6h" },
+  { v: "24h", l: "24h" },
+  { v: "7d", l: "7d" },
 ];
 const WIN_MS: Record<string, number> = { "1h": 3.6e6, "6h": 21.6e6, "24h": 86.4e6, all: Infinity };
 // Same log-spaced buckets as the server heatmap — a 200-token ping and a

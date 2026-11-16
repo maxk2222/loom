@@ -3,7 +3,7 @@ import { Activity, Boxes, Cpu, ListOrdered, Zap } from "lucide-react";
 import { AreaChart, Area, BarChart, Bar, Cell, ComposedChart, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { useEffect, useState } from "react";
 import { api, openEventStream } from "../lib/api";
-import { Badge, LiveBadge, PageHeader, Stat } from "../components/ui";
+import { Badge, LiveBadge, PageHeader, Stat, WindowPicker } from "../components/ui";
 import { TokenHeatmap, expandHeatmap, type HeatmapData } from "../components/Heatmap";
 import { CapacityChart, CapacityTile, useCapacitySeries } from "../components/CapacityTile";
 import type { ClientRow, DeploymentRow, Overview, VirtualModel } from "../lib/types";
@@ -16,12 +16,22 @@ const API_ENDPOINTS = [
   { m: "GET", p: "/v1/models", d: "OpenAI model list" },
 ];
 
-const WINDOWS = [
+export const WINDOWS = [
   { v: "24h", l: "24h" },
   { v: "7d", l: "7d" },
   { v: "30d", l: "30d" },
   { v: "365d", l: "1y" },
   { v: "all", l: "All" },
+];
+
+// Capacity history windows — bounded by the sampler's retention
+// (history_retention_days, default 30 d).
+const CAP_WINDOWS = [
+  { v: "1h", l: "1h" },
+  { v: "6h", l: "6h" },
+  { v: "24h", l: "24h" },
+  { v: "7d", l: "7d" },
+  { v: "30d", l: "30d" },
 ];
 
 interface SeriesBucket {
@@ -46,20 +56,6 @@ interface BreakdownRow {
   tokens: number;
   duration_ms: number;
   decode_ms: number;
-}
-
-export function WindowPicker({ value, onChange, options = WINDOWS }: { value: string; onChange: (v: string) => void; options?: { v: string; l: string }[] }) {
-  return (
-    <div className="flex gap-0.5 rounded-md bg-panel2 p-0.5">
-      {options.map(w => (
-        <button
-          key={w.v}
-          onClick={() => onChange(w.v)}
-          className={`rounded px-2 py-0.5 text-[11px] transition-colors ${value === w.v ? "bg-accent/20 text-accent" : "text-muted hover:text-text"}`}
-        >{w.l}</button>
-      ))}
-    </div>
-  );
 }
 
 export default function OverviewPage() {
@@ -166,7 +162,7 @@ export default function OverviewPage() {
         desc={`${online.length} of ${d?.clients_total ?? 0} clients online · live via event stream`}
         actions={
           <span className="flex items-center gap-3">
-            <WindowPicker value={win} onChange={setWin} />
+            <WindowPicker value={win} onChange={setWin} options={WINDOWS} />
             <LiveBadge live={online.length > 0} />
           </span>
         }
@@ -216,7 +212,7 @@ export default function OverviewPage() {
         </div>
         <CapacityTile title="Fleet capacity" series={capSeries} note="token-gated deployments only" />
       </div>
-      <CapacityChart title="Capacity over time" series={capSeries} note="share of summed kv budget and request slots — live samples while this page is open" />
+      <CapacityChart title="Capacity over time" url="/api/stats/capacity-series" windows={CAP_WINDOWS} note="share of summed kv budget and request slots — sampled every 20 s, kept per history retention" />
       {fleet.length > 0 && (
         <div className="card p-4">
           <div className="mb-3 text-xs font-medium uppercase tracking-wide text-muted">Fleet load — live per client</div>

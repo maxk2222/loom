@@ -143,6 +143,7 @@ pub fn router(s: AdminState) -> Router {
         .route("/api/stats/usage", get(usage_stats))
         .route("/api/stats/series", get(stats_series))
         .route("/api/stats/token-heatmap", get(stats_token_heatmap))
+        .route("/api/stats/capacity-series", get(stats_capacity_series))
         .route("/api/stats/breakdown", get(stats_breakdown))
         .route("/api/stats/purge-orphans", post(purge_orphan_stats))
         // settings
@@ -1721,6 +1722,8 @@ async fn usage_stats(State(s): State<AdminState>) -> Json<Value> {
 /// Bucket widths target ~50 points per chart so axes stay readable.
 fn stats_window(w: Option<&String>) -> (&'static str, i64) {
     match w.map(|s| s.as_str()).unwrap_or("24h") {
+        "1h" => ("1 hour", 72),
+        "6h" => ("6 hours", 432),
         "7d" => ("7 days", 10_800),
         "30d" => ("30 days", 43_200),
         "365d" | "1y" => ("365 days", 604_800),
@@ -1785,6 +1788,49 @@ async fn stats_series(State(s): State<AdminState>, Query(q): Query<StatsQ>) -> J
 /// Request counts bucketed by time × total-token size — feeds the dashboard
 /// heatmap ("how large were the requests when"). Token buckets are log-spaced
 /// so a 200-token chat ping and a 200k-token agent context share one chart.
+/// Time-bucketed fleet capacity: per-tick sums of sampled gauges, then the
+/// bucket average. Two-stage because the eligible deployment set changes
+/// over time — averaging rows directly would weight vanished deployments.
+/// Raw sums are returned; the frontend derives percentages (kv_used/budget,
+/// slots_active/slots_total) exactly like the live sample path.
+async fn stats_capacity_series(
+    State(s): State<AdminState>,
+    Query(q): Query<StatsQ>,
+) -> Json<Value> {
+    let (interval, bucket) = stats_window(q.window.as_ref());
+    let rows: Vec<(i64, i64, i64, i64, i64)> = sqlx::query_as(
+        "WITH per_tick AS (
+            SELECT ts,
+                   coalesce(sum(kv_used)    FILTER (WHERE kv_gated), 0) AS kv_used,
+                   coalesce(sum(kv_budget)  FILTER (WHERE kv_gated), 0) AS kv_budget,
+                   coalesce(sum(slots_total) FILTER (WHERE live), 0)     AS slots_total,
+                   coalesce(sum(slots_total - slots_free) FILTER (WHERE live), 0) AS slots_active
+              FROM capacity_samples
+             WHERE ts > now() - $1::interval
+             GROUP BY ts
+        )
+        SELECT (floor(extract(epoch from ts)/$2)*$2)::bigint AS bucket,
+               round(avg(kv_used))::bigint,
+               round(avg(kv_budget))::bigint,
+               round(avg(slots_total))::bigint,
+               round(avg(slots_active))::bigint
+          FROM per_tick GROUP BY bucket ORDER BY bucket",
+    )
+    .bind(interval)
+    .bind(bucket as f64)
+    .fetch_all(&s.db)
+    .await
+    .unwrap_or_default();
+    Json(json!({
+        "window": q.window.unwrap_or_else(|| "24h".into()),
+        "bucket_secs": bucket,
+        "buckets": rows.iter().map(|(t, u, b, st, sa)| json!({
+            "t": t, "kv_used": u, "kv_budget": b,
+            "slots_total": st, "slots_active": sa,
+        })).collect::<Vec<_>>()
+    }))
+}
+
 async fn stats_token_heatmap(State(s): State<AdminState>, Query(q): Query<StatsQ>) -> Json<Value> {
     let (interval, bucket) = stats_window(q.window.as_ref());
     let rows: Vec<(chrono::DateTime<chrono::Utc>, i32, i64)> = sqlx::query_as(

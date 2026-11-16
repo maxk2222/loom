@@ -294,3 +294,17 @@ export function Logo({ size = 28, className }: { size?: number; className?: stri
     />
   );
 }
+
+export function WindowPicker({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: { v: string; l: string }[] }) {
+  return (
+    <div className="flex gap-0.5 rounded-md bg-panel2 p-0.5">
+      {options.map(w => (
+        <button
+          key={w.v}
+          onClick={() => onChange(w.v)}
+          className={`rounded px-2 py-0.5 text-[11px] transition-colors ${value === w.v ? "bg-accent/20 text-accent" : "text-muted hover:text-text"}`}
+        >{w.l}</button>
+      ))}
+    </div>
+  );
+}

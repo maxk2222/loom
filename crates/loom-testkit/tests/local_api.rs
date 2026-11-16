@@ -66,6 +66,7 @@ async fn spawn_client_api(cfg: ClientConfig) -> String {
         started: Instant::now(),
         requests: Arc::new(std::sync::RwLock::new(Default::default())),
         history: Arc::new(std::sync::RwLock::new(Default::default())),
+        cap_history: Arc::new(std::sync::RwLock::new(Default::default())),
         sessions: Default::default(),
         notes: Default::default(),
         notes_path: std::env::temp_dir().join("loom-testkit-notes.json"),
