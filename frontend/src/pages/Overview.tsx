@@ -327,22 +327,6 @@ export default function OverviewPage() {
             </ResponsiveContainer>
           </div>
         )}
-        {reqPerClient.length > 0 && (
-          <div className="card p-4">
-            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">requests / client</div>
-            <ResponsiveContainer width="100%" height={130}>
-              <BarChart data={reqPerClient} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
-                <CartesianGrid stroke="#1c2740" vertical={false} />
-                <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={fmtNum} />
-                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
-                <Bar dataKey="n" fill="#3d6fae" radius={[4, 4, 0, 0]}>
-                  {reqPerClient.map(e => <Cell key={e.name} fill={offlineNames.has(e.name) ? "#33415c" : "#3d6fae"} />)}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        )}
       </div>
       {tokSeries.length > 0 && (
         <div className="card p-4">
@@ -428,6 +412,22 @@ export default function OverviewPage() {
                 <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
                 <Bar dataKey="cap" fill="#3d6fae" radius={[4, 4, 0, 0]}>
                   {perClient.map(e => <Cell key={e.name} fill={offlineNames.has(e.name) ? "#33415c" : "#3d6fae"} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+        {reqPerClient.length > 0 && (
+          <div className="card p-4">
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">requests / client</div>
+            <ResponsiveContainer width="100%" height={130}>
+              <BarChart data={reqPerClient} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
+                <CartesianGrid stroke="#1c2740" vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: "#5b6b8c" }} tickLine={false} axisLine={false} allowDecimals={false} tickFormatter={fmtNum} />
+                <Tooltip cursor={{ fill: "rgba(61,111,174,0.09)", stroke: "#4a86c8", strokeOpacity: 0.35 }} contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }} formatter={(v) => fmtNum(Number(v))} />
+                <Bar dataKey="n" fill="#3d6fae" radius={[4, 4, 0, 0]}>
+                  {reqPerClient.map(e => <Cell key={e.name} fill={offlineNames.has(e.name) ? "#33415c" : "#3d6fae"} />)}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
