@@ -173,8 +173,25 @@ source). When fetched outside the gateway, pass `--server <grpc-url>` too.
 The client registers, reports its backends and appears online within
 seconds — with an auto-issued mTLS certificate (see *Security*).
 
-A container variant exists too (`deploy/docker-compose.client.yml`): the
-client only proxies to wherever Ollama/vLLM actually runs.
+Docker instead of a native daemon — either via the same installer (needs
+only docker access, no root):
+
+```bash
+curl -fsSL https://loom.example.com/install-client.sh | \
+  bash -s -- --docker --token enroll_…
+```
+
+or via `deploy/docker-compose.client.yml` directly:
+
+```bash
+LOOM_SERVER_URL=https://grpc.example.com \
+LOOM_ENROLL_TOKEN=enroll_… \
+LOOM_MODELS="qwen2.5:0.5b" \
+docker compose -f deploy/docker-compose.client.yml up -d
+```
+
+The client only proxies to wherever Ollama/vLLM actually runs — the GPU
+stays on the backend host.
 
 ### First request
 
