@@ -1815,7 +1815,20 @@ async fn stats_capacity_series(
     Query(q): Query<StatsQ>,
 ) -> Json<Value> {
     let (interval, bucket) = stats_window(q.window.as_ref());
-    let rows: Vec<(i64, i64, i64, i64, i64)> = sqlx::query_as(
+    type Row = (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
         "WITH per_tick AS (
             SELECT ts,
                    coalesce(sum(kv_used)    FILTER (WHERE kv_gated), 0) AS kv_used,
@@ -1825,13 +1838,26 @@ async fn stats_capacity_series(
               FROM capacity_samples
              WHERE ts > now() - $1::interval
              GROUP BY ts
+        ), per_tick_pct AS (
+            SELECT ts, kv_used, kv_budget, slots_total, slots_active,
+                   CASE WHEN kv_budget > 0
+                        THEN 100.0 * kv_used / kv_budget END AS kv_pct,
+                   CASE WHEN slots_total > 0
+                        THEN 100.0 * slots_active / slots_total END AS slots_pct
+              FROM per_tick
         )
         SELECT (floor(extract(epoch from ts)/$2)*$2)::bigint AS bucket,
                round(avg(kv_used))::bigint,
                round(avg(kv_budget))::bigint,
                round(avg(slots_total))::bigint,
-               round(avg(slots_active))::bigint
-          FROM per_tick GROUP BY bucket ORDER BY bucket",
+               round(avg(slots_active))::bigint,
+               percentile_cont(0.5)  within group (order by kv_pct)::float8,
+               percentile_cont(0.95) within group (order by kv_pct)::float8,
+               percentile_cont(0.99) within group (order by kv_pct)::float8,
+               percentile_cont(0.5)  within group (order by slots_pct)::float8,
+               percentile_cont(0.95) within group (order by slots_pct)::float8,
+               percentile_cont(0.99) within group (order by slots_pct)::float8
+          FROM per_tick_pct GROUP BY bucket ORDER BY bucket",
     )
     .bind(interval)
     .bind(bucket as f64)
@@ -1841,9 +1867,11 @@ async fn stats_capacity_series(
     Json(json!({
         "window": q.window.unwrap_or_else(|| "24h".into()),
         "bucket_secs": bucket,
-        "buckets": rows.iter().map(|(t, u, b, st, sa)| json!({
+        "buckets": rows.iter().map(|(t, u, b, st, sa, k5, k9, k99, s5, s9, s99)| json!({
             "t": t, "kv_used": u, "kv_budget": b,
             "slots_total": st, "slots_active": sa,
+            "kv_p50": k5, "kv_p95": k9, "kv_p99": k99,
+            "slots_p50": s5, "slots_p95": s9, "slots_p99": s99,
         })).collect::<Vec<_>>()
     }))
 }
@@ -1852,13 +1880,17 @@ async fn stats_token_heatmap(State(s): State<AdminState>, Query(q): Query<StatsQ
     let (interval, bucket) = stats_window(q.window.as_ref());
     let rows: Vec<(chrono::DateTime<chrono::Utc>, i32, i64)> = sqlx::query_as(
         "SELECT to_timestamp(floor(extract(epoch from created_at)/$2)*$2) AS t,
-                CASE WHEN prompt_tokens + completion_tokens < 256    THEN 0
-                     WHEN prompt_tokens + completion_tokens < 1024   THEN 1
-                     WHEN prompt_tokens + completion_tokens < 4096   THEN 2
-                     WHEN prompt_tokens + completion_tokens < 16384  THEN 3
-                     WHEN prompt_tokens + completion_tokens < 65536  THEN 4
-                     WHEN prompt_tokens + completion_tokens < 262144 THEN 5
-                     ELSE 6 END AS b,
+                CASE WHEN prompt_tokens + completion_tokens < 256     THEN 0
+                     WHEN prompt_tokens + completion_tokens < 1024    THEN 1
+                     WHEN prompt_tokens + completion_tokens < 4096    THEN 2
+                     WHEN prompt_tokens + completion_tokens < 16384   THEN 3
+                     WHEN prompt_tokens + completion_tokens < 32768   THEN 4
+                     WHEN prompt_tokens + completion_tokens < 65536   THEN 5
+                     WHEN prompt_tokens + completion_tokens < 131072  THEN 6
+                     WHEN prompt_tokens + completion_tokens < 262144  THEN 7
+                     WHEN prompt_tokens + completion_tokens < 524288  THEN 8
+                     WHEN prompt_tokens + completion_tokens < 1048576 THEN 9
+                     ELSE 10 END AS b,
                 count(*)::bigint AS n
            FROM requests_history
           WHERE created_at > now() - $1::interval
@@ -1872,7 +1904,10 @@ async fn stats_token_heatmap(State(s): State<AdminState>, Query(q): Query<StatsQ
     Json(json!({
         "window": q.window.unwrap_or_else(|| "24h".into()),
         "bucket_secs": bucket,
-        "token_buckets": ["<256","256–1k","1k–4k","4k–16k","16k–64k","64k–256k","≥256k"],
+        // Bucket index b in the CASE above == position in this array —
+        // keep both in sync when adjusting granularity (coarse ×4 below
+        // 16k, fine ×2 above).
+        "token_buckets": ["<256","256–1k","1k–4k","4k–16k","16k–32k","32k–64k","64k–128k","128k–256k","256k–512k","512k–1M","≥1M"],
         "cells": rows.iter().map(|(t,b,n)| json!({"t":t,"b":b,"n":n})).collect::<Vec<_>>()
     }))
 }

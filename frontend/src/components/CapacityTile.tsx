@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Area, AreaChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api } from "../lib/api";
 import { fmtNum, fmtTimeS, fmtDayT, fmtDay } from "../lib/format";
 
@@ -117,12 +117,88 @@ interface CapBucket {
   kv_budget: number;
   slots_total: number;
   slots_active: number;
+  /** per-tick utilisation percentiles within the bucket (null = no
+   *  gated/live capacity that tick → honest gap) */
+  kv_p50?: number | null;
+  kv_p95?: number | null;
+  kv_p99?: number | null;
+  slots_p50?: number | null;
+  slots_p95?: number | null;
+  slots_p99?: number | null;
 }
 
-/** Full-width capacity history chart: KV-budget and request-slot usage as
- *  two percentage lines over a real time axis, fed by the persisted
- *  sampler series (server /api/stats/capacity-series or client
- *  /local/api/capacity-series). Null percentages leave honest gaps. */
+/** One p50/p95/p99 area panel — same visual language as the latency
+ *  percentile cards (green/amber/rose). */
+function PctPanel({ label, prefix, data, tick, footer }: {
+  label: string;
+  /** "kv" | "slots" — dataKey prefix in each row */
+  prefix: "kv" | "slots";
+  data: Record<string, number | null>[];
+  tick: (ms: number) => string;
+  footer?: string | null;
+}) {
+  const sparse = data.length < 6;
+  const area = (k: string, name: string, stroke: string) => (
+    <Area
+      key={k}
+      type="monotone"
+      dataKey={`${prefix}_${k}`}
+      name={name}
+      stroke={stroke}
+      fill={stroke}
+      fillOpacity={0.10}
+      strokeWidth={2}
+      dot={sparse ? { r: 3, fill: stroke, strokeWidth: 0 } : false}
+      connectNulls={false}
+      isAnimationActive={false}
+    />
+  );
+  return (
+    <div>
+      <div className="mb-1 flex items-baseline justify-between">
+        <span className="text-[11px] font-medium text-muted">{label}</span>
+        {footer && <span className="font-mono text-[10px] text-muted/70">{footer}</span>}
+      </div>
+      <ResponsiveContainer width="100%" height={170}>
+        <AreaChart data={data} margin={{ top: 4, right: 8, bottom: 0, left: -18 }}>
+          <CartesianGrid stroke="#1c2740" vertical={false} />
+          <XAxis
+            dataKey="t"
+            type="number"
+            domain={["dataMin", "dataMax"]}
+            tick={{ fontSize: 10, fill: "#5b6b8c" }}
+            tickLine={false}
+            axisLine={false}
+            tickFormatter={(v) => tick(Number(v))}
+            minTickGap={40}
+          />
+          <YAxis
+            domain={[0, (dataMax: number) => Math.max(100, Math.ceil(dataMax))]}
+            tick={{ fontSize: 10, fill: "#5b6b8c" }}
+            tickLine={false}
+            axisLine={false}
+            tickFormatter={(v) => `${v}%`}
+          />
+          <Tooltip
+            cursor={{ stroke: "#4a86c8", strokeOpacity: 0.35 }}
+            contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }}
+            labelFormatter={(v) => fmtDayT(Number(v))}
+            formatter={(v, name) => [`${Number(v).toFixed(1)}%`, name]}
+          />
+          <Legend wrapperStyle={{ fontSize: 11 }} />
+          {area("p50", "p50", "#34d399")}
+          {area("p95", "p95", "#fbbf24")}
+          {area("p99", "p99", "#fb7185")}
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/** Capacity history card: two side-by-side percentile panels (KV budget /
+ *  request slots) over a real time axis, fed by the persisted sampler
+ *  series (server /api/stats/capacity-series or client
+ *  /local/api/capacity-series). Null percentiles leave honest gaps. */
 export function CapacityChart({ title, url, win, note }: {
   title: string;
   /** series endpoint accepting ?window= */
@@ -142,79 +218,44 @@ export function CapacityChart({ title, url, win, note }: {
   const tick = win === "1h" || win === "6h" || win === "24h" ? fmtTimeS
     : win === "all" || win === "1y" || win === "365d" ? fmtDay : fmtDayT;
   const buckets = q.data?.buckets ?? [];
-  const data = buckets.map((b) => ({
+  const data: Record<string, number | null>[] = buckets.map((b) => ({
     t: b.t * 1000,
-    kv: b.kv_budget > 0 ? +((b.kv_used / b.kv_budget) * 100).toFixed(1) : null,
-    slots: b.slots_total > 0 ? +((b.slots_active / b.slots_total) * 100).toFixed(1) : null,
+    kv_p50: b.kv_p50 ?? null,
+    kv_p95: b.kv_p95 ?? null,
+    kv_p99: b.kv_p99 ?? null,
+    slots_p50: b.slots_p50 ?? null,
+    slots_p95: b.slots_p95 ?? null,
+    slots_p99: b.slots_p99 ?? null,
   }));
-  const cur = data[data.length - 1];
   const last = buckets[buckets.length - 1];
 
   return (
     <div className="card p-4">
-      <div className="mb-2 flex items-baseline justify-between">
-        <div className="flex items-baseline gap-3">
-          <div className="text-xs font-medium uppercase tracking-wide text-muted">{title}</div>
-          <div className="flex items-center gap-3 text-[11px]">
-            {cur?.kv != null && (
-              <span className={`font-medium ${cur.kv >= 85 ? "text-rose-400" : cur.kv >= 65 ? "text-amber-300" : "text-emerald-400"}`}>
-                {cur.kv.toFixed(0)}% kv
-              </span>
-            )}
-            {cur?.slots != null && (
-              <span className={`font-medium ${cur.slots >= 85 ? "text-rose-400" : cur.slots >= 65 ? "text-amber-300" : "text-sky-400"}`}>
-                {cur.slots.toFixed(0)}% slots
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
+      <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">{title}</div>
       {data.length > 0 ? (
-        <ResponsiveContainer width="100%" height={200}>
-          <LineChart data={data} margin={{ top: 4, right: 8, bottom: 0, left: -18 }}>
-            <CartesianGrid stroke="#1c2740" vertical={false} />
-            <XAxis
-              dataKey="t"
-              type="number"
-              domain={["dataMin", "dataMax"]}
-              tick={{ fontSize: 10, fill: "#5b6b8c" }}
-              tickLine={false}
-              axisLine={false}
-              tickFormatter={(v) => tick(Number(v))}
-              minTickGap={40}
-            />
-            <YAxis
-              domain={[0, (dataMax: number) => Math.max(100, Math.ceil(dataMax))]}
-              tick={{ fontSize: 10, fill: "#5b6b8c" }}
-              tickLine={false}
-              axisLine={false}
-              tickFormatter={(v) => `${v}%`}
-            />
-            <Tooltip
-              cursor={{ stroke: "#4a86c8", strokeOpacity: 0.35 }}
-              contentStyle={{ background: "#101828", border: "1px solid #1c2740", borderRadius: 8, fontSize: 12 }}
-              labelFormatter={(v) => fmtDayT(Number(v))}
-              formatter={(v, name) => [`${Number(v).toFixed(1)}%`, name]}
-            />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
-            <Line type="monotone" dataKey="kv" name="kv budget used" stroke="#34d399" strokeWidth={2} dot={data.length < 6 ? { r: 3, fill: "#34d399", strokeWidth: 0 } : false} connectNulls={false} isAnimationActive={false} />
-            <Line type="monotone" dataKey="slots" name="request slots used" stroke="#38bdf8" strokeWidth={2} dot={data.length < 6 ? { r: 3, fill: "#38bdf8", strokeWidth: 0 } : false} connectNulls={false} isAnimationActive={false} />
-          </LineChart>
-        </ResponsiveContainer>
+        <div className="grid gap-6 md:grid-cols-2">
+          <PctPanel
+            label="kv budget used"
+            prefix="kv"
+            data={data}
+            tick={tick}
+            footer={last && last.kv_budget > 0 ? `kv ${fmtTok(last.kv_used)} / ${fmtTok(last.kv_budget)}` : "slots only"}
+          />
+          <PctPanel
+            label="request slots used"
+            prefix="slots"
+            data={data}
+            tick={tick}
+            footer={last && last.slots_total > 0 ? `slots ${last.slots_active} / ${last.slots_total}` : null}
+          />
+        </div>
       ) : (
         <div className="flex h-[200px] items-center justify-center text-[11px] text-muted">
           {q.isError ? "series unavailable" : q.isLoading ? "loading…" : "collecting samples…"}
         </div>
       )}
-      <div className="mt-1 flex items-baseline justify-between text-[10px] text-muted/70">
-        <span>{note ?? "rolling window — collected while this page is open"}</span>
-        {cur && last && (
-          <span className="font-mono">
-            {cur.kv != null && `kv ${fmtTok(last.kv_used)} / ${fmtTok(last.kv_budget)}`}
-            {cur.kv != null && cur.slots != null && " · "}
-            {cur.slots != null && `slots ${last.slots_active} / ${last.slots_total}`}
-          </span>
-        )}
+      <div className="mt-1 text-[10px] text-muted/70">
+        {note ?? "rolling window — collected while this page is open"}
       </div>
     </div>
   );

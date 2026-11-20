@@ -1380,6 +1380,18 @@ async fn admin_history(State(s): State<AppState>) -> Json<Value> {
 /// Time-bucketed local capacity series for the history chart. Window keys
 /// mirror the client UI picker; raw sums per bucket — the frontend derives
 /// percentages exactly like the live path.
+/// Continuous percentile over pre-sorted values — Postgres
+/// `percentile_cont` semantics: linear interpolation at rank p·(n−1).
+/// Empty input → None (serialises to null = an honest chart gap).
+fn pct_sorted(sorted: &[f64], p: f64) -> Option<f64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let idx = p * (sorted.len() - 1) as f64;
+    let (lo, hi) = (idx.floor() as usize, idx.ceil() as usize);
+    Some(sorted[lo] + (idx - lo as f64) * (sorted[hi] - sorted[lo]))
+}
+
 async fn admin_capacity_series(
     State(s): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -1397,27 +1409,55 @@ async fn admin_capacity_series(
     };
     let cutoff = now_ms() - span_ms;
     let bucket_ms = bucket_s * 1000;
-    let mut acc: std::collections::BTreeMap<i64, (u64, u64, u64, u64, u64)> = Default::default();
+    #[derive(Default)]
+    struct BucketAcc {
+        used: u64,
+        budget: u64,
+        slots_t: u64,
+        slots_a: u64,
+        n: u64,
+        kv_pcts: Vec<f64>,
+        slot_pcts: Vec<f64>,
+    }
+    let mut acc: std::collections::BTreeMap<i64, BucketAcc> = Default::default();
     for sm in s.cap_history.read().unwrap().iter() {
         if sm.ts < cutoff {
             continue;
         }
         let b = acc.entry(sm.ts / bucket_ms * bucket_ms).or_default();
-        b.0 += sm.used;
-        b.1 += sm.budget;
-        b.2 += sm.slots_t;
-        b.3 += sm.slots_a;
-        b.4 += 1;
+        b.used += sm.used;
+        b.budget += sm.budget;
+        b.slots_t += sm.slots_t;
+        b.slots_a += sm.slots_a;
+        b.n += 1;
+        // Same NULL rule as the server query: a tick only enters the
+        // distribution when its denominator is real capacity.
+        if sm.budget > 0 {
+            b.kv_pcts.push(100.0 * sm.used as f64 / sm.budget as f64);
+        }
+        if sm.slots_t > 0 {
+            b.slot_pcts
+                .push(100.0 * sm.slots_a as f64 / sm.slots_t as f64);
+        }
     }
     let buckets: Vec<Value> = acc
         .into_iter()
-        .map(|(t, (u, b, st, sa, n))| {
+        .map(|(t, mut a)| {
+            a.kv_pcts.sort_by(f64::total_cmp);
+            a.slot_pcts.sort_by(f64::total_cmp);
+            let n = a.n.max(1);
             json!({
                 "t": t / 1000,
-                "kv_used": u / n.max(1),
-                "kv_budget": b / n.max(1),
-                "slots_total": st / n.max(1),
-                "slots_active": sa / n.max(1),
+                "kv_used": a.used / n,
+                "kv_budget": a.budget / n,
+                "slots_total": a.slots_t / n,
+                "slots_active": a.slots_a / n,
+                "kv_p50": pct_sorted(&a.kv_pcts, 0.5),
+                "kv_p95": pct_sorted(&a.kv_pcts, 0.95),
+                "kv_p99": pct_sorted(&a.kv_pcts, 0.99),
+                "slots_p50": pct_sorted(&a.slot_pcts, 0.5),
+                "slots_p95": pct_sorted(&a.slot_pcts, 0.95),
+                "slots_p99": pct_sorted(&a.slot_pcts, 0.99),
             })
         })
         .collect();
@@ -1633,4 +1673,39 @@ async fn auth_api_key_delete(State(s): State<AppState>) -> Response {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     Json(json!({"ok": true})).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pct_sorted;
+
+    fn approx(a: Option<f64>, b: f64) -> bool {
+        a.map(|x| (x - b).abs() < 1e-9).unwrap_or(false)
+    }
+
+    #[test]
+    fn pct_sorted_empty_is_none() {
+        assert_eq!(pct_sorted(&[], 0.5), None);
+    }
+
+    #[test]
+    fn pct_sorted_single_value() {
+        let v = vec![42.0];
+        assert_eq!(pct_sorted(&v, 0.5), Some(42.0));
+        assert_eq!(pct_sorted(&v, 0.0), Some(42.0));
+        assert_eq!(pct_sorted(&v, 0.99), Some(42.0));
+    }
+
+    #[test]
+    fn pct_sorted_matches_percentile_cont() {
+        // Postgres percentile_cont(0.5) over [0,10,20,30]: rank 1.5 → 15
+        let v = vec![0.0, 10.0, 20.0, 30.0];
+        assert!(approx(pct_sorted(&v, 0.0), 0.0));
+        assert!(approx(pct_sorted(&v, 0.5), 15.0));
+        // p95: rank 2.85 → 20 + 0.85·10 = 28.5
+        assert!(approx(pct_sorted(&v, 0.95), 28.5));
+        assert!(approx(pct_sorted(&v, 1.0), 30.0));
+        // p99 over two points: rank 0.99 → 19.9
+        assert!(approx(pct_sorted(&[10.0, 20.0], 0.99), 19.9));
+    }
 }
