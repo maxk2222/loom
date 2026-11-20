@@ -12,6 +12,11 @@ pub enum ApiType {
     Multi,
     /// POST /v1/images/generations (JSON).
     Images,
+    /// POST /v1/images/edits — image edit with source image + optional mask
+    /// (multipart). Shares the `images` capability family.
+    ImagesEdit,
+    /// POST /v1/images/variations (multipart). Same `images` family.
+    ImagesVariation,
     /// POST /v1/audio/speech — text-to-speech (JSON).
     AudioSpeech,
     /// POST /v1/audio/transcriptions — speech-to-text (multipart).
@@ -30,6 +35,8 @@ impl ApiType {
             ApiType::Embeddings => "embeddings",
             ApiType::Multi => "multi",
             ApiType::Images => "images",
+            ApiType::ImagesEdit => "images_edit",
+            ApiType::ImagesVariation => "images_variation",
             ApiType::AudioSpeech => "audio_speech",
             ApiType::AudioTranscription => "audio_transcription",
             ApiType::AudioTranslation => "audio_translation",
@@ -44,6 +51,8 @@ impl ApiType {
             ApiType::Embeddings => "/v1/embeddings",
             ApiType::Multi => "/v1",
             ApiType::Images => "/v1/images/generations",
+            ApiType::ImagesEdit => "/v1/images/edits",
+            ApiType::ImagesVariation => "/v1/images/variations",
             ApiType::AudioSpeech => "/v1/audio/speech",
             ApiType::AudioTranscription => "/v1/audio/transcriptions",
             ApiType::AudioTranslation => "/v1/audio/translations",
@@ -76,8 +85,24 @@ impl ApiType {
     pub fn is_multipart(&self) -> bool {
         matches!(
             self,
-            ApiType::AudioTranscription | ApiType::AudioTranslation
+            ApiType::AudioTranscription
+                | ApiType::AudioTranslation
+                | ApiType::ImagesEdit
+                | ApiType::ImagesVariation
         )
+    }
+
+    /// Capability-family root: the api type a vm declaration / capability
+    /// flag / key scope refers to. Image edits and variations ride the same
+    /// `images` family as generations — a backend that can do one can do
+    /// all — so `images_edit` requests match a vm declared `images`, the
+    /// `caps.images` flag, and key scope `"images"`. Every other api type is
+    /// its own family.
+    pub fn family(&self) -> ApiType {
+        match self {
+            ApiType::ImagesEdit | ApiType::ImagesVariation => ApiType::Images,
+            other => *other,
+        }
     }
 }
 
@@ -96,6 +121,8 @@ impl std::str::FromStr for ApiType {
             "embeddings" => ApiType::Embeddings,
             "multi" => ApiType::Multi,
             "images" => ApiType::Images,
+            "images_edit" => ApiType::ImagesEdit,
+            "images_variation" => ApiType::ImagesVariation,
             "audio_speech" => ApiType::AudioSpeech,
             "audio_transcription" => ApiType::AudioTranscription,
             "audio_translation" => ApiType::AudioTranslation,
@@ -157,7 +184,7 @@ impl Capabilities {
             ApiType::Completions => self.completions,
             ApiType::Embeddings => self.embeddings,
             ApiType::Multi => self.chat || self.completions || self.embeddings,
-            ApiType::Images => self.images,
+            ApiType::Images | ApiType::ImagesEdit | ApiType::ImagesVariation => self.images,
             ApiType::AudioSpeech => self.audio_speech,
             ApiType::AudioTranscription => self.audio_transcription,
             ApiType::AudioTranslation => self.audio_translation,
@@ -334,9 +361,36 @@ mod tests {
         assert!(!c.supports_api(ApiType::Chat));
         assert!(c.supports_api(ApiType::Embeddings));
         assert!(c.supports_api(ApiType::Images));
+        // The whole images family rides the single `images` flag.
+        assert!(c.supports_api(ApiType::ImagesEdit));
+        assert!(c.supports_api(ApiType::ImagesVariation));
         // Multi = "serves at least one family" (legacy/union semantics).
         assert!(c.supports_api(ApiType::Multi));
         assert!(!c.supports_api(ApiType::Video));
+    }
+
+    #[test]
+    fn images_family_shares_flag_scope_and_multipart() {
+        assert_eq!(ApiType::ImagesEdit.family(), ApiType::Images);
+        assert_eq!(ApiType::ImagesVariation.family(), ApiType::Images);
+        assert_eq!(ApiType::Images.family(), ApiType::Images);
+        assert_eq!(ApiType::Chat.family(), ApiType::Chat);
+        // Both edit endpoints ride the raw multipart forward path.
+        assert!(ApiType::ImagesEdit.is_multipart());
+        assert!(ApiType::ImagesVariation.is_multipart());
+        assert!(!ApiType::Images.is_multipart());
+        // … and are never text family / unprobed-admissible.
+        for api in [ApiType::ImagesEdit, ApiType::ImagesVariation] {
+            assert!(!api.is_text_family(), "{api} must not be text family");
+            assert!(!api.admits_unprobed(), "{api} must not admit unprobed");
+        }
+        assert_eq!(ApiType::ImagesEdit.path(), "/v1/images/edits");
+        assert_eq!(ApiType::ImagesVariation.path(), "/v1/images/variations");
+        assert_eq!("images_edit".parse::<ApiType>(), Ok(ApiType::ImagesEdit));
+        assert_eq!(
+            "images_variation".parse::<ApiType>(),
+            Ok(ApiType::ImagesVariation)
+        );
     }
 }
 

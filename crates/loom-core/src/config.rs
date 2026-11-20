@@ -655,6 +655,12 @@ pub struct SchedulerConfig {
     /// prompt-estimate error against real tokenizer counts.
     #[serde(default = "default_kv_margin_pct")]
     pub kv_margin_pct: u64,
+    /// Total dispatch attempts per logical request (first try + transparent
+    /// re-dispatches) after transient post-dispatch failures — client
+    /// mid model-switch, transport drop, upstream 5xx. Only applies while
+    /// no response byte has reached the caller yet.
+    #[serde(default = "default_request_attempts")]
+    pub request_max_attempts: u32,
 }
 
 fn default_max_queue() -> usize {
@@ -684,6 +690,9 @@ fn default_kv_output_reserve() -> u64 {
 fn default_kv_margin_pct() -> u64 {
     20
 }
+fn default_request_attempts() -> u32 {
+    3
+}
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
@@ -697,6 +706,7 @@ impl Default for SchedulerConfig {
             stream_idle_timeout_secs: default_request_deadline(),
             kv_output_reserve_tokens: default_kv_output_reserve(),
             kv_margin_pct: default_kv_margin_pct(),
+            request_max_attempts: default_request_attempts(),
         }
     }
 }

@@ -36,3 +36,8 @@ pub fn lease_fp(n: f64) {
 pub fn req_tokens(n: f64) {
     histogram!("loom_request_tokens_total").record(n);
 }
+/// A logical request that needed a transparent re-dispatch after a
+/// transient post-dispatch failure (attempt > 1).
+pub fn req_retry() {
+    counter!("loom_request_retries_total").increment(1);
+}

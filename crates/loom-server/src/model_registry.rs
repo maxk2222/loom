@@ -63,7 +63,12 @@ impl VirtualModel {
     /// placeholder ('chat') — the single member's own capabilities remain
     /// the authority there.
     pub fn serves_api(&self, api: ApiType) -> bool {
-        self.kind == "direct" || self.api_type == ApiType::Multi || self.api_type == api
+        self.kind == "direct"
+            || self.api_type == ApiType::Multi
+            || self.api_type == api
+            // Family match: a vm declared `images` serves generations, edits
+            // and variations alike (same capability flag, same scope).
+            || self.api_type == api.family()
     }
 }
 
@@ -589,6 +594,27 @@ mod tests {
         v.api_type = ApiType::Chat;
         assert!(v.serves_api(ApiType::Embeddings));
         assert!(v.serves_api(ApiType::Images));
+    }
+
+    #[test]
+    fn serves_api_images_family() {
+        // A vm declared `images` serves every route in the family —
+        // generations, edits, variations share one capability/scope.
+        let mut v = vm(ApiType::Images, true, vec![]);
+        assert!(v.serves_api(ApiType::Images));
+        assert!(v.serves_api(ApiType::ImagesEdit));
+        assert!(v.serves_api(ApiType::ImagesVariation));
+        assert!(!v.serves_api(ApiType::Chat));
+        // A narrow `images_edit` vm serves only edits — the reverse family
+        // direction does not widen it.
+        v.api_type = ApiType::ImagesEdit;
+        assert!(v.serves_api(ApiType::ImagesEdit));
+        assert!(!v.serves_api(ApiType::Images));
+        assert!(!v.serves_api(ApiType::ImagesVariation));
+        // Other families stay strict.
+        v.api_type = ApiType::AudioTranscription;
+        assert!(!v.serves_api(ApiType::AudioTranslation));
+        assert!(!v.serves_api(ApiType::ImagesEdit));
     }
 }
 

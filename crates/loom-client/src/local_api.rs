@@ -217,6 +217,16 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/completions", post(openai_completions))
         .route("/v1/embeddings", post(openai_embeddings))
         .route("/v1/images/generations", post(openai_images))
+        .route(
+            "/v1/images/edits",
+            post(openai_images_edit)
+                .route_layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/images/variations",
+            post(openai_images_variation)
+                .route_layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024)),
+        )
         .route("/v1/audio/speech", post(openai_speech))
         .route(
             "/v1/audio/transcriptions",
@@ -473,6 +483,20 @@ async fn openai_translation(
     body: bytes::Bytes,
 ) -> Response {
     openai_multipart(s, headers, ApiType::AudioTranslation, body).await
+}
+async fn openai_images_edit(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    openai_multipart(s, headers, ApiType::ImagesEdit, body).await
+}
+async fn openai_images_variation(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    openai_multipart(s, headers, ApiType::ImagesVariation, body).await
 }
 
 async fn openai_models(State(s): State<AppState>) -> Json<Value> {

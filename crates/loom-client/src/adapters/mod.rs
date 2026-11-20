@@ -37,6 +37,23 @@ pub enum AdapterError {
     Io(String),
 }
 
+impl AdapterError {
+    /// Whether a request that died with this error is worth re-dispatching
+    /// on another member: transient transport failures (connect/timeout/io —
+    /// the classic "client is mid model-switch" signature) and upstream 5xx
+    /// are exactly what a fresh member heals. Protocol errors, cancellations
+    /// and 4xx are deterministic — retrying would just fail identically.
+    /// Deliberately a separate predicate from `recovery::counts_as_crash`
+    /// (breaker accounting vs. request retry) even though the sets coincide.
+    pub fn retryable(&self) -> bool {
+        match self {
+            AdapterError::Upstream { status, .. } => *status >= 500,
+            AdapterError::Connect(_) | AdapterError::Timeout | AdapterError::Io(_) => true,
+            AdapterError::Protocol(_) | AdapterError::Cancelled => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Health {
     Healthy,
@@ -610,5 +627,46 @@ pub(crate) mod common {
                 .unwrap()
                 .contains("reasoning_content"));
         }
+    }
+}
+
+#[cfg(test)]
+mod retryable_tests {
+    use super::AdapterError;
+
+    #[test]
+    fn retryable_classification() {
+        // Transient transport + upstream 5xx: a fresh member can heal.
+        assert!(AdapterError::Connect("refused".into()).retryable());
+        assert!(AdapterError::Timeout.retryable());
+        assert!(AdapterError::Io("reset".into()).retryable());
+        assert!(AdapterError::Upstream {
+            status: 503,
+            message: "loading".into()
+        }
+        .retryable());
+        assert!(AdapterError::Upstream {
+            status: 500,
+            message: String::new()
+        }
+        .retryable());
+        // Deterministic failures: retrying fails identically.
+        assert!(!AdapterError::Protocol("bad json".into()).retryable());
+        assert!(!AdapterError::Cancelled.retryable());
+        assert!(!AdapterError::Upstream {
+            status: 400,
+            message: "invalid".into()
+        }
+        .retryable());
+        assert!(!AdapterError::Upstream {
+            status: 404,
+            message: "no model".into()
+        }
+        .retryable());
+        assert!(!AdapterError::Upstream {
+            status: 429,
+            message: "slow down".into()
+        }
+        .retryable());
     }
 }

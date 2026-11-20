@@ -238,6 +238,7 @@ async fn classify(
         deadline_ts: now + deadline_ms.min(10_000), // router calls stay cheap
         sticky: String::new(),                      // engine calls never take the affinity slot
         footprint_tokens: footprint,
+        exclude_deps: Vec::new(),
     };
     let out = sched.submit(pending).await.map_err(sched_msg)?;
     let mut rx = out.response_rx;

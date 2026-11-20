@@ -1394,16 +1394,18 @@ async fn run_request(
     };
     let mut inbound_ref = inbound.as_mut();
     let result = async {
-        let inbound = inbound_ref.as_mut().ok_or("open data stream")?;
+        let inbound = inbound_ref
+            .as_mut()
+            .ok_or(("open data stream".to_string(), true))?;
 
         // Assemble request payload from request_json frames.
         let mut payload = Vec::with_capacity(a.payload_bytes as usize);
         let payload_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         while (payload.len() as u32) < a.payload_bytes {
             let next = tokio::select! {
-                _ = cancel.cancelled() => return Err("cancelled".to_string()),
+                _ = cancel.cancelled() => return Err(("cancelled".to_string(), false)),
                 _ = tokio::time::sleep_until(payload_deadline) => {
-                    return Err("payload timeout".to_string())
+                    return Err(("payload timeout".to_string(), true))
                 }
                 v = inbound.next() => v,
             };
@@ -1413,14 +1415,14 @@ async fn run_request(
                 })) => payload.extend_from_slice(&chunk),
                 Some(Ok(DataFrame {
                     frame: Some(data_frame::Frame::Error(e)),
-                })) => return Err(format!("server error: {}", e.code)),
+                })) => return Err((format!("server error: {}", e.code), e.retryable)),
                 Some(Ok(_)) => continue,
-                Some(Err(e)) => return Err(format!("stream error: {e}")),
-                None => return Err("payload stream closed early".to_string()),
+                Some(Err(e)) => return Err((format!("stream error: {e}"), true)),
+                None => return Err(("payload stream closed early".to_string(), true)),
             }
         }
         if payload.is_empty() {
-            return Err("empty request payload".to_string());
+            return Err(("empty request payload".to_string(), false));
         }
 
         // Unknown api types are rejected — routing them as chat would send a
@@ -1429,7 +1431,7 @@ async fn run_request(
         let api: ApiType = a
             .api_type
             .parse()
-            .map_err(|_| format!("unknown api type '{}'", a.api_type))?;
+            .map_err(|_| (format!("unknown api type '{}'", a.api_type), false))?;
 
         // Multipart bodies (audio transcription/translation) skip JSON
         // parsing and go through the raw verbatim forward path.
@@ -1444,15 +1446,15 @@ async fn run_request(
                     cancel.clone(),
                 )
                 .await
-                .map_err(|e| format!("upstream: {e}"))?
+                .map_err(|e| (format!("upstream: {e}"), e.retryable()))?
         } else {
-            let body: serde_json::Value =
-                serde_json::from_slice(&payload).map_err(|e| format!("bad payload json: {e}"))?;
+            let body: serde_json::Value = serde_json::from_slice(&payload)
+                .map_err(|e| (format!("bad payload json: {e}"), false))?;
             state
                 .backends
                 .forward(&a.deployment_id, api, body, cancel.clone())
                 .await
-                .map_err(|e| format!("upstream: {e}"))?
+                .map_err(|e| (format!("upstream: {e}"), e.retryable()))?
         };
 
         let upstream_status = u32::from(resp.status);
@@ -1473,7 +1475,7 @@ async fn run_request(
                     // Terminal frame: fire-and-forget. A stopped server must
                     // never wedge the send — cleanup below has to run.
                     let _ = data_tx.try_send(frames::end(true, "cancelled", upstream_status));
-                    return Err("cancelled".to_string());
+                    return Err(("cancelled".to_string(), false));
                 }
                 v = stream.next() => v,
             };
@@ -1511,17 +1513,26 @@ async fn run_request(
                     let sent = tokio::select! {
                         _ = cancel.cancelled() => {
                             let _ = data_tx.try_send(frames::end(true, "cancelled", upstream_status));
-                            return Err("cancelled".to_string());
+                            return Err(("cancelled".to_string(), false));
                         }
                         r = &mut send => r,
                     };
                     if sent.is_err() {
-                        return Err("data stream closed".to_string());
+                        return Err(("data stream closed".to_string(), true));
                     }
                 }
                 Some(Err(e)) => {
                     // Mid-generation crash — counts toward the breaker just
-                    // like a failed forward() call.
+                    // like a failed forward() call. Signal the failure over
+                    // the data stream too (with the retryable verdict): the
+                    // server gateway can then transparently re-dispatch the
+                    // request on another member instead of only seeing a
+                    // silently truncated stream.
+                    let _ = data_tx.try_send(frames::error(
+                        "upstream_error",
+                        &e.to_string(),
+                        e.retryable(),
+                    ));
                     state.backends.record_failure(&a.deployment_id, &e);
                     upstream_err = Some(e.to_string());
                     break;
@@ -1531,7 +1542,9 @@ async fn run_request(
         }
 
         // A wedged backend can answer 200 with zero tokens and no content —
-        // count that zombie response as a crash so the breaker still trips.
+        // count that zombie response as a crash so the breaker still trips,
+        // and signal it as retryable so the gateway re-dispatches the
+        // request instead of returning 200 with an empty body.
         if upstream_err.is_none() && !cancel.is_cancelled() {
             if let Some(e) = empty_generation_failure(
                 api.is_text_family(),
@@ -1539,6 +1552,11 @@ async fn run_request(
                 saw_output,
                 &usage,
             ) {
+                let _ = data_tx.try_send(frames::error(
+                    "empty_generation",
+                    &e.to_string(),
+                    e.retryable(),
+                ));
                 state.backends.record_failure(&a.deployment_id, &e);
                 upstream_err = Some(e.to_string());
             }
@@ -1568,25 +1586,25 @@ async fn run_request(
             &finish_reason,
             upstream_status,
         ));
-        Ok::<_, String>((status.to_string(), upstream_err, usage, ttft_ms, ttfrt_ms))
+        Ok::<_, (String, bool)>((status.to_string(), upstream_err, usage, ttft_ms, ttfrt_ms))
     }
     .await;
 
     let (status, err, usage, ttft_ms, ttfrt_ms) = match result {
         Ok(v) => v,
-        Err(e) => {
-            if e != "cancelled" {
-                warn!(req = %request_id, error = %e, "tier2 request failed");
-                let _ = data_tx.try_send(frames::error("upstream_error", &e, false));
+        Err((msg, retryable)) => {
+            if msg != "cancelled" {
+                warn!(req = %request_id, error = %msg, "tier2 request failed");
+                let _ = data_tx.try_send(frames::error("upstream_error", &msg, retryable));
             }
             (
-                if e == "cancelled" {
+                if msg == "cancelled" {
                     "cancelled"
                 } else {
                     "failed"
                 }
                 .to_string(),
-                Some(e),
+                Some(msg),
                 loom_core::openai::Usage::default(),
                 0,
                 0,

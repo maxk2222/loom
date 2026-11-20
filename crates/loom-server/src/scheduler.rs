@@ -52,6 +52,11 @@ pub enum SchedErr {
     ApiTypeMismatch,
     #[error("backend: {0}")]
     Backend(String),
+    /// Transient post-dispatch failure (transport drop, client-reported
+    /// retryable upstream error): the gateway may re-dispatch the request
+    /// on another member while no response byte has been committed yet.
+    #[error("retryable backend failure: {0}")]
+    Retryable(String),
 }
 
 #[derive(Debug)]
@@ -74,6 +79,11 @@ pub struct PendingRequest {
     /// Reserved KV tokens for budget admission (0 = non-LLM api / unset).
     /// Computed once in the gateway; travels through queue/requeue unchanged.
     pub footprint_tokens: u64,
+    /// Members that already failed this logical request with a transient
+    /// post-dispatch error — the gateway's attempt loop accumulates them so
+    /// a retry prefers a fresh member. Never allowed to empty the ranked
+    /// set: a single-member vm still retries on its only member.
+    pub exclude_deps: Vec<String>,
 }
 
 pub struct RequestOutcome {
@@ -192,6 +202,12 @@ impl Scheduler {
     /// `0..classes-1`; class 0 is the highest (popped first).
     pub fn priority_classes(&self) -> u32 {
         self.inner.cfg.priority_classes.max(1)
+    }
+
+    /// Total dispatch attempts per logical request on transient
+    /// post-dispatch failures (≥1 — 1 disables transparent retries).
+    pub fn request_max_attempts(&self) -> u32 {
+        self.inner.cfg.request_max_attempts.max(1)
     }
 
     /// Queue depth per class (`0..classes-1`, index 0 = highest). For the
@@ -950,6 +966,17 @@ impl Scheduler {
         };
         let mut trace = decision.trace;
         let mut ranked = decision.ranked;
+        // Post-dispatch retry exclusions: members that already failed this
+        // logical request are skipped — but only while at least one
+        // non-excluded candidate remains, so a single-member vm retries on
+        // its (possibly recovering) member instead of starving.
+        if !req.exclude_deps.is_empty()
+            && ranked
+                .iter()
+                .any(|m| !req.exclude_deps.contains(&m.deployment_id))
+        {
+            ranked.retain(|m| !req.exclude_deps.contains(&m.deployment_id));
+        }
         // KV-cache affinity: a caller-supplied `user` key picks one member
         // deterministically while the set is stable — the hash target is
         // rotated to the front, all other candidates remain as fallbacks.
@@ -1241,7 +1268,7 @@ impl Scheduler {
                         };
                         if sent.is_err() {
                             let _ = resp_tx
-                                .send(Err(SchedErr::Backend("data stream closed".into())))
+                                .send(Err(SchedErr::Retryable("data stream closed".into())))
                                 .await;
                             end_status = "failed";
                             end_error = "data_stream_closed".into();
@@ -1318,9 +1345,12 @@ impl Scheduler {
                             Some(Ok(loom_protocol::pb::DataFrame {
                                 frame: Some(loom_protocol::pb::data_frame::Frame::Error(e)),
                             })) => {
-                                let _ = resp_tx
-                                    .send(Err(SchedErr::Backend(e.message.clone())))
-                                    .await;
+                                let err = if e.retryable {
+                                    SchedErr::Retryable(e.message.clone())
+                                } else {
+                                    SchedErr::Backend(e.message.clone())
+                                };
+                                let _ = resp_tx.send(Err(err)).await;
                                 end_status = "failed";
                                 end_error = "backend".into();
                                 break;
@@ -1338,7 +1368,10 @@ impl Scheduler {
                             }
                             Some(Ok(_)) => continue,
                             Some(Err(e)) => {
-                                let _ = resp_tx.send(Err(SchedErr::Backend(e.to_string()))).await;
+                                // Transport-level inbound failure — the
+                                // client/session died mid-request; another
+                                // member may serve the retry.
+                                let _ = resp_tx.send(Err(SchedErr::Retryable(e.to_string()))).await;
                                 end_status = "failed";
                                 end_error = "data_stream".into();
                                 break;

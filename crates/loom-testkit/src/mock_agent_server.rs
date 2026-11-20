@@ -411,7 +411,7 @@ impl Agent for MockAgentServer {
                         frame: Some(data_frame::Frame::Error(e)),
                     }) => {
                         if let Some(done) = p.done_tx.take() {
-                            let _ = done.send(format!("error:{}", e.code));
+                            let _ = done.send(format!("error:{}:{}", e.code, e.retryable));
                         }
                         break;
                     }

@@ -247,10 +247,14 @@ installed models, the actually-*loaded* set. A deployment whose model was
 evicted stops `accepting` immediately and `auto_load` deployments re-warm
 in the background (backoff on repeated evictions).
 
-**Media endpoints**: `/v1/images/generations`, `/v1/audio/speech`,
-`/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/videos` — gated
-by explicit per-deployment capability flags, same grants/scopes/limits as
-chat.
+**Media endpoints**: `/v1/images/generations`, `/v1/images/edits`,
+`/v1/images/variations`, `/v1/audio/speech`, `/v1/audio/transcriptions`,
+`/v1/audio/translations`, `/v1/videos` — gated by explicit per-deployment
+capability flags, same grants/scopes/limits as chat. The three image routes
+share one `images` capability family: a deployment flag `images`, a
+typed `images` virtual model, and key scope `"images"` cover generations,
+edits and variations alike (edits/variations ride the raw multipart
+forward path like audio uploads).
 
 **Omni virtual models** (`api_type='multi'`): one model name serves every
 endpoint family. Members bundle heterogeneous backends — a chat
@@ -274,8 +278,15 @@ what *every* member family must satisfy.
 - *Busy* members wait out the request deadline; *unreachable* members
   (offline) fail fast — `draining` counts as busy since pressure-gated
   members typically return
-- At most 2 candidate retries before stream start; none after (a replayed
-  stream would duplicate already-delivered tokens)
+- Transient post-dispatch failures (client mid model-switch, transport
+  drop, upstream 5xx, zombie "empty generation") transparently re-dispatch
+  on a freshly ranked member — `scheduler.request_max_attempts` (default 3)
+  total attempts, preferring members that have not failed this request yet.
+  Retries only happen while no response byte has reached the caller:
+  buffered APIs may retry until the body completes, SSE only before the
+  first chunk — a replayed stream would duplicate already delivered
+  tokens. Each attempt keeps its own history row (`routing_trace.attempt`,
+  `parent_request_id`).
 
 ### Security
 

@@ -59,6 +59,7 @@ fn make_cfg(server_url: &str, backend_url: &str, tiers: u32) -> ClientConfig {
 struct Rig {
     server: Arc<MockAgentServer>,
     _server_h: tokio::task::JoinHandle<()>,
+    backend: MockBackend,
     _backend_h: tokio::task::JoinHandle<()>,
     connector: Connector,
     sched: LocalScheduler,
@@ -69,7 +70,7 @@ async fn start_rig(tier2: u32) -> Rig {
     let server = Arc::new(MockAgentServer::new());
     server.accept_credential("dev-testcred").await;
     let (addr, server_h) = (*server).clone().spawn().await;
-    let (backend_url, _mb, backend_h) = MockBackend::spawn("mock-llama").await;
+    let (backend_url, backend, backend_h) = MockBackend::spawn("mock-llama").await;
 
     let mut cfg = make_cfg(&addr, &backend_url, tier2);
     cfg.client_id = "test-client".into();
@@ -106,6 +107,7 @@ async fn start_rig(tier2: u32) -> Rig {
     Rig {
         server,
         _server_h: server_h,
+        backend,
         _backend_h: backend_h,
         connector,
         sched,
@@ -227,4 +229,61 @@ async fn e2e_cancel_propagates() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     // subsequent assign should still work (slot freed)
     let _ = rig.connector.abort_request(&req.request_id);
+}
+
+#[tokio::test]
+async fn e2e_zombie_generation_flags_retryable() {
+    // A backend answering 200 with zero streamed tokens is a wedged
+    // "empty generation" — the client must signal retryable=true on the
+    // data stream so the gateway can transparently re-dispatch the request
+    // on another member instead of returning 200 with an empty body.
+    let rig = start_rig(2).await;
+    rig.backend
+        .set_behavior(loom_testkit::mock_backend::MockBehavior {
+            stream_chunks: 0,
+            ..Default::default()
+        });
+    let req = rig
+        .server
+        .assign(
+            "dep-a",
+            "chat",
+            serde_json::to_vec(&serde_json::json!({
+                "model": "mock-llama",
+                "messages": [{"role":"user","content":"hi"}],
+                "stream": true
+            }))
+            .unwrap(),
+            "vm-test",
+        )
+        .await
+        .expect("assign failed")
+        .await
+        .expect("no assignment");
+    let done = tokio::time::timeout(Duration::from_secs(10), req.done_rx)
+        .await
+        .expect("request never finished")
+        .expect("done channel dropped");
+    assert_eq!(
+        done, "error:empty_generation:true",
+        "zombie generation must flag retryable on the wire"
+    );
+    // … and the control stream must still report the failed end.
+    let saw_failed_end = wait_until(
+        || async {
+            rig.server
+                .captured()
+                .await
+                .iter()
+                .any(|c| c.starts_with("end:") && c.ends_with(":failed"))
+        },
+        Duration::from_secs(10),
+        Duration::from_millis(50),
+    )
+    .await;
+    assert!(
+        saw_failed_end,
+        "expected failed RequestEnd, got {:?}",
+        rig.server.captured().await
+    );
 }
