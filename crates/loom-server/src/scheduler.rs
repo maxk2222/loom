@@ -1362,6 +1362,11 @@ impl Scheduler {
                                     .store(e.upstream_status, std::sync::atomic::Ordering::Relaxed);
                                 if e.cancelled {
                                     end_status = "cancelled";
+                                    // A client-side cancel is deliberate
+                                    // (admin abort / server cancel msg) —
+                                    // surface it as such so the gateway
+                                    // does not retry an aborted request.
+                                    let _ = resp_tx.send(Err(SchedErr::Cancelled)).await;
                                 }
                                 tracing::debug!(req = %rid_for_release, "end frame");
                                 break;
