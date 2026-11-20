@@ -13,6 +13,13 @@ const API_ENDPOINTS = [
   { m: "POST", p: "/v1/chat/completions", d: "chat · stream · tools · vision" },
   { m: "POST", p: "/v1/completions", d: "legacy completions" },
   { m: "POST", p: "/v1/embeddings", d: "embeddings" },
+  { m: "POST", p: "/v1/images/generations", d: "image gen" },
+  { m: "POST", p: "/v1/images/edits", d: "image edit (multipart)" },
+  { m: "POST", p: "/v1/images/variations", d: "image variations" },
+  { m: "POST", p: "/v1/audio/speech", d: "tts" },
+  { m: "POST", p: "/v1/audio/transcriptions", d: "stt (multipart)" },
+  { m: "POST", p: "/v1/audio/translations", d: "translate (multipart)" },
+  { m: "POST", p: "/v1/videos", d: "video gen" },
   { m: "GET", p: "/v1/models", d: "OpenAI model list" },
 ];
 
